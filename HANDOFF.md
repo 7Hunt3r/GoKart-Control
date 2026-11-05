@@ -15,6 +15,8 @@ passed without reboot. [Evidence](hardware/heltec/2026-11-05-rate-update/README.
 The current 0.2.3 image powers the small OLED and shows live VESC/GPS/radio
 status at 2 Hz. Its startup and telemetry checks are recorded in the
 [OLED follow-up](hardware/heltec/2026-11-05-oled-enable/README.md).
+The owner has now [confirmed visible live text](hardware/heltec/2026-11-05-oled-enable/OWNER_CONFIRMATION.md)
+on the small OLED.
 GPS NMEA is received but no outdoor fix is verified. Actual receipt of kart 1 at
 Eamon's base remains unconfirmed. No VESC configuration/firmware was written.
 
