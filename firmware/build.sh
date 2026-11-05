@@ -1,9 +1,9 @@
 #!/bin/bash
 # Build / flash the GoKart Control firmware with arduino-cli.
 #
-#   ./build.sh kart                      compile kart-heltec-v4
+#   ./build.sh kart                      compile kart-heltec-v4 (VESC over BLE, fleet default)
 #   ./build.sh base                      compile base-tbeam-s3
-#   ./build.sh kart-ble                  compile the kart with the BLE VESC transport instead of UART
+#   ./build.sh kart-uart                 compile the kart with the wired UART VESC transport instead
 #   ./build.sh kart upload /dev/cu.usbmodemXXXX
 #   ./build.sh base upload /dev/cu.usbmodemXXXX
 #   ./build.sh kart ota gokart-1.local [password]      ArduinoOTA over WiFi (board must be on WiFi; see README)
@@ -13,10 +13,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 TARGET="${1:-kart}"; ACTION="${2:-compile}"; PORT="${3:-}"; OTAPW="${4:-}"; EXTRA=""; BUILD_SUFFIX=""
 case "$TARGET" in
-  kart)     SKETCH=kart-heltec-v4; FQBN="esp32:esp32:heltec_wifi_lora_32_V4:CDCOnBoot=cdc,PSRAM=disabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB" ;;
-  kart-ble) SKETCH=kart-heltec-v4; FQBN="esp32:esp32:heltec_wifi_lora_32_V4:CDCOnBoot=cdc,PSRAM=disabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB"; EXTRA="--build-property compiler.cpp.extra_flags=-DVESC_TRANSPORT_UART=0"; BUILD_SUFFIX="-ble" ;;
+  kart)      SKETCH=kart-heltec-v4; FQBN="esp32:esp32:heltec_wifi_lora_32_V4:CDCOnBoot=cdc,PSRAM=disabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB" ;;
+  kart-uart) SKETCH=kart-heltec-v4; FQBN="esp32:esp32:heltec_wifi_lora_32_V4:CDCOnBoot=cdc,PSRAM=disabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB"; EXTRA="--build-property compiler.cpp.extra_flags=-DVESC_TRANSPORT_UART=1"; BUILD_SUFFIX="-uart" ;;
   base) SKETCH=base-tbeam-s3;  FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=default_8MB,PSRAM=disabled,FlashMode=qio,USBMode=hwcdc" ;;
-  *) echo "target must be kart, kart-ble or base"; exit 2 ;;
+  *) echo "target must be kart, kart-uart or base"; exit 2 ;;
 esac
 BUILD="build/$SKETCH$BUILD_SUFFIX"
 mkdir -p "$BUILD"

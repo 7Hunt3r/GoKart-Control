@@ -99,7 +99,11 @@ BLEStream bleStream;
 NimBLEClient* pClient = nullptr;
 NimBLERemoteCharacteristic *pTxChar = nullptr, *pRxChar = nullptr;
 volatile bool bleConnected = false;
-uint32_t bleRetryMs = 0;
+volatile bool bleScanning = false;
+uint32_t bleScanMs = 0, bleConnectedMs = 0;
+struct BleCand { NimBLEAddress addr; int rssi; uint32_t seenMs; };
+BleCand bleCands[6]; int bleCandN = 0;
+bool bleWantConnect = false; NimBLEAddress bleTarget;
 static const char* NUS_SERVICE = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 static const char* NUS_TX      = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
 static const char* NUS_RX      = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -304,43 +308,78 @@ static void onNotify(NimBLERemoteCharacteristic*, uint8_t* d, size_t n, bool) { 
 class ClientCB : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*, int reason) override { bleConnected = false; }
 };
-static bool bleTryConnect() {
-  NimBLEAddress target;
-  bool haveTarget = false;
-  if (vescMac.length() >= 17) { target = NimBLEAddress(std::string(vescMac.c_str()), BLE_ADDR_PUBLIC); haveTarget = true; }
-  else {
-    NimBLEScan* scan = NimBLEDevice::getScan();
-    scan->setActiveScan(true); scan->setInterval(100); scan->setWindow(99);
-    NimBLEScanResults results = scan->getResults(1500, false);
-    int matches = 0;
-    for (int i = 0; i < results.getCount(); i++) {
-      const NimBLEAdvertisedDevice* d = results.getDevice(i);
-      if (d->getName() == VESC_BLE_NAME) { matches++; target = d->getAddress(); logf("ble candidate %s rssi %d", d->getAddress().toString().c_str(), d->getRSSI()); }
-    }
-    scan->clearResults();
-    if (matches != 1) { if (matches > 1) logf("ble: %d VESCs in range, set vescmac", matches); return false; }
-    haveTarget = true;
+static bool sameMac(const NimBLEAddress& a, const String& macStr) {
+  String x = String(a.toString().c_str()); x.toLowerCase(); String y = macStr; y.toLowerCase(); y.trim();
+  return x == y;
+}
+class ScanCB : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* d) override {
+    if (d->getName() != VESC_BLE_NAME) return;
+    for (int i = 0; i < bleCandN; i++) if (bleCands[i].addr == d->getAddress()) { bleCands[i].rssi = d->getRSSI(); bleCands[i].seenMs = millis(); return; }
+    if (bleCandN < 6) { bleCands[bleCandN].addr = d->getAddress(); bleCands[bleCandN].rssi = d->getRSSI(); bleCands[bleCandN].seenMs = millis(); bleCandN++; }
   }
-  if (!haveTarget) return false;
-  if (!pClient) { pClient = NimBLEDevice::createClient(); pClient->setClientCallbacks(new ClientCB(), false); pClient->setConnectionParams(12, 12, 0, 200); pClient->setConnectTimeout(3000); }
-  if (!pClient->connect(target)) return false;
+  void onScanEnd(const NimBLEScanResults&, int) override { bleScanning = false; }
+};
+static ScanCB scanCB;
+static void bleReport() {
+  Serial.printf("{\"t\":\"ble\",\"kart\":%u,\"pinned\":\"%s\",\"connected\":%s,\"candidates\":[", kartId, vescMac.c_str(), gkBool(bleConnected));
+  for (int i = 0; i < bleCandN; i++) Serial.printf("%s{\"addr\":\"%s\",\"rssi\":%d,\"age_s\":%lu}", i ? "," : "", bleCands[i].addr.toString().c_str(), bleCands[i].rssi, (unsigned long)((millis() - bleCands[i].seenMs) / 1000));
+  Serial.println("]}");
+}
+static void bleStartScan() {
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&scanCB, false);
+  scan->setActiveScan(true); scan->setInterval(100); scan->setWindow(60);
+  scan->setDuplicateFilter(false);
+  bleCandN = 0;
+  bleScanning = scan->start(BLE_SCAN_MS, false, true);
+  bleScanMs = millis();
+}
+static bool bleConnectTo(const NimBLEAddress& target) {
+  if (!pClient) { pClient = NimBLEDevice::createClient(); pClient->setClientCallbacks(new ClientCB(), false); pClient->setConnectionParams(12, 12, 0, 200); pClient->setConnectTimeout(4000); }
+  if (!pClient->connect(target)) { logf("ble connect failed %s", target.toString().c_str()); return false; }
   NimBLERemoteService* svc = pClient->getService(NUS_SERVICE);
-  if (!svc) { pClient->disconnect(); return false; }
+  if (!svc) { pClient->disconnect(); logf("ble: no NUS service"); return false; }
   pTxChar = svc->getCharacteristic(NUS_TX);
   pRxChar = svc->getCharacteristic(NUS_RX);
-  if (!pTxChar || !pRxChar) { pClient->disconnect(); return false; }
+  if (!pTxChar || !pRxChar) { pClient->disconnect(); logf("ble: NUS characteristics missing"); return false; }
   if (pRxChar->canNotify()) pRxChar->subscribe(true, onNotify);
   bleStream.clear(); bleStream.setTx(pTxChar);
   vesc.setPort(&bleStream);
+  bleConnected = true; bleConnectedMs = millis();
   logf("ble connected %s", target.toString().c_str());
   return true;
+}
+static void bleService() {
+  if (bleConnected) return;
+  uint32_t now = millis();
+  if (bleScanning) return;
+  // A scan just finished (or never ran): decide.
+  if (bleScanMs && now - bleScanMs < BLE_SCAN_EVERY_MS) {
+    if (bleWantConnect) {
+      bleWantConnect = false;
+      if (!bleConnectTo(bleTarget)) vesc.markLinkLost();
+    }
+    return;
+  }
+  if (bleScanMs) {                                   // previous scan results are in: report and pick
+    bleReport();
+    if (vescMac.length() >= 17) {
+      for (int i = 0; i < bleCandN; i++) if (sameMac(bleCands[i].addr, vescMac)) { bleTarget = bleCands[i].addr; bleWantConnect = true; break; }
+      if (!bleWantConnect && bleCandN) logf("ble: pinned VESC %s not seen (%d other VESC in range)", vescMac.c_str(), bleCandN);
+    } else if (bleCandN) {
+      logf("ble: %d VESC in range, not connecting until pinned with vescmac", bleCandN);
+    }
+    if (bleWantConnect) { if (!bleConnectTo(bleTarget)) vesc.markLinkLost(); bleWantConnect = false; return; }
+  }
+  bleStartScan();
 }
 #endif
 
 static void serviceVesc() {
 #if !VESC_TRANSPORT_UART
-  if (!bleConnected && millis() - bleRetryMs > 5000) { bleRetryMs = millis(); bleConnected = bleTryConnect(); if (!bleConnected) vesc.markLinkLost(); }
-  if (!bleConnected) { vescLinkWas = false; return; }
+  bleService();
+  if (!bleConnected) { if (vescLinkWas) { vescLinkWas = false; modeConfirmed = false; logf("vesc link lost"); } return; }
 #endif
   vesc.poll();
   uint32_t now = millis();
@@ -503,9 +542,18 @@ static void usbCommand(char* line) {
     logf("wifi credentials stored for '%s'; reboot to apply", arg);
   }
   else if (!strcmp(line, "otapw") && arg) { prefs.putString("otapw", arg); logf("ota password stored; reboot to apply"); }
-  else if (!strcmp(line, "vescmac") && arg) { prefs.putString("vescmac", arg); vescMac = arg; logf("vesc address stored"); }
+  else if (!strcmp(line, "vescmac") && arg) {
+    if (!strcmp(arg, "clear")) { prefs.remove("vescmac"); vescMac = ""; logf("vesc address cleared"); }
+    else { prefs.putString("vescmac", arg); vescMac = arg; logf("vesc address pinned to %s", arg); }
+#if !VESC_TRANSPORT_UART
+    if (bleConnected && pClient) pClient->disconnect();
+#endif
+  }
+#if !VESC_TRANSPORT_UART
+  else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
+#endif
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -533,7 +581,13 @@ static void serviceOled() {
   else if (!writesEnabled()) oled.drawStr(100, 9, "RO");
   const VescValues& v = vesc.values();
   if (vescUp()) snprintf(l, sizeof l, "VESC %.1fV %.0fA %.0fC%s", v.inputVoltage, v.inputCurrent, v.tempMosfet, v.faultCode ? " F" : "");
+#if !VESC_TRANSPORT_UART
+  else if (bleConnected) snprintf(l, sizeof l, "VESC ble up, no data");
+  else if (vescMac.length() < 17) snprintf(l, sizeof l, "BLE %d VESC seen, pin!", bleCandN);
+  else snprintf(l, sizeof l, "BLE %s %s", bleScanning ? "scan" : "wait", vescMac.substring(9).c_str());
+#else
   else snprintf(l, sizeof l, "VESC -- no link");
+#endif
   oled.drawStr(0, 20, l);
   bool fix = lastFixMs && (millis() - lastFixMs) < 3000;
   snprintf(l, sizeof l, "GPS %s%u sat %.0fmph%s", gpsLocked ? "" : "?", gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0, fix ? gps.speed.mph() : 0.0, ppsFresh() ? " P" : "");

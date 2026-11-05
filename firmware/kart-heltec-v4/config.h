@@ -16,14 +16,17 @@
 #endif
 
 // ---- VESC transport --------------------------------------------------------
+// 0 = BLE client to the VESC's Nordic-UART module (fleet default, owner decision 2026-11-05).
+//     The kart connects ONLY to the VESC address pinned with the USB command
+//     "vescmac AA:BB:CC:DD:EE:FF". Unpinned, it scans, reports every "VESC BLE UART" it
+//     sees (address + RSSI) over USB and on the OLED, and does not connect. Eight karts
+//     in one paddock make name-based selection unsafe (docs/architecture.md).
 // 1 = wired UART: VESC COMM port TX -> VESC_UART_RX_PIN, RX <- VESC_UART_TX_PIN, GND-GND.
-//     (The VESC's BLE module currently occupies that port; it comes off.)
-// 0 = BLE client to the VESC's Nordic-UART module, ported from the Core2 dashboard.
-//     Set the target address with USB command "vescmac AA:BB:CC:DD:EE:FF"; without it
-//     the kart only connects when exactly ONE "VESC BLE UART" is in range.
 #ifndef VESC_TRANSPORT_UART
-#define VESC_TRANSPORT_UART 1
+#define VESC_TRANSPORT_UART 0
 #endif
+#define BLE_SCAN_MS        2500   // scan window while disconnected
+#define BLE_SCAN_EVERY_MS  6000
 #define VESC_UART_RX_PIN   48        // free GPIO on header J2 pin 14
 #define VESC_UART_TX_PIN   47        // free GPIO on header J2 pin 13
 #define VESC_UART_BAUD     115200    // matches app_uart_baudrate in the baseline capture

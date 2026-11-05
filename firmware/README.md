@@ -24,8 +24,8 @@ NimBLE-Arduino 2.x (BLE variant only).
 
 ```sh
 cd firmware
-./build.sh kart                                   # compile kart (wired UART to the VESC)
-./build.sh kart-ble                               # compile kart with the BLE transport
+./build.sh kart                                   # compile kart (VESC over BLE, fleet default)
+./build.sh kart-uart                              # compile kart with the wired UART transport
 ./build.sh base                                   # compile base station
 ./build.sh base upload /dev/cu.usbmodemXXXX       # flash over USB
 ./build.sh kart ota gokart-1.local [otapassword]  # ArduinoOTA once the board is on WiFi
@@ -46,8 +46,8 @@ arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.8
 arduino-cli lib install RadioLib TinyGPSPlus U8g2 XPowersLib ArduinoJson NimBLE-Arduino
 git clone -b eamon/firmware-lora-starter git@github.com:colinfost3r/GoKart-Control.git
 cd GoKart-Control/firmware
-./build.sh kart-ble                           # Heltec V4.3, VESC over BLE
-./build.sh kart-ble upload /dev/cu.usbmodemXXXX
+./build.sh kart                               # Heltec V4.3, VESC over BLE
+./build.sh kart upload /dev/cu.usbmodemXXXX
 ```
 
 The board's native USB resets into the bootloader on its own when it is running an
@@ -72,7 +72,8 @@ is the intended place for this; it is not needed on the track.
 
 | Signal | Heltec pin | Notes |
 | --- | --- | --- |
-| VESC UART | GPIO48 = RX (from VESC TX), GPIO47 = TX (to VESC RX), GND | 3.3 V logic, 115200 baud (`app_uart_baudrate` in the baseline). The VESC COMM port is currently used by its BLE module; that module comes off. **Proposed wiring, not an approved change** per Colin's architecture note; the BLE build exists for the alternative. |
+| VESC BLE (default) | none | Connects only to the address pinned with `vescmac AA:BB:CC:DD:EE:FF`. Unpinned: `blescan` lists every `VESC BLE UART` in range with RSSI. A VESC already connected to another device does not advertise. |
+| VESC UART (`kart-uart` build) | GPIO48 = RX (from VESC TX), GPIO47 = TX (to VESC RX), GND | 3.3 V logic, 115200 baud (`app_uart_baudrate` in the baseline). The VESC COMM port is currently used by its BLE module; that module comes off. **Proposed wiring, not an approved change** per Colin's architecture note; the BLE build exists for the alternative. |
 | GPS | Heltec GNSS connector, L76K add-on | Power GPIO34 (active low), reset 42, wake 40, PPS 41, UART on 38/39. The firmware auto-detects 9600/38400/115200 and a swapped TX/RX. |
 | LoRa | on-board SX1262 + KCT8103L front end | Front-end power GPIO7, enable GPIO2, TX/RX select GPIO5, DIO2 drives the amplifier's mode pin. From the V4.3 schematic and Meshtastic's heltec_v4 variant. |
 | OLED | on-board | Vext GPIO36 active low. |
@@ -145,6 +146,10 @@ before anything is trusted:
   the temp-limit payload layout matches bldc `release_6_00` `comm/commands.c`
   (battery limits optional, read only when present); command ids 4/14/48 match
   the 6.00 enum; mcconf offsets computed from the pinned schema.
+- Verified on hardware (2026-11-05, Eamon's Heltec V4.3, kart id 2): both kart builds boot;
+  LoRa transmit received by the T-Beam at 1 Hz with zero loss on the bench; GPS detected at
+  9600 baud; pit commands received and answered (`ping` applied, `stop` no_vesc without a
+  VESC); WiFi join and ArduinoOTA update; BLE scan runs without blocking the radio.
 - Verified on hardware (2026-11-05, Eamon's T-Beam S3 Core): the base firmware
   boots, the AXP2101 rail map is right (`pmu ok`), the SX1262 initialises (`radio ok`),
   the GNSS is found at 9600 baud, and `stat`/`base`/`status` lines flow over USB.

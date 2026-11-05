@@ -83,6 +83,46 @@ Which frame becomes the fleet protocol is still an open decision for the integra
 BLE module comes off the COMM port); `docs/architecture.md` still prefers BLE, so this
 is a second point to settle with the owner.
 
+## Bench results, 2026-11-05 16:20 (Eamon, at 50 Day St)
+
+Verified on hardware today, all on branch `eamon/firmware-lora-starter`:
+
+- **Pit station live:** Pi 4 `gokart-pit.local` with the touch kiosk at the panel's native
+  1024x600, pit server, T-Beam S3 on `/dev/tbeam`. October 2026 satellite imagery
+  (SkyFi, local-only) on the map with site presets for the shop and Manresa Island.
+- **First over-the-air link:** Eamon's Heltec V4.3 running `kart-heltec-v4` (kart id 2)
+  is received by the T-Beam at 1 Hz with consecutive sequence numbers and zero loss,
+  RSSI -13 dBm / SNR 13.5 dB side by side. GPS detected at 9600 baud (no fix indoors).
+- **Command loop:** from the pit UI, `ping` came back `applied` in about one second on
+  the first transmission; `stop` came back `no_vesc` and `start` `rejected`, the honest
+  answers with no VESC attached. Per-kart outcomes show on the kiosk.
+- **OTA:** the kart node took a WiFi firmware update (`gokart-2.local`, ArduinoOTA) and
+  rebooted into the BLE build. No cable needed for kart firmware from here on.
+- **Owner decision (Eamon, in person): BLE from the Heltec to the VESC on every kart.**
+  `./build.sh kart` now builds the BLE transport by default; `kart-uart` is the wired
+  alternative. The kart connects **only** to the VESC address pinned with `vescmac`;
+  unpinned it scans, reports candidates (`{"t":"ble",...}` over USB and on the OLED)
+  and never connects. With Colin's bench image holding its VESC's connection, the
+  scan sees no VESC at all, as expected (a connected BLE peripheral stops advertising).
+
+Not yet: a GPS fix (indoors), a kart on the map, a stop against a real VESC, reception
+of Colin's bench frame (its transmit is off after every boot and has not been enabled
+within range of the T-Beam).
+
+**For Colin, to run the command-capable build on his kart (his decision):**
+
+```sh
+cd firmware && ./build.sh kart upload /dev/cu.usbmodemXXXX   # BLE build
+# on the board's USB console:
+id 1
+vescmac <address>      # the address your bench image logs as ble_candidate address=...
+```
+
+Close the bench image's connection first (or power its board off) so the VESC
+advertises again. First test with the drive wheels off the ground. Rollback is your
+`pio run -t upload`. Open integration item: your image verifies the VESC UUID from
+FW_VERSION; mine pins the BLE address instead. Both is best; worth adding to mine.
+
 ## Bench test with Colin, 2026-11-05 evening: link first, then kill switch (proposal to Colin)
 
 The pit side is running: Pi 4 (`gokart-pit.local`, 192.168.151.240 on McLab) with the
