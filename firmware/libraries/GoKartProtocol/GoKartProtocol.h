@@ -36,7 +36,7 @@
 // Default: 2 Hz, eight fixed 50 ms slots per 500 ms round. A 1 Hz kart uses
 // the SAME offsets in the first round, so mixed rates do not change kart slots.
 // PPS is preferred, then pit beacon sync; unsynced fallback has collision risk.
-// The base reserves the tail after 905 ms for its beacon and commands.
+// Base commands use 415–485 ms; the beacon uses the tail after 905 ms.
 #define GK_DEFAULT_REPORT_RATE 2
 #define GK_REPORT_PERIOD_MS    500
 #define GK_SLOT_MS             50
@@ -48,6 +48,16 @@
 // Calculated airtime at SF7/BW500, CR4/5, preamble 8, explicit header and CRC.
 #define GK_BEACON_AIRTIME_US   14144UL
 #define GK_TELEMETRY_AIRTIME_US 23104UL
+// Commands occupy the first inter-round gap. 815–895 ms overlaps kart 7/8
+// in the second 2 Hz round; 415–485 ms is clear for all eight mixed-rate karts.
+#define GK_CMD_WINDOW_START_MS 415
+#define GK_CMD_WINDOW_END_MS   485
+#define GK_TX_SPACING_MS       30
+#define GK_COMMAND_AIRTIME_US  11584UL
+static inline bool gkCommandWindowOpen(uint32_t phaseUs) {
+  return phaseUs >= GK_CMD_WINDOW_START_MS*1000UL &&
+         phaseUs+GK_COMMAND_AIRTIME_US+1000UL <= GK_CMD_WINDOW_END_MS*1000UL;
+}
 // A kart that hears the beacon but has no GPS PPS aligns its slots to it (sync source 2).
 #define GK_SYNC_MAX_AGE_MS     3000
 // Per-kart runtime setting: "rate 1|2"; both rates share these fixed offsets.

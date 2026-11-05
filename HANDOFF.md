@@ -1,6 +1,6 @@
 # Collaborator handoff
 
-Updated November 5, 2026. This integration combines Eamon's `815cbe8` with
+Updated November 5, 2026. This integration combines Eamon's `d98c41d` with
 Colin's telemetry/diagnostic `544b498`, plus guarded configuration transactions.
 Use [docs/integration.md](docs/integration.md) for exact build/commissioning steps.
 
@@ -9,6 +9,9 @@ Use [docs/integration.md](docs/integration.md) for exact build/commissioning ste
 **Colin, kart 1:** Heltec `firmware/heltec` 0.2.2-bench, telemetry only. BLE identity
 verified; fresh values showed 0 A, 0 ERPM, fault 0 after all motor tests. Radio TX
 is enabled, maintenance off, 46-byte GoKartProtocol at 915 MHz/BW500/SF7/CR4/5.
+Measured after this USB rate update: 4.872 Hz VESC, 4.993 Hz USB and 1.973 Hz
+radio TX over 24.834 seconds, zero drops/errors. USB reader disconnect/reconnect
+passed without reboot. [Evidence](hardware/heltec/2026-11-05-rate-update/README.md).
 GPS NMEA is received but no outdoor fix is verified. Actual receipt of kart 1 at
 Eamon's base remains unconfirmed. No VESC configuration/firmware was written.
 
@@ -31,7 +34,7 @@ Colin's installed image. Source updates and Git merges do not deploy hardware.
   interpolation and public shop imagery are included. GPS acquisition rate is
   unchanged; faster rendering/radio does not produce new GPS fixes.
 - Both 1 Hz and 2 Hz integrated karts use identical 50 ms ID slots, avoiding
-  mixed-rate overlap. The base sends its beacon/commands after 905 ms. Update
+  mixed-rate overlap. The base sends commands at 415–485 ms and its beacon after 905 ms. Update
   base and karts together; issue `rate 2` on nodes with a stored 1 Hz setting.
   Tests cover all 256 mixtures of eight kart rates and full packet airtime.
 - BLE is the integrated kart default. It requires a pinned BLE MAC to connect

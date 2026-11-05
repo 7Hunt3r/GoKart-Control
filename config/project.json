@@ -113,7 +113,11 @@
         "unslotted_jitter"
       ],
       "eight_kart_rf_validated": false,
-      "coordinated_base_kart_update_required": true
+      "coordinated_base_kart_update_required": true,
+      "command_window_ms": [
+        415,
+        485
+      ]
     }
   },
   "profiles": {
@@ -189,7 +193,8 @@
     "required_write_identity": "commissioned BLE MAC plus VESC UUID and firmware 6.00",
     "temporary_limits": "fresh runtime copy, only currentMaxScale changed, complete subset verified",
     "radio_contract": "GoKartProtocol v1, 2 Hz target, fixed 50 ms ID slots; recovery image unslotted",
-    "eamon_source_commit": "815cbe8",
-    "colin_source_commit": "544b498"
+    "eamon_source_commit": "d98c41d",
+    "colin_source_commit": "544b498",
+    "rate_evidence": "hardware/heltec/2026-11-05-rate-update"
   }
 }

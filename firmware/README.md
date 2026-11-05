@@ -100,7 +100,7 @@ Integrated karts default to two 46-byte telemetry packets per second at 915 MHz,
 SF7, BW500, CR4/5. Both supported rates (`rate 1|2`) use the same 50 ms ID slots;
 2 Hz adds a second round 500 ms later. Slots follow GPS PPS or the pit beacon;
 without sync, fallback is jittered and may collide. The base sends a 22-byte
-beacon and 14-byte commands after 905 ms. Update base and karts together; old
+beacon after 905 ms and spaced 14-byte commands in the 415–485 ms gap. Update base and karts together; old
 100 ms slot schedules are incompatible. Local VESC polling and USB display
 output are 5 Hz. Colin's recovery image uses the same packet/RF settings at
 2 Hz but is unslotted; the base also decodes historical 47-byte frames. Commands carry a sequence number that the kart echoes with a

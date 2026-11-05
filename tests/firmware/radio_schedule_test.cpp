@@ -11,6 +11,7 @@ static uint32_t airtime(unsigned bytes) {
 int main() {
   assert(airtime(sizeof(GkTelemetry))==GK_TELEMETRY_AIRTIME_US);
   assert(airtime(sizeof(GkBaseInfo))==GK_BEACON_AIRTIME_US);
+  assert(airtime(sizeof(GkCommandMsg))==GK_COMMAND_AIRTIME_US);
   assert(GK_REPORT_PERIOD_MS==1000/GK_DEFAULT_REPORT_RATE);
   for (unsigned mask=0;mask<256;mask++) {
     uint32_t occupiedUntil=0; unsigned slots=0;
@@ -24,6 +25,7 @@ int main() {
       assert(!gkSlotOpen(kart,rate,start+GK_SLOT_GUARD_MS*1000));
       occupiedUntil=start+GK_SLOT_GUARD_MS*1000-1+airtime(sizeof(GkTelemetry));
       assert(occupiedUntil<=round*500000UL+kart*GK_SLOT_MS*1000UL);
+      assert(occupiedUntil<=GK_CMD_WINDOW_START_MS*1000UL || start>=GK_CMD_WINDOW_END_MS*1000UL);
       slots++;
     }
     assert(slots>=8 && slots<=16);
@@ -37,5 +39,16 @@ int main() {
   for(uint8_t kart=1;kart<=8;kart++) for(uint8_t rate=1;rate<=2;rate++)
     assert(gkSlotOpen(kart,rate,3000000UL+gkSlotOffsetUs(kart)));
   assert(GK_BEACON_PHASE_MS*1000UL+airtime(sizeof(GkBaseInfo))<985000UL);
+  for(uint32_t phase=0;phase<1000000;phase++) {
+    if(gkCommandWindowOpen(phase)) {
+      assert(phase>=400000UL);
+      assert(phase+airtime(sizeof(GkCommandMsg))+1000UL<=500000UL);
+    }
+  }
+  assert(gkCommandWindowOpen(415000));
+  assert(!gkCommandWindowOpen(414999));
+  assert(gkCommandWindowOpen(485000-GK_COMMAND_AIRTIME_US-1000));
+  assert(!gkCommandWindowOpen(485001-GK_COMMAND_AIRTIME_US-1000));
+  assert(!gkCommandWindowOpen(815000)); // Old window collided with kart 7/8.
   puts("radio schedule: 256 mixed-rate fleets, slot boundaries and airtime passed");
 }

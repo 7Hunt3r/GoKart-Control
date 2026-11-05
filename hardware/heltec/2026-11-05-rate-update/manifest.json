@@ -1,0 +1,10 @@
+{
+  "sha256": {
+    "firmware/heltec/src/main.cpp": "0c3c29bc776fea6705f1b9d40bfa17cf0cfc7f7ef3e91bedad586323edb5b38d",
+    "firmware/libraries/GoKartProtocol/GoKartProtocol.h": "5433f2a02d531d1b50efeca582ae56266641bb8ca2efb384f346531622e5e181",
+    "firmware/heltec/.pio/build/heltec_v43/firmware.bin": "8adf0317f8a87188664d8102f7b28209287d4abe39dabe5763f092f1a248cf3a"
+  },
+  "status_jsonl_sha256": "9693cc80eba3a2dd6f0ce9c3f38d6e9e1e1b3299f8b55aae697e20e3ff745711",
+  "binary_in_git": false,
+  "notes": "Read-only image update; only serial status and TX enable commands sent. No VESC setting, current, reset or firmware commands."
+}

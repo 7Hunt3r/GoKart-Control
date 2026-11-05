@@ -108,7 +108,7 @@ update and power-failure recovery need separate controlled tests before field us
 
 This adapter uses Eamon’s canonical
 [`GoKartProtocol.h`](../libraries/GoKartProtocol/GoKartProtocol.h). The integration
-includes his branch through `815cbe8`; the transmitter keeps the shared 46-byte
+includes his branch through `d98c41d`; the transmitter keeps the shared 46-byte
 packet and **BW500**. Version `0.2.2-bench` raises VESC polling/local USB output
 to 5 Hz and unslotted radio reports to 2 Hz. The base also accepts legacy 47-byte
 frames. Version 0.2.1-bench used the same RF settings at 1 Hz. The earlier 0.2.0-bench BW250 image
@@ -190,3 +190,12 @@ pio run -d firmware/heltec
 The C++ test checks the compiled protocol implementation against actual captured
 bytes, rejects every non-allowlisted command, validates identity matching and
 exercises fragmented packets, malformed lengths and CRC rejection.
+
+## 0.2.2 rate verification
+
+[Recorded kart-1 check](../../hardware/heltec/2026-11-05-rate-update/README.md):
+4.872 Hz VESC samples, 4.993 Hz USB output and 1.973 Hz completed TX over
+24.834 seconds, no receive drops/TX errors/faults. A five-second USB-reader
+disconnect recovered without a reboot. Output uses bounded 64-byte writes
+with a 1 ms timeout; the display reader does not gate BLE polling or radio TX.
+Pit receipt and full-fleet scheduling are not established by this check.

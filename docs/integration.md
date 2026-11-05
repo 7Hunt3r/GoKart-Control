@@ -1,6 +1,6 @@
 # Shared kart / base / pit integration
 
-This branch combines Eamon's `eamon/firmware-lora-starter` through `815cbe8` and
+This branch combines Eamon's `eamon/firmware-lora-starter` through `d98c41d` and
 Colin's `diagnostics/removable-bench-control` through `544b498`. It keeps one
 shared radio library and base serial contract. It does not imply that the
 integrated command build is already installed or hardware-validated.
@@ -121,7 +121,8 @@ password OTA policy for this integrated kart; base firmware OTA is unchanged.
 The normal `firmware/heltec` recovery image keeps its own already-tested
 maintenance workflow. Its radio TX is opt-in after boot; the integrated kart
 transmits automatically as part of its commissioned fleet role. Fit its antenna
-before powering the integrated radio. No new OTA image has been deployed here.
+before powering the integrated radio. The 0.2.2 recovery image was USB-flashed for this rate update; the integrated
+command image remains uninstalled.
 
 ## Maps and refresh rates
 
@@ -144,8 +145,11 @@ public imagery. See [map README](../pit/server/map/README.md).
 The integrated kart and base share fixed 50 ms ID slots in two 500 ms rounds.
 A 1 Hz kart uses only the first round at the same ID offset. Transmission starts
 8–16 ms into its slot; calculated 46-byte airtime is 23.104 ms. The base's 22-byte
-beacon starts at/after 905 ms (14.144 ms airtime), followed by commands that fit
-before 985 ms. GPS PPS has priority; otherwise karts follow a fresh base beacon.
+beacon starts at/after 905 ms (14.144 ms airtime) and finishes before 985 ms.
+Commands use 415–485 ms, with 30 ms between a completed TX and the next start.
+This moves Eamon's proposed 815–895 ms command window out of kart 7/8's second
+round. The rule also applies when the base is free-running, since beacon clients
+follow that same clock. GPS PPS has priority; otherwise karts follow a fresh base beacon.
 Without either source, jittered fallback is unslotted and collisions are possible.
 A base without PPS only derives its clock from PPS-tagged kart packets, never
 from the unslotted recovery transmitter.
@@ -168,3 +172,17 @@ and is not an RF field result. Native tests cover all 256 mixed-rate fleets,
 slot boundaries and complete packet occupancy. Measure reception/loss and
 command latency with Eamon's base, then all eight karts, before raising rates
 again. A later 10 Hz local benchmark is not included in this change.
+
+## Measured kart-1 rate update
+
+The installed recovery image was measured over 24.834 seconds: 121 new VESC
+samples (4.872 Hz), 125 USB status records (4.993 Hz), and 49 completed radio
+transmissions (1.973 Hz). All samples were identity-verified/fresh, stationary
+and fault-free, with zero BLE receive drops or radio TX errors. USB reader
+close/reopen for five seconds recovered without reboot; counters continued.
+The bounded USB output path was corrected after the first attempt stalled.
+These are local measurements, not proof of pit receipt, GPS fix or eight-kart
+RF performance. [Raw trace and hashes](../hardware/heltec/2026-11-05-rate-update/README.md).
+
+Validation: 52 automated tests pass (15 root, 11 diagnostics, 24 pit core,
+2 pit end-to-end); BLE kart, UART kart, base and recovery images compile.

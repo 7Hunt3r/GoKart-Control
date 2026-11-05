@@ -29,7 +29,7 @@ accessory/link failures must not change its active settings or replay commands.
 | `firmware/bench-control` | Separate removable motor-test experiments. Half-second 5 A forward probe succeeded over laptop BLE; longer attempts aborted. Not vehicle firmware. |
 | Kart Pi display | Serial/map contracts exist; dedicated on-kart display integration remains open. |
 
-The integration branch combines Eamon's work through `815cbe8` and Colin's saved
+The integration branch combines Eamon's work through `d98c41d` and Colin's saved
 telemetry/diagnostic work through `544b498`. Published imagery includes CT ECO
 2023 Manresa and shop images; licensed SkyFi images stay local. See [map setup](pit/server/map/README.md).
 
@@ -38,7 +38,9 @@ data, 2 Hz LoRa per kart**. The integrated node uses PPS or pit-beacon timing;
 its `rate 1|2` setting is persistent. Existing nodes saved at 1 Hz need `rate 2`.
 Update base and kart firmware together for the new fixed 50 ms slots. The
 telemetry recovery image uses unslotted 500 ms ±50 ms broadcasts for bench tests;
-eight-kart RF performance is still unverified.
+eight-kart RF performance is still unverified. The installed read-only image
+measured 4.87 Hz VESC / 4.99 Hz USB / 1.97 Hz radio TX with zero errors;
+[rate evidence](hardware/heltec/2026-11-05-rate-update/README.md).
 
 The installed telemetry image cannot accept STOP/START/mode requests. The
 integrated node implements those as temporary VESC configuration writes, gated

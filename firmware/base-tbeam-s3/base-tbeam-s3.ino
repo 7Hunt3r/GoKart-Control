@@ -239,21 +239,19 @@ static void transmitBeacon(uint8_t src) {
 
 static void serviceLoraTx() {
   uint8_t src; uint32_t phase = basePhaseUs(&src);
-  // Once per second, in the tail after all kart slots: beacon first, then queued commands.
-  bool inWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
-  // One beacon per second: the edge estimate moves with every kart packet, so key on elapsed
-  // time since the last beacon rather than on a second index derived from the edge.
-  if (inWindow && phase+GK_BEACON_AIRTIME_US+1000UL <= 985000UL && (uint32_t)(micros() - lastBeaconMicros) > 600000UL) { lastBeaconMicros = micros(); transmitBeacon(src); }
-  if (cmdHead == cmdTail) return;
-  if (!inWindow) return; // Beacon clients also use the free-running base clock.
-  while (cmdHead != cmdTail) {
-    uint32_t currentPhase=basePhaseUs(nullptr);
-    if (currentPhase < GK_BEACON_PHASE_MS*1000UL ||
-        currentPhase+radio.getTimeOnAir(sizeof(GkCommandMsg))+1000UL > 985000UL) break;
-    transmitCommand(cmdQueue[cmdHead].msg);
+  // Commands use the first inter-round gap; beacon uses the tail of the second.
+  bool beaconWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
+  bool cmdWindow = gkCommandWindowOpen(phase);
+  // Commands first, in their own window, spaced GK_TX_SPACING_MS apart; then one beacon per
+  // second (keyed on elapsed time: the edge estimate moves with every kart packet).
+  static uint32_t lastTxMicros = 0;
+  if (cmdHead != cmdTail && cmdWindow && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
+    transmitCommand(cmdQueue[cmdHead].msg); lastTxMicros = micros();
     cmdQueue[cmdHead].used = false;
     cmdHead = (cmdHead + 1) % CMD_QUEUE_LEN;
-    if (src != 0 && basePhaseUs(nullptr) > 985000UL) break;
+  }
+  if (beaconWindow && phase+GK_BEACON_AIRTIME_US+1000UL <= 985000UL && (uint32_t)(micros() - lastBeaconMicros) > 600000UL && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
+    lastBeaconMicros = micros(); transmitBeacon(src); lastTxMicros = micros();
   }
 }
 
