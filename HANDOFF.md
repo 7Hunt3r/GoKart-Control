@@ -83,6 +83,58 @@ Which frame becomes the fleet protocol is still an open decision for the integra
 BLE module comes off the COMM port); `docs/architecture.md` still prefers BLE, so this
 is a second point to settle with the owner.
 
+## Bench test with Colin, 2026-11-05 evening: link first, then kill switch (proposal to Colin)
+
+The pit side is running: Pi 4 (`gokart-pit.local`, 192.168.151.240 on McLab) with the
+touch kiosk, the pit server and the T-Beam S3 modem on `/dev/tbeam`, listening on the
+bench radio settings (915.0 MHz, BW500, SF7, CR4/5, sync 0x12). It decodes your
+47-byte `GK` frame as well as the GoKartProtocol frame.
+
+**Step 1, no decision needed: prove reception.** On your Heltec's USB console:
+
+```
+id 1
+tx on antenna-confirmed
+```
+
+Kart 1 should appear on the pit screen within two seconds with your VESC voltage,
+GPS state and RSSI/SNR. The pit logs every line to `pit/logs/session-*.jsonl` on the
+Pi, so we get a loss count from your sequence numbers.
+
+**Step 2, your decision: remote stop needs command-capable firmware on the kart.**
+`firmware/heltec` (your bench image) cannot receive commands and has no VESC write
+path, by design. The only way to stop/start/change mode from the pit is to run
+`firmware/kart-heltec-v4` on the kart's Heltec, in its BLE variant, which uses the
+same VESC BLE UART module your image uses. What it does, precisely:
+
+- Writes to the VESC only on an explicit pit or USB command (`stop`, `start`,
+  `mode N`). Never on boot, reconnect, link loss or retransmit (your reliability rule).
+- `stop` = COMM_SET_MCCONF_TEMP with `store=0`, ramping `l_current_max_scale`
+  0.6, 0.3, 0.1, 0 over about 1.5 s; the baseline ERPM/duty/watt limits are echoed back
+  unchanged and battery current limits are not sent. Mechanical brakes and the
+  hardwired throttle are untouched; the kart coasts. `start` re-applies the requested
+  mode or the scale observed before the stop. A VESC power cycle returns to saved config.
+- After every write it asks for an ack and re-reads GET_MCCONF, and reports
+  `applied` only if the live scale matches; otherwise `unknown`.
+- Identity: connects only when exactly one `VESC BLE UART` is in range, or to a pinned
+  address (`vescmac AA:BB:CC:DD:EE:FF` on the console). It does not check the UUID
+  the way your image does; that is a gap worth closing in the integration.
+- It has never run on hardware. Your image is backed up and rebuilds from your branch,
+  so this is reversible in a minute.
+
+Suggested first test: kart on a stand or drive wheels off the ground, one person at
+the kart, the other at the pit screen. Press STOP on Kart 1; expect `accepted` then
+`applied` and the STOPPED badge. Press START; expect the same. Then try a throttle
+blip with the wheels in the air under STOP (no torque expected) and after START.
+
+**How to flash it** (either works):
+
+- From Eamon's Mac: plug the Heltec in and run `cd firmware && ./build.sh kart-ble upload /dev/cu.usbmodemXXXX`,
+  then on its console `id 1` (and `wifi <ssid> <pw>` + `reboot` if you want OTA later).
+- From your Mac, with arduino-cli: see "Build on a new machine" in [firmware/README.md](firmware/README.md).
+
+Going back: `pio run -d firmware/heltec -t upload` from your branch, as documented in your README.
+
 ## The connected kart: findings that matter
 
 See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.md).

@@ -36,6 +36,24 @@ app partitions with OTA; T-Beam S3: ESP32S3 Dev Module, USB CDC, 8 MB, OTA-capab
 partitions). The Arduino IDE works too: pick the same board and options, and add
 `firmware/libraries` to your sketchbook libraries folder or symlink the two folders.
 
+## Build on a new machine
+
+```sh
+brew install arduino-cli                      # macOS; Linux: see arduino.github.io/arduino-cli
+arduino-cli config init
+arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.8
+arduino-cli lib install RadioLib TinyGPSPlus U8g2 XPowersLib ArduinoJson NimBLE-Arduino
+git clone -b eamon/firmware-lora-starter git@github.com:colinfost3r/GoKart-Control.git
+cd GoKart-Control/firmware
+./build.sh kart-ble                           # Heltec V4.3, VESC over BLE
+./build.sh kart-ble upload /dev/cu.usbmodemXXXX
+```
+
+The board's native USB resets into the bootloader on its own when it is running an
+Arduino hardware-CDC image (Colin's bench image and these builds both are). If the
+upload says "No serial data received", hold BOOT while plugging the cable in.
+
 ## Over-the-air updates
 
 Both boards store WiFi credentials in flash, never in source. Over USB:
