@@ -38,6 +38,34 @@ GET_VALUES behavior, but do not change drive settings.
 The application has not been built. BLE operation with a Heltec, LoRa coverage,
 GPS reception, touchscreen behavior and failure recovery remain untested.
 
+## Firmware starter (branch `eamon/firmware-lora-starter`, November 5, 2026)
+
+Eamon's branch adds the first runnable firmware; see [firmware/README.md](firmware/README.md).
+
+- `firmware/kart-heltec-v4`: Heltec V4.3 kart node. VESC link (wired UART by default,
+  BLE build available), 5 Hz telemetry poll, read-only GET_MCCONF reconciliation of
+  the live current scale, GPS with PPS-aligned LoRa slot, one 46-byte telemetry packet
+  per second, OLED status, USB JSON lines for the kart Pi, WiFi credentials in flash,
+  ArduinoOTA. Mode/stop/start are applied only on an explicit pit or USB command;
+  nothing is written on boot, reconnect or retransmit (reliability rule honored).
+  **Deviation flagged for owner review:** the default build has VESC writes enabled
+  (`ENABLE_VESC_WRITES=1`) because pit start/stop/mode is the feature Eamon is testing;
+  `docs/requirements.md` still says writes stay disabled until validated. A `0` build
+  answers every write `rejected`.
+- `firmware/base-tbeam-s3`: pit LoRa modem on the LilyGo T-Beam S3 Core, JSON over USB
+  per [SERIAL_PROTOCOL.md](firmware/base-tbeam-s3/SERIAL_PROTOCOL.md), "karts online"
+  OLED, ArduinoOTA.
+- `firmware/libraries/`: shared packet format and a self-contained VESC 6.00 UART layer
+  (the old Core2 sketch needed a hand-edited VescUart; this does not).
+- `pit/`: Pi 4 pit station (SD-card kit, kiosk touch UI, server, simulator) in progress
+  on the same branch.
+
+Verified: both sketches compile (esp32 core 3.3.8); temp-limit payload checked against
+bldc release_6_00; mcconf offsets computed from the pinned schema. Not verified: any
+hardware behaviour. The proposed VESC transport is wired UART from the Heltec (the
+BLE module comes off the COMM port); `docs/architecture.md` still prefers BLE, so this
+is a second point to settle with the owner.
+
 ## The connected kart: findings that matter
 
 See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.md).
