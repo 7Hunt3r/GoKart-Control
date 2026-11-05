@@ -1,0 +1,55 @@
+{
+  "received_date": "2026-11-05",
+  "source": "Owner attachments in project chat",
+  "processing": "Original attachment bytes copied unchanged; no image enhancement or resizing",
+  "photos": [
+    {
+      "original_filename": "Photo 1.jpg",
+      "saved_filename": "01-heltec-front-l76k.jpg",
+      "bytes": 2129840,
+      "sha256": "675561af32e5475ff837c3751239cc7abd48dd45bc5c9b06afc46d80ba2ad325"
+    },
+    {
+      "original_filename": "Photo 2.jpg",
+      "saved_filename": "02-heltec-rear-gps-antenna.jpg",
+      "bytes": 2319570,
+      "sha256": "e3330ca36eaf1c6a58e4afc8c7d7d30c7d270abe08661910fbcfbdab5a38a180"
+    },
+    {
+      "original_filename": "Photo 3.jpg",
+      "saved_filename": "03-heltec-packaging.jpg",
+      "bytes": 2353998,
+      "sha256": "1b5e6b50004b0d8ab945d4348d30c311b8d4a98b3911cb323c5e340f7be878e4"
+    },
+    {
+      "original_filename": "Photo 4.jpg",
+      "saved_filename": "04-display-front.jpg",
+      "bytes": 257377,
+      "sha256": "bc263115ed519622190bff19ab993d23d7dda115caaf5127f99cade1a67fd5ac"
+    },
+    {
+      "original_filename": "Photo 5.jpg",
+      "saved_filename": "05-display-connectors-pi3.jpg",
+      "bytes": 357296,
+      "sha256": "f5e335172b093f72ef1f94f700261fd8f461038f19be05d947b53e5eb89684eb"
+    },
+    {
+      "original_filename": "Photo 6.jpg",
+      "saved_filename": "06-lesown-guide-cover.jpg",
+      "bytes": 307186,
+      "sha256": "89fba04e361916ebd40a4da58d4b76db1452bd4e269eb1203e3d3a64430f65ad"
+    },
+    {
+      "original_filename": "Photo 7.jpg",
+      "saved_filename": "07-lesown-guide-pages-6-10.jpg",
+      "bytes": 280914,
+      "sha256": "bf5a648fb7924bdd68b6febad54c078ca3c2cad91c4c3cbadda95782527caca9"
+    },
+    {
+      "original_filename": "Photo 8.jpg",
+      "saved_filename": "08-lesown-guide-pages-2-5.jpg",
+      "bytes": 307020,
+      "sha256": "fc371949a8a891d01e8e352de827c55212d0691d8c3ae4c9ad746c02374df1db"
+    }
+  ]
+}

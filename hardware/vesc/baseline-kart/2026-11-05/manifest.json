@@ -1,0 +1,49 @@
+{
+  "capture_date": "2026-11-05",
+  "timezone": "America/New_York",
+  "transport": "usb_serial",
+  "port_at_capture": "/dev/cu.usbmodem3041",
+  "scope": "current_runtime_not_verified_saved_flash",
+  "capture_complete": true,
+  "controller_assignment": "baseline-kart; race kart number unassigned",
+  "queries": [
+    {
+      "name": "firmware",
+      "command": 0,
+      "captured_at": "2026-11-05T13:13:30.294726-05:00",
+      "timestamp_basis": "capture_file_mtime",
+      "crc_verified_on_receipt": true,
+      "payload_bytes": 46,
+      "sha256": "067690f5db0ba20ec2d73dfac1f7aeb72eafe4d55549c4f5eadad40e65902e69"
+    },
+    {
+      "name": "telemetry",
+      "command": 4,
+      "captured_at": "2026-11-05T13:13:54.810309-05:00",
+      "timestamp_basis": "capture_file_mtime",
+      "crc_verified_on_receipt": true,
+      "payload_bytes": 74,
+      "sha256": "0dc228aa475e4f9fa2bf8760d99a0f704078b7a8a851363c396e8cfbbc4aaf4a"
+    },
+    {
+      "name": "motor_configuration",
+      "command": 14,
+      "captured_at": "2026-11-05T13:13:54.914650-05:00",
+      "timestamp_basis": "capture_file_mtime",
+      "crc_verified_on_receipt": true,
+      "payload_bytes": 482,
+      "sha256": "80ca33b7e5e5b0bfc08d039337f20c1ecf7f04b8726e35e87d938d40af33f0b0"
+    },
+    {
+      "name": "app_configuration",
+      "command": 17,
+      "captured_at": "2026-11-05T13:13:55.021212-05:00",
+      "timestamp_basis": "capture_file_mtime",
+      "crc_verified_on_receipt": true,
+      "payload_bytes": 494,
+      "sha256": "df26cba6b5e919cab3b9601deb5845e6ab24a2d53da86728d81147aa84877d05"
+    }
+  ],
+  "procedure": "Initial allowlisted read-only script; maintained CLI added afterward. No writes, motor commands, reset, flash or CAN scan.",
+  "motor_temperature_wiring": "Owner confirms motors have no temperature sensors wired."
+}

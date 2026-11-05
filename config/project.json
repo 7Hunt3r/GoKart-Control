@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "status": "hardware_baseline_captured_application_not_implemented",
+  "project": "gokart-dashboard",
+  "site": {
+    "name": "Manresa Island",
+    "state": "CT",
+    "country": "US",
+    "course_geometry": null,
+    "map_package": null
+  },
+  "fleet": {
+    "kart_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "development_kart_count_range": [
+      1,
+      3
+    ],
+    "map_filters": [
+      "online",
+      "entered_current_race"
+    ]
+  },
+  "hardware": {
+    "computer": "Raspberry Pi 3 Model B",
+    "display_marking": "LESOWN L7 family; supplied user guide Rev 2.1",
+    "display_resolution": [
+      1024,
+      600
+    ],
+    "radio_board": "Heltec HTIT-WB32LAF V4.3",
+    "gps_included": true,
+    "gps_module": "Quectel L76K",
+    "vesc_transport_preferred": "ble",
+    "vesc_usb_accessible": true,
+    "battery_nominal_v": 72,
+    "battery_full_v": 84,
+    "pit_computer": "Raspberry Pi 4",
+    "computer_board_revision": "V1.2 (photo)",
+    "display_size_inches": 7,
+    "display_resolution_evidence": "supplied_manual_pending_live_EDID",
+    "display_video_interface": "HDMI",
+    "display_touch_interface": "USB HID via 5V IN + TOUCH port; live test pending",
+    "display_exact_suffix": null,
+    "radio_band_packaging_mhz": [
+      863,
+      928
+    ],
+    "gps_antenna": "ceramic patch on attached GNSS module",
+    "hardware_photo_evidence": "hardware/photos/2026-11-05"
+  },
+  "features_in_scope": [
+    "vesc_telemetry",
+    "power_profiles",
+    "pit_dashboard",
+    "shared_positions",
+    "course_map",
+    "remote_profile_requests",
+    "session_logging",
+    "race_entry_filters",
+    "beginner_display",
+    "shared_authenticated_pit_control"
+  ],
+  "radio": {
+    "region_target": "US",
+    "frequency_hz": null,
+    "tx_power_dbm": null,
+    "position_interval_ms": null
+  },
+  "profiles": {
+    "names": [
+      "ECO",
+      "NORMAL",
+      "SPORT"
+    ],
+    "verified_limits": null,
+    "intent": "primarily_top_speed_limits_with_strong_acceleration; retain existing profiles pending inspection"
+  },
+  "hardware_commands_enabled": false,
+  "features_deferred": [
+    "driver_messages",
+    "gradual_remote_stop",
+    "geofence_enforcement"
+  ],
+  "failure_behavior": {
+    "pit_link_loss": "continue_normally",
+    "pi_or_vesc_link_loss_desired": "restore_saved_vesc_configuration",
+    "saved_config_fallback_implemented": false,
+    "geofence_enforcement_implemented": false
+  },
+  "controls": {
+    "driver_inputs": "hardwired_to_esc_independent_of_pi",
+    "pedal_brake": "mechanical",
+    "regen_disabled_owner_reported": true,
+    "regen_configuration_verified": true,
+    "regen_configuration_note": "Runtime motor braking current 0 A; battery regen allowance -100 A. No braking behavior tested."
+  },
+  "dashboard": {
+    "speed_units": "mph",
+    "beginner_hides_driver_fault_alerts": true,
+    "fault_logging_and_pit_visibility": true,
+    "motor_temperature_display": "unavailable"
+  },
+  "pit": {
+    "password_required": true,
+    "multiple_browser_clients": true,
+    "exclusive_control_client": false,
+    "network_scope": "local_by_default"
+  },
+  "baseline": {
+    "source_priority": "connected_kart_over_historical_repository",
+    "capture_path": "hardware/vesc/baseline-kart/2026-11-05",
+    "scope": "current_runtime_not_verified_saved_flash",
+    "firmware": "6.00",
+    "reported_hardware": "75_100_V2",
+    "controller_id": 69,
+    "firmware_name": "no_hw_limits",
+    "motor_temp_sensors_wired": false
+  }
+}
