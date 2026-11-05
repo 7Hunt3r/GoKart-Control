@@ -37,11 +37,13 @@ As of November 5, 2026:
 - [Heltec bench firmware](firmware/heltec/README.md) now reads the baseline VESC
   over BLE, receives GPS NMEA and transmits Eamon’s shared 46-byte LoRa telemetry (kart ID 1, BW500). Authenticated
   Wi-Fi OTA has been exercised on the physical board. See [bench results](docs/heltec-bench-test.md).
-- This branch has no dashboard/pit app or VESC control. Eamon has a pit-server,
+- The normal image has no motor-write path, and this branch has no dashboard/pit app. Eamon has a pit-server,
   kiosk and simulator prototype on [PR #1](https://github.com/colinfost3r/GoKart-Control/pull/1);
   its integration with this physical kart remains pending.
 - A separate [removable motor-test diagnostic](docs/bench-control-test.md) is a
-  draft: live zero-current tests aborted; no powered spin has been performed.
+  draft: direct laptop BLE produced a confirmed half-second forward movement.
+  Sustained 5 s / 5 A and 30 s / 10 A attempts aborted at diagnostic speed limits;
+  the Heltec motor-control path is still unvalidated. Basic telemetry is restored.
 - No course image/route is packaged on this branch (Eamon’s branch now includes
   a Manresa imagery package). Outdoor GPS fix, receiver confirmation,
   field coverage, display integration and driving fault-isolation tests remain open.

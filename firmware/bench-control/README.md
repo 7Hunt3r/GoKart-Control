@@ -5,22 +5,56 @@ is for the owner-requested low-current forward test. The normal `firmware/heltec
 build never includes it. Delete this folder to remove the implementation; no
 production motor-command hooks or radio command API need to be removed.
 
-Status: **draft; not ready for a powered motor test.** Offline tests and builds
-pass, but live zero-current handoff trials aborted on stale telemetry and some
-preflight attempts stopped reporting. No nonzero-current request was sent, no
-probe was run, and no five-second spin was completed. The requested “mid speed”
-has not been translated into a verified RPM target; this prototype's low-current,
-150-ERPM target must not be described as that requested test.
+Status: **draft; the Heltec motor-control build remains unvalidated.** Its live
+zero-current trials aborted or stalled. The separate laptop `direct_ble.py`
+proved Bluetooth current commands: a 5 A half-second probe moved forward, as
+confirmed by the owner. Sustained 5 s / 5 A and 30 s / 10 A attempts aborted at
+speed guards and returned to zero; neither duration test completed. Motor tests
+are now paused at the owner's request. These results do not validate the Heltec
+transport or establish a calibrated mid-speed target.
 
 The physical Heltec has been restored to the tested `0.2.1-bench` telemetry image (shared 46-byte frame, BW500),
 ID 1, TX enabled, fresh VESC values, zero current/RPM/fault. No kart reset was
 needed for that recovery. The diagnostic is isolated on a draft branch/PR.
-See [hardware test findings](../../../docs/bench-control-test.md).
+See [hardware test findings](../../docs/bench-control-test.md).
 
 The default build is `bench_preflight`, which cannot arm and rejects motor/app
 handoff writes at the transport layer. `bench_diagnostic` explicitly compiles in
 those commands; it is for development after resolving the failures below, not
 an approved working motor-control image.
+
+## Direct laptop Bluetooth runner
+
+`direct_ble.py` isolates the VESC command path from the Heltec's stalled transport.
+It is removable with this folder and never runs in normal firmware. It defaults
+to reads only and checks the exact controller UUID/6.00/configuration snapshot.
+A separate Python environment needs `bleak==0.22.3`. To inspect without actuation:
+
+```sh
+python firmware/bench-control/direct_ble.py
+```
+
+Release the Heltec BLE connection using stationary maintenance mode first; the
+10-minute maintenance timer will otherwise let it reclaim BLE. Only one client
+can own this module. Return to `maintenance off` and `tx on antenna-confirmed`
+afterward. Do not reboot the kart to resolve a competing Bluetooth client.
+
+The explicitly armed CLI offers 250/500 ms probes and 5/30-second test windows,
+with requested-current ceilings 1/2/5/10 A and electrical-speed guards 500/2000
+ERPM. The latest implementation tapers current using measured ERPM; this has
+**not** established sustained speed control. Observed overshoot during the 10 A
+trial means it is still a development tool, not a ready-to-run test prescription.
+Normal VESC settings are not changed. The finite 300 ms ADC override and zero
+release are the same bench-only mechanisms described below. A local threshold
+of 0.10 during motion is below the captured ADC deadband 0.15; initial neutral
+must remain <=0.02. The VESC's throttle calibration is unchanged.
+
+The final-sample guard and independent release attempts now have regression
+tests. The first 1 A trace predates that fix and must not be called a passing
+guard test. See [actual results](../../docs/bench-control-test.md).
+
+The remaining sections describe the **Heltec prototype**, whose 1 A / 5 s
+limits are deliberately separate from the evolving laptop diagnostic.
 
 ## What it does
 
@@ -141,7 +175,7 @@ Local `.pio` output is ignored. No credentials are used by this diagnostic.
 
 ## Evidence used for the exact comparison
 
-The [fresh bench snapshot](../../../hardware/vesc/baseline-kart/2026-11-05-bench-preflight/README.md)
+The [fresh bench snapshot](../../hardware/vesc/baseline-kart/2026-11-05-bench-preflight/README.md)
 preserves the read-only motor/application capture. Compared with the first
 capture, only six boot-calibration offsets differ; all drive limits and all
 application settings match. The generator embeds the complete reviewed replies

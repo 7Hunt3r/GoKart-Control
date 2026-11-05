@@ -7,7 +7,7 @@ import time
 
 
 def ready(d):
-    return (d.get('firmware')=='bench-control-0.3.0-draft' and d.get('identity')
+    return (d.get('firmware')=='bench-control-0.3.1' and d.get('identity')
             and d.get('motor_commands_compiled') and d.get('baseline_match') and d.get('values_valid') and d.get('adc_valid')
             and d.get('values_age_ms',9999)<300 and d.get('adc_age_ms',9999)<300
             and d.get('erpm')==0 and abs(d.get('motor_a',999))<=.2
@@ -38,7 +38,7 @@ def main():
             try:d=json.loads(s.readline())
             except (ValueError,UnicodeDecodeError):continue
             print(json.dumps(d),flush=True)
-            if d.get('firmware')!='bench-control-0.3.0-draft':continue
+            if d.get('firmware')!='bench-control-0.3.1':continue
             if not active:continue
             if not armed and now-started>=1 and ready(d):s.write(b'arm wheels-up-neutral\n');armed=True;continue
             if armed and not sent and d.get('state')==1:

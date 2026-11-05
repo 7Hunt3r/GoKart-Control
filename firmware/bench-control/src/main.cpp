@@ -7,9 +7,14 @@
 
 // Temporary USB-operated diagnostic. Never linked into firmware/heltec.
 static constexpr uint8_t UUID[12]={0x2c,0,0x4c,0,9,0x51,0x34,0x30,0x37,0x35,0x37,0x39};
-static const char* VERSION="bench-control-0.3.0-draft";
+static const char* VERSION="bench-control-0.3.1";
 struct Chunk {size_t len;uint32_t at;uint8_t bytes[520];};
-QueueHandle_t rx;
+struct Command {char line[80];uint32_t receivedAt;};
+struct Output {char line[900];};
+QueueHandle_t rx,commands,outputs;
+std::atomic<bool> usbConnected(false);
+std::atomic<uint32_t> workerAt(0);
+std::atomic<int> workerStage(0);
 std::atomic<bool> overflow(false);
 std::atomic<uint32_t> rxBytes(0),rxMaxChunk(0);
 NimBLEClient* client=nullptr;
@@ -28,8 +33,12 @@ uint32_t writeAt=0,leaseAt=0;bool leaseReady=false;uint8_t releaseStep=0;
 uint32_t queryAt=0,lastDrive=0,lastScan=0;
 char output[900];size_t outputLen=0,outputAt=0;
 
-void emit(const char* line){if(outputAt<outputLen)return;outputLen=snprintf(output,sizeof(output),"%s\n",line);if(outputLen>=sizeof(output))outputLen=0;outputAt=0;}
-void pump(){if(outputAt>=outputLen)return;int n=Serial.availableForWrite();if(n>0)outputAt+=Serial.write((const uint8_t*)output+outputAt,min(size_t(n),outputLen-outputAt));}
+void emit(const char* line){Output o{};snprintf(o.line,sizeof(o.line),"%s",line);xQueueSend(outputs,&o,0);}
+void pump(){
+    if(outputAt>=outputLen){Output o;if(xQueueReceive(outputs,&o,0)==pdTRUE){outputLen=snprintf(output,sizeof(output),"%s\n",o.line);outputAt=0;}}
+    if(outputAt>=outputLen)return;
+    int n=Serial.availableForWrite();if(n>0)outputAt+=Serial.write((const uint8_t*)output+outputAt,min(size_t(n),outputLen-outputAt));
+}
 void event(const char* text){char b[180];snprintf(b,sizeof(b),"{\"event\":\"%s\"}",text);emit(b);}
 void notified(NimBLERemoteCharacteristic*,uint8_t* bytes,size_t n,bool){
     rxBytes+=n;rxMaxChunk=std::max(uint32_t(n),rxMaxChunk.load());
@@ -70,8 +79,8 @@ void status(){
       "{\"type\":\"bench_status\",\"firmware\":\"%s\",\"motor_commands_compiled\":%s,\"release_pending\":%s,\"positive_requests\":%lu,\"zero_requests\":%lu,\"uptime_ms\":%lu,\"state\":%u,\"reason\":\"%s\",\"identity\":%s,\"baseline_match\":%s,\"values_valid\":%s,\"adc_valid\":%s,\"values_age_ms\":%lu,\"adc_age_ms\":%lu,\"erpm\":%ld,\"motor_a\":%.3f,\"volts\":%.2f,\"fault\":%u,\"throttle\":%.5f,\"throttle_v\":%.5f,\"requested_ma\":%ld,\"pulse_elapsed_ms\":%lu}",
       VERSION,BENCH_ENABLE_MOTOR_COMMANDS?"true":"false",control.releasePending?"true":"false",(unsigned long)positiveRequests,(unsigned long)zeroRequests,(unsigned long)millis(),unsigned(control.state),control.reason,input.identity?"true":"false",input.baseline?"true":"false",input.haveValues?"true":"false",input.haveAdc?"true":"false",(unsigned long)(millis()-input.valuesAt),(unsigned long)(millis()-input.adcAt),(long)input.values.erpm,input.values.motorA,input.values.voltage,input.values.fault,input.throttle,input.throttleV,(long)control.requestedMa,control.state==bench::State::Running?(unsigned long)(millis()-control.startedAt):0UL);emit(b);
 }
-void command(const String& line){
-    if(line=="keepalive"){input.hostAt=millis();return;}
+void command(const String& line,uint32_t receivedAt){
+    if(line=="keepalive"){input.hostAt=receivedAt;return;}
     if(line=="abort"){control.stop("operator_abort");return;}
     if(line=="status"){status();return;}
     if(line=="dump motor" && motorSeen){dumpKind=1;dumpOffset=0;return;}
@@ -83,7 +92,7 @@ void command(const String& line){
 #if !BENCH_ENABLE_MOTOR_COMMANDS
         event("read_only_build_cannot_arm");return;
 #endif
-        input.hostAt=millis();input.usb=bool(Serial);
+        input.hostAt=receivedAt;input.usb=usbConnected.load();
         if(!control.arm(millis(),input))event("arm_denied_check_status");return;
     }
     if(line=="dry-run" || line=="probe" || line=="run positive-forward-confirmed"){
@@ -96,7 +105,7 @@ void serialInput(){
     static char line[80];static size_t n=0;static bool discarded=false;
     for(int count=0;count<100 && Serial.available();count++){
         char c=Serial.read();if(c=='\r')continue;
-        if(c=='\n'){if(!discarded){line[n]=0;command(String(line));}n=0;discarded=false;}
+        if(c=='\n'){if(!discarded){line[n]=0;Command c{};memcpy(c.line,line,n+1);c.receivedAt=millis();xQueueSend(commands,&c,0);}n=0;discarded=false;}
         else if(n<sizeof(line)-1)line[n++]=c;else discarded=true;
     }
 }
@@ -188,19 +197,25 @@ void diagnosticWorker(void*){
     for(;;)diagnosticStep();
 }
 void setup(){
-    Serial.begin(115200);Serial.setTxTimeoutMs(0);rx=xQueueCreate(24,sizeof(Chunk));
+    Serial.begin(115200);Serial.setTxTimeoutMs(0);rx=xQueueCreate(24,sizeof(Chunk));commands=xQueueCreate(16,sizeof(Command));outputs=xQueueCreate(8,sizeof(Output));
     // Keep the radio amplifier and GPS off in this diagnostic; no LoRa commands.
     pinMode(7,OUTPUT);digitalWrite(7,LOW);pinMode(34,OUTPUT);digitalWrite(34,HIGH);
     event("diagnostic_boot_read_only_disarmed");
     xTaskCreatePinnedToCore(diagnosticWorker,"bench-diagnostic",16384,nullptr,1,nullptr,0);
 }
-void loop(){delay(100);}
+void loop(){
+    usbConnected=bool(Serial);serialInput();pump();
+    static uint32_t last=0;
+    if(millis()-last>1000 && millis()-workerAt.load()>2000){last=millis();char b[100];snprintf(b,sizeof(b),"{\"worker_stall_ms\":%lu,\"stage\":%d}",(unsigned long)(millis()-workerAt.load()),workerStage.load());emit(b);}
+    delay(2);
+}
 void diagnosticStep(){
-    input.usb=bool(Serial);serialInput();
+    workerAt=millis();workerStage=1;input.usb=usbConnected.load();
+    Command c;for(int i=0;i<8 && xQueueReceive(commands,&c,0)==pdTRUE;i++)command(String(c.line),c.receivedAt);
     input.connected=client->isConnected();
-    if(!input.connected){clearLink();connectReadOnly();}
-    else {readResponses();drive();poll();}
+    if(!input.connected){clearLink();workerStage=2;connectReadOnly();}
+    else {workerStage=3;readResponses();workerStage=4;drive();workerStage=5;poll();}
     // Any disconnected state has no command replay; finite VESC ADC lease expires.
     dumpNext();static uint32_t reported=0;static int reports=0;if(!dumpKind && millis()-reported>=100){reported=millis();if(++reports%10==0)transportStatus();else status();}
-    pump();delay(2);
+    workerStage=6;delay(2);
 }

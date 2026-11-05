@@ -25,7 +25,7 @@ class Port:
         if b==b'arm wheels-up-neutral\n':self.phase=1
         if b in (b'probe\n',b'dry-run\n',b'run positive-forward-confirmed\n'):self.phase=2
     def readline(self):
-        d=dict(firmware='bench-control-0.3.0-draft',identity=True,motor_commands_compiled=True,release_pending=False,baseline_match=True,values_valid=True,adc_valid=True,values_age_ms=10,adc_age_ms=20,erpm=0,motor_a=0,fault=0,throttle=0,throttle_v=.837,state=self.phase,reason='idle')
+        d=dict(firmware='bench-control-0.3.1',identity=True,motor_commands_compiled=True,release_pending=False,baseline_match=True,values_valid=True,adc_valid=True,values_age_ms=10,adc_age_ms=20,erpm=0,motor_a=0,fault=0,throttle=0,throttle_v=.837,state=self.phase,reason='idle')
         if self.phase==2:
             self.running_reads+=1
             if self.running_reads>2:self.phase=0;d.update(state=0,reason='pulse_complete_coasting')
