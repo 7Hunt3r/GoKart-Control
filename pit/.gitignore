@@ -9,3 +9,4 @@ __pycache__/
 .DS_Store
 # licensed imagery, local only
 server/map/course_skyfi.jpg
+server/map/course_shop.jpg

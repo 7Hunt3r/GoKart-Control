@@ -12,6 +12,16 @@
   about 0.34 m/px. Checkerboard comparison against the ortho shows alignment within
   roughly one ortho pixel (under a metre). `map.json` v2 points at it; swap `image`
   back to `course.jpg` if the file is missing. Next time, order the GeoTIFF.
+- `course_shop.jpg` (NOT in git, same license): the same SkyFi image cut around the shop
+  at 165 Water St for bench testing, using the island registration extrapolated about
+  2 km north; expect a few metres of error there.
+
+Site presets: `map.manresa.json` (track) and `map.shop.json` (bench). Copy one over
+`map.json` and restart `gokart-pit` so its fallback origin updates:
+
+```sh
+sudo cp /opt/gokart-pit/server/map/map.manresa.json /opt/gokart-pit/server/map/map.json && sudo systemctl restart gokart-pit
+```
 
 
 Status: **no imagery, course line or pit location is bundled.** The pit map
