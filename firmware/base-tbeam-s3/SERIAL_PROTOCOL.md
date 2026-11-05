@@ -45,8 +45,12 @@ One JSON object per line:
 
 - `kart`: 1-8 or 255 for all karts.
 - `seq`: 1-255, assigned by the host, rolling. The kart echoes it in
-  `last_cmd_seq` with `cmd_result`. A kart ignores a repeat of the seq it last
-  handled, so retries are safe.
+  `last_cmd_seq` with `cmd_result`. A kart treats a command as a retransmit when
+  the source, seq and `issued_utc_s` all match the last command from that source
+  (pit and USB are tracked separately), so retries are safe. Because the base
+  stamps `issued_utc_s` from GPS time, a restarted host reusing a seq is not
+  mistaken for a retransmit once the base has a fix; without GPS time the host
+  should avoid reusing the seq a kart currently reports.
 - `ttl`: seconds. Karts with GPS time reject a command older than this. 0 or
   absent = no expiry. The base stamps `issued_utc_s` from its own GPS.
 - Delivery policy belongs to the host: retransmit every 1.5 s, up to 5 times,

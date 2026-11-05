@@ -126,8 +126,15 @@ before anything is trusted:
   the temp-limit payload layout matches bldc `release_6_00` `comm/commands.c`
   (battery limits optional, read only when present); command ids 4/14/48 match
   the 6.00 enum; mcconf offsets computed from the pinned schema.
-- Not verified: anything on hardware. LoRa link, front-end control, GPS pin
-  order, PPS slotting, VESC UART wiring, OLED, OTA, AXP2101 rail map, power draw.
+- Verified on hardware (2026-11-05, Eamon's T-Beam S3 Core): the base firmware
+  boots, the AXP2101 rail map is right (`pmu ok`), the SX1262 initialises (`radio ok`),
+  the GNSS is found at 9600 baud, and `stat`/`base`/`status` lines flow over USB.
+  The board shipped running Meshtastic; the first flash needed a 1200-baud touch
+  to reach the bootloader, after which it enumerates as "USB JTAG/serial debug
+  unit" and normal uploads work.
+- Not verified: GPS fix and PPS (indoors so far), any LoRa packet over the air,
+  OLED on the T-Beam, OTA, and everything on the kart side (front-end control,
+  GPS pin order, PPS slotting, VESC UART wiring, OLED, power draw).
   First bench steps: flash base, confirm `stat` lines and GPS fix on USB; flash
   kart with no VESC attached, confirm it appears in the base's `tele` lines;
   then attach the VESC over USB-powered bench and watch `status`.

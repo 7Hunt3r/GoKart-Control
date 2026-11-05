@@ -37,7 +37,7 @@ def find_tbeam_port():
                 return p.device
     by_id = sorted(glob.glob("/dev/serial/by-id/*"))
     for p in by_id:
-        if "TBeam" in p or "303a" in p.lower():
+        if "TBeam" in p or "303a" in p.lower() or "JTAG_serial" in p:
             return p
     for pattern in ("/dev/serial/by-id/*", "/dev/ttyACM*", "/dev/cu.usbmodem*"):
         hits = sorted(glob.glob(pattern))

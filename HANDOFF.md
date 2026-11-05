@@ -69,8 +69,9 @@ Eamon's branch adds the first runnable firmware; see [firmware/README.md](firmwa
   nothing has run on a Pi yet. See [pit/README.md](pit/README.md).
 
 Verified: both sketches compile (esp32 core 3.3.8); temp-limit payload checked against
-bldc release_6_00; mcconf offsets computed from the pinned schema. Not verified: any
-hardware behaviour. The proposed VESC transport is wired UART from the Heltec (the
+bldc release_6_00; mcconf offsets computed from the pinned schema; the base firmware
+boots on Eamon's T-Beam S3 with PMU, SX1262 and GNSS detected and USB JSON flowing.
+Not verified: any LoRa traffic, GPS fix/PPS, the kart node on hardware. The proposed VESC transport is wired UART from the Heltec (the
 BLE module comes off the COMM port); `docs/architecture.md` still prefers BLE, so this
 is a second point to settle with the owner.
 

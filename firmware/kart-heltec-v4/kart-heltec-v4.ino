@@ -110,6 +110,11 @@ uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
 uint8_t  lastCmdSeq = 0, lastCmdSrc = 0xFE, cmdResult = GK_RES_NONE;
+// Per-source duplicate detection: a retransmit (same source, same seq, same issue time)
+// is reported again but never re-applied. Index 0 = pit base, 1 = USB/local.
+uint8_t  dupSeq[2] = {0, 0};
+uint32_t dupIssued[2] = {0, 0};
+bool     dupValid[2] = {false, false};
 bool     modeConfirmed = false;
 enum WriteState { W_IDLE, W_SENT, W_VERIFY };
 WriteState wState = W_IDLE;
@@ -253,7 +258,9 @@ static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg) {
 }
 
 static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint16_t ttl, uint32_t issued) {
-  if (seq == lastCmdSeq && src == lastCmdSrc) { emitCmd(src, seq, cmd, arg); return; }   // retransmit: report, do not re-apply
+  int si = (src == GK_ADDR_BASE) ? 0 : 1;
+  if (dupValid[si] && dupSeq[si] == seq && dupIssued[si] == issued) { emitCmd(src, seq, cmd, arg); return; }   // retransmit: report, do not re-apply
+  dupValid[si] = true; dupSeq[si] = seq; dupIssued[si] = issued;
   lastCmdSeq = seq; lastCmdSrc = src;
   if (ttl && issued) {
     uint32_t now = gpsUnix();
