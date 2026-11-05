@@ -19,7 +19,7 @@ static constexpr uint8_t EXPECTED_UUID[12]={0x2c,0,0x4c,0,9,0x51,0x34,0x30,0x37,
 static const char* SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_RX="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_TX="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-static const char* VERSION="0.2.0-bench";
+static const char* VERSION="0.2.1-bench";
 static constexpr uint32_t STALE_MS=1000;
 static constexpr uint32_t OTA_WINDOW_MS=600000;
 

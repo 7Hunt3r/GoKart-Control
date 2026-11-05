@@ -106,3 +106,25 @@ Next: Eamon confirms kart-1 `tele` packets, increasing sequence numbers, voltage
 and VESC validity on the T-Beam. All no-fix/stale values must remain unavailable
 in the UI. See the [receiver agreement](../firmware/heltec/README.md#radio-receiver-agreement-for-eamon)
 for timing, flags and unimplemented command/PPS behavior.
+
+## Latest receiver reconciliation: 0.2.1-bench
+
+While the isolated motor diagnostic was being developed, Eamon moved his base
+to BW500 and added support for the old 47-byte format (`e83ad69`, present in
+`ab9404a`). The final transmitter follows that current shared header unchanged:
+**46-byte GoKartProtocol, 915 MHz, BW500, kart ID 1**. Do not independently switch
+either endpoint back to BW250. His receiver's legacy decoder is retained in the
+shared library; this transmitter still sends only the shared 46-byte packet.
+
+The 0.2.1-bench image was built, installed via USB and independently checked:
+fresh VESC identity/telemetry, zero ERPM/current/fault, ID 1 retained, 46-byte
+payload/BW500 reported, 15 TX completions and zero TX errors. TX is enabled;
+maintenance is off; VESC writes remain disabled. No cart reset was needed.
+Actual receiver reception remains unconfirmed. OTA was exercised on earlier
+versions; this final bandwidth-only firmware change was installed by USB.
+Image SHA-256: `0c45b7b63debf40243f407fa4380a7ab3b8e4526938072eb174faf3b5349e263`.
+
+The separate [motor diagnostic draft](https://github.com/colinfost3r/GoKart-Control/pull/3)
+failed live freshness/preflight validation. It sent zero-current handoff requests
+but no positive-current pulse. The requested five-second wheel spin is not
+completed. That diagnostic is not the firmware left on the board.

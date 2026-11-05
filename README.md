@@ -35,7 +35,7 @@ As of November 5, 2026:
 - Captured a stationary telemetry sample: 76.4 V, 22.3 C ESC temperature, no active fault.
 - Prepared offline decode tools and protocol tests using the real captured data.
 - [Heltec bench firmware](firmware/heltec/README.md) now reads the baseline VESC
-  over BLE, receives GPS NMEA and transmits Eamon’s shared 46-byte LoRa telemetry (kart ID 1, BW250). Authenticated
+  over BLE, receives GPS NMEA and transmits Eamon’s shared 46-byte LoRa telemetry (kart ID 1, BW500). Authenticated
   Wi-Fi OTA has been exercised on the physical board. See [bench results](docs/heltec-bench-test.md).
 - This branch has no dashboard/pit app or VESC control. Eamon has a pit-server,
   kiosk and simulator prototype on [PR #1](https://github.com/colinfost3r/GoKart-Control/pull/1);

@@ -109,7 +109,7 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
 4. Build an explicitly labeled eight-kart simulator and responsive kart/pit views.
    Test filtering, stale/no-fix states, shared browser state and command outcomes.
 5. Confirm actual reception on Eamon’s T-Beam S3 base using the shared 46-byte
-   GoKartProtocol/BW250 contract. This development kart is assigned ID 1. TX is
+   GoKartProtocol/BW500 contract. This development kart is assigned ID 1. TX is
    opt-in; PPS slotting and eight-kart load testing remain open. Obtain an
    outdoor GPS fix. See the bench report for installed-image verification.
 6. Bench-verify brief/sustained accessory and link failures plus reconnect:
@@ -138,7 +138,8 @@ an event log and verified component ratings.
 
 ## Parallel firmware integration note
 
-Eamon’s `eamon/firmware-lora-starter` is at `dfe83d8` (PR #1) as last fetched.
+Eamon’s `eamon/firmware-lora-starter` is at `ab9404a` (PR #1) as last fetched. Recent work also adds pit
+SD-card/display setup and a Manresa imagery package.
 It contains the T-Beam S3 base, another kart starter, a Pi 4 pit server/kiosk,
 simulator and SD-card setup. His notes report base boot, radio initialization
 and GNSS serial reception verified; no received LoRa packet or outdoor fix yet.
@@ -146,7 +147,9 @@ Those are collaborator-reported results, not tests performed on this computer.
 
 The owner chose his receiver contract to drive integration. Our adapter now
 includes his **unchanged canonical GoKartProtocol library** and uses its 46-byte
-frame, BW250 and 1 Hz reporting. The old 47-byte/BW500 format is retired. This
+frame and 1 Hz reporting. Eamon’s latest base moved to BW500 and supports the
+legacy 47-byte packet too. Our 0.2.1-bench image now follows BW500 while retaining
+the shared 46-byte packet; 0.2.0-bench was BW250 and must be updated. This
 kart is **ID 1** by owner decision; do not assign that ID to another powered kart.
 Shared bytes/settings match; successful over-air reception remains unverified.
 The detailed [receiver agreement](firmware/heltec/README.md#radio-receiver-agreement-for-eamon)
@@ -159,11 +162,14 @@ format. Our adapter transmits telemetry only, with unknown modes/scale and
 writes disabled. Retain authenticated maintenance-only OTA. No changes have
 been made to Eamon’s branch and no remote commands are handled here.
 
-The owner also requested a removable, separate bench-control diagnostic for a
-wheels-up ten-second forward pulse. It has not been implemented or run yet.
-Do not add a general motor-write API to the normal telemetry build. Validate
-bounded stopping and physical direction before the requested sustained test;
-this diagnostic is separate from deferred fleet remote stop/profile control.
+The owner also requested removable wheels-up motor testing, now **five seconds
+at mid speed**. A [separate diagnostic draft (PR #3)](https://github.com/colinfost3r/GoKart-Control/pull/3)
+exists, but live zero-current trials aborted on stale telemetry and some
+preflights stalled. No positive-current command or wheel spin was sent. The
+normal read-only telemetry image is restored; no cart reset was needed. This
+branch does not include that diagnostic implementation. After local validation,
+the owner wants to test motors from Eamon’s hub too. That remains subsequent
+bench work, separate from fleet profile/STOP deployment.
 
 ## Collaboration and delivery state
 
