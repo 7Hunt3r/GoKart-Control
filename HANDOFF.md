@@ -109,7 +109,8 @@ Not yet: a GPS fix (indoors), a kart on the map, a stop against a real VESC, rec
 of Colin's bench frame (its transmit is off after every boot and has not been enabled
 within range of the T-Beam).
 
-**For Colin, to run the command-capable build on his kart (his decision):**
+**For Colin, to run the command-capable build on his kart (his decision):** a prebuilt
+image and the console steps are in [firmware/releases/README.md](firmware/releases/README.md); or build it:
 
 ```sh
 cd firmware && ./build.sh kart upload /dev/cu.usbmodemXXXX   # BLE build
