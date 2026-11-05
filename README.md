@@ -2,7 +2,8 @@
 
 A dashboard and shared pit system for eight electric karts at Manresa Island,
 Connecticut. Each kart uses a Raspberry Pi 3 Model B, a 7-inch LESOWN L7-family touchscreen (1024×600 per supplied manual), a
-Heltec V4.3 LoRa/GPS unit and a Bluetooth connection to its VESC. A Pi 4 hosts
+Heltec V4.3 that owns VESC communication over Bluetooth, GPS and LoRa.
+The kart Pi is the display/interface computer; it does not own the VESC link. A Pi 4 hosts
 the password-protected pit web interface for multiple simultaneous operators.
 
 **The connected development kart is the primary hardware baseline.** The older
@@ -16,7 +17,10 @@ M5Stack repository is historical reference, not the specification for this rebui
 3. [Requirements](docs/requirements.md): confirmed product behavior and deferred work.
 4. [Architecture](docs/architecture.md): components, interfaces and failure boundaries.
 5. [Hardware inventory](docs/hardware.md): verified vs reported vs unknown details.
-6. [Contributing](CONTRIBUTING.md): repeatable setup and collaboration conventions.
+6. [Contributing](CONTRIBUTING.md): repeatable setup and collaboration conventions
+   for Colin and Eamon, including ongoing push/sync expectations.
+7. [Telemetry agreement](docs/requirements.md#agreed-telemetry-fields): fields, units
+   and proposed validity conventions shared across the components.
 
 ## Current status
 
@@ -48,6 +52,10 @@ Do not copy this kart's settings to other karts without inspecting their hardwar
 | Beginner display hides driver-facing fault alerts | Automatic fault-based tuning |
 | Pi 4 password-protected shared pit control | |
 | Logs and addressed/fleet profile requests | |
+
+The Heltec handles supervisory telemetry/profile requests; the VESC continues
+to run motor control. The display exchanges data and UI requests with the Heltec
+over a proposed USB serial interface. Profile writes remain disabled.
 
 Throttle and reverse remain wired to the ESC. Pedal braking is mechanical.
 Motor braking is currently configured to 0 A. Motors have no temperature

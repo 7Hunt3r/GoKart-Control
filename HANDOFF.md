@@ -5,9 +5,10 @@ report before implementing VESC commands.
 
 ## What we are building
 
-An eight-kart system at Manresa Island, CT. Each Pi 3 B runs a touchscreen
-dashboard and talks to its own VESC by BLE. A USB-connected Heltec supplies GPS
-and LoRa. The Pi 4 pit server owns fleet/race state and the base-station radio;
+An eight-kart system at Manresa Island, CT. The Heltec owns each kart's VESC
+BLE connection, telemetry, GPS, LoRa and eventual supervisory profile logic.
+Each Pi 3 B only runs the touchscreen interface/map, connected to the Heltec
+through proposed USB serial. The Pi 4 pit server owns fleet/race state and the base-station radio;
 multiple password-authenticated browsers share control through that server.
 There are one to three development karts planned, including one each for the
 owner and Eamon. Do not assume all eight karts have identical configurations.
@@ -34,7 +35,7 @@ CAN enumeration, terminal command or motor actuation was performed. Telemetry
 queries can reset the controller's averaging accumulators as part of ordinary
 GET_VALUES behavior, but do not change drive settings.
 
-The application has not been built. BLE operation with a Pi, LoRa coverage,
+The application has not been built. BLE operation with a Heltec, LoRa coverage,
 GPS reception, touchscreen behavior and failure recovery remain untested.
 
 ## The connected kart: findings that matter
@@ -59,18 +60,27 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
 
 ## Agreed behavior
 
-- Keep BLE as the preferred VESC link; USB remains available for inspection.
+- The owner approved the [initial telemetry fields](docs/requirements.md#agreed-telemetry-fields):
+  kart identity/time, separate wheel/GPS speed, battery voltage/current, motor
+  current, ESC temperature, faults, GPS position/quality and connection status.
+  Motor temperature remains unavailable. Proposed units and validity conventions
+  are documented there; schema, update rates and stale thresholds remain open.
+- The Heltec owns the BLE VESC link and kart supervisory logic; the Pi is display
+  only. USB VESC access remains available for inspection. This supersedes the
+  earlier Pi-owned VESC architecture. See [architecture](docs/architecture.md).
 - Preserve hardwired driver inputs and mechanical brakes.
 - Keep three profile names. Desired eventual behavior is top-speed limits with
   strong acceleration, but do not replace current limits based on historical code.
 - Losing the pit radio link should not stop the kart.
-- If the Pi crashes or its VESC link fails, restore the **saved VESC configuration**,
-  not the dashboard NORMAL profile. This is a requirement, not an implemented feature.
+- Preserve the desired **saved VESC configuration** fallback. For display/Pi
+  failure, a healthy Heltec would detect the missing heartbeat and restore the
+  verified baseline. For Heltec/VESC-link failure, an independent controller-side
+  mechanism is needed. Neither mechanism nor its timing is implemented.
 - Drivers see their own and other kart positions, with online and race-entry filters.
 - MPH. Beginner mode hides driver-facing fault alerts, while pit/logging retains them.
 - Driver messages, gradual remote stop and geofence enforcement are deferred.
 - A future geofence should operate locally without a pit link. The current
-  Pi/BLE architecture cannot guarantee enforcement after Pi/BLE failure.
+  Heltec/BLE architecture cannot guarantee enforcement after Heltec/BLE failure.
 
 ## Next work, in order
 
@@ -81,14 +91,16 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
 2. Establish the saved-config baseline without overwriting settings or disrupting
    driving; coordinate a controlled inspection with the owner. Do not power-cycle
    or change firmware merely to fill a documentation gap.
-3. Run a read-only Pi BLE telemetry spike against this kart. Confirm intended
-   device selection, packet fragmentation, reconnect, latency and UI responsiveness.
+3. Run a read-only Heltec BLE telemetry spike against this kart. Confirm intended
+   device selection, packet fragmentation and reconnect. Measure latency while
+   GPS, LoRa and USB display traffic run concurrently; verify display loss does
+   not block VESC servicing. Validate independent Heltec power/reset behavior.
 4. Build an explicitly labeled eight-kart simulator and responsive kart/pit views.
    Test filtering, stale/no-fix states, shared browser state and command outcomes.
 5. Implement the Heltec serial contract and a two-radio bench link, then load-test
    eight-kart traffic before choosing field update rates.
 6. Design and bench-verify controller-side saved-config fallback before enabling
-   temporary profile writes. A disconnected Pi cannot send a restore command.
+   temporary profile writes. A disconnected Heltec cannot send a restore command.
 7. Investigate drift cutoff with logs, then propose any tuning as a separate change.
 
 The [requirements](docs/requirements.md) contain broader acceptance criteria.
@@ -115,7 +127,10 @@ The documentation, inspection tools, baseline capture and hardware photos are
 versioned together in this repository. Collaborators should clone or update from
 `git@github.com:colinfost3r/GoKart-Control.git` and start with README.md and this
 handoff. Use `git status` to distinguish subsequent local work from committed
-project state. Future commits and pushes still require the owner's request.
+project state. The owner now requests ongoing pushes for collaboration with
+Eamon: publish coherent, checked milestones and fetch/reconcile remote changes
+before pushing. Use focused branches/PRs for parallel implementation. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for source ownership and conflict handling.
 
 No team members have been invited and no messages have been sent. Use the
 owner's chosen GitHub access process when they request it. Do not put credentials

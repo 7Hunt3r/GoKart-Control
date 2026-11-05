@@ -55,7 +55,11 @@
       928
     ],
     "gps_antenna": "ceramic patch on attached GNSS module",
-    "hardware_photo_evidence": "hardware/photos/2026-11-05"
+    "hardware_photo_evidence": "hardware/photos/2026-11-05",
+    "vesc_connection_owner": "heltec",
+    "kart_pi_role": "display_and_touch_interface",
+    "pi_heltec_transport_proposed": "usb_serial",
+    "heltec_power_independent_of_display_required": true
   },
   "features_in_scope": [
     "vesc_telemetry",
@@ -92,9 +96,11 @@
   ],
   "failure_behavior": {
     "pit_link_loss": "continue_normally",
-    "pi_or_vesc_link_loss_desired": "restore_saved_vesc_configuration",
     "saved_config_fallback_implemented": false,
-    "geofence_enforcement_implemented": false
+    "geofence_enforcement_implemented": false,
+    "display_pi_or_link_loss_desired": "healthy_heltec_restores_verified_saved_vesc_configuration; detection_and_transition_pending",
+    "heltec_or_vesc_link_loss_desired": "restore_saved_vesc_configuration; independent_mechanism_required",
+    "display_loss_fallback_implemented": false
   },
   "controls": {
     "driver_inputs": "hardwired_to_esc_independent_of_pi",

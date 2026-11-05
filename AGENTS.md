@@ -9,8 +9,16 @@
   commands, configuration writes, firmware updates, resets or motor detection.
 - Maintain separate verified/reported/proposed status. Runtime reads are not
   automatically saved-flash backups. Motor-temperature sensors are not wired.
-- BLE is the preferred VESC transport. Driver inputs remain hardwired to the ESC.
+- The Heltec owns the VESC connection, GPS, LoRa and supervisory profile logic.
+  The kart Pi is display/interface only. BLE remains the preferred VESC transport.
+  Driver inputs and motor control remain with the ESC; profile writes are disabled.
 - Driver messages, gradual remote stop and geofence enforcement are deferred.
-- Commit/push only when requested, per the user's shared Git conventions.
+- The owner now explicitly authorizes ongoing commits/pushes at coherent, checked
+  milestones so Colin and Eamon share current work. This supersedes the earlier
+  per-commit request rule for this project. Fetch before work and again before push;
+  inspect and integrate remote changes without overwriting others or force-pushing.
+  Use focused branches/worktrees and PRs for parallel implementation; see CONTRIBUTING.md.
+- Keep requirements, architecture, config and handoff consistent. Preserve evidence;
+  distinguish owner decisions from proposed details and verified implementation.
 - No sub-agent delegation is required by this file.
 - Run offline checks described in CONTRIBUTING.md for inspection-tool changes.

@@ -20,7 +20,10 @@ requirements from proposed implementation and unresolved details. See the
 - Radio/GPS: photo-identified Heltec HTIT-WB32LAF V4.3 with a cabled Quectel L76K
   module and ceramic GPS patch antenna. Packaging lists HF 863–928. Installed
   firmware, radio settings and live GPS operation remain unverified.
-- VESC transport: Bluetooth preferred for normal operation. USB is accessible
+- Kart roles: Heltec owns VESC communication, GPS, LoRa and supervisory profile
+  logic; the Raspberry Pi 3 is display/interface only. The VESC retains motor
+  control and hardwired driver inputs. Profile writes are not yet implemented.
+- VESC transport: Bluetooth from the Heltec preferred for normal operation. USB is accessible
   for inspection and development; a wired replacement is not the chosen default.
 - Throttle, brake-related inputs, and reverse are wired directly to the ESC,
   independent of the dashboard. Pedal braking is mechanical. Motor regenerative
@@ -45,12 +48,69 @@ requirements from proposed implementation and unresolved details. See the
   protections or silently select a different power profile.
 - Owner can supply high-resolution imagery; public imagery is also acceptable.
 
+## Agreed telemetry fields
+
+The owner approved the following initial telemetry scope. Field names and
+representation below are proposed shared implementation conventions; they are
+not an implemented API or a finalized LoRa packet format.
+
+| Measurement/status | Proposed field(s) | Units and meaning |
+| --- | --- | --- |
+| Kart identity | `kart_id` | Stable fleet ID 1–8; separate from the VESC CAN ID |
+| Measurement time | `sampled_at`, `received_at` | UTC timestamps when known; preserve acquisition time separately from receiver arrival time |
+| Speed | `wheel_speed_mph`, `gps_speed_mph` | Separate wheel-derived and GPS ground speeds; display identifies the selected source |
+| Battery voltage | `battery_voltage_v` | Volts at the VESC input |
+| Battery current | `battery_current_a` | Amps; positive draw, negative return to battery after adapter sign verification |
+| Motor current | `motor_current_a` | VESC-reported motor amps, with sign retained; distinct from battery current |
+| ESC temperature | `esc_temperature_c` | Degrees Celsius from controller sensing |
+| Motor temperature | `motor_temperature_c` | Unavailable on current karts because sensors are not wired |
+| Controller fault | `fault_code`, `fault_name` | Preserve numeric code and firmware-specific interpretation; unknown is not no-fault |
+| GPS position | `latitude_deg`, `longitude_deg` | WGS84 decimal degrees, with fix validity and measurement age |
+| GPS fix quality | `gps_fix_state`, `satellites_used`, `hdop`, `horizontal_accuracy_m` | Include only measures actually supplied; HDOP is dimensionless, not accuracy in meters |
+| Connection status | `vesc_link`, `radio_link`, `pit_link`, `display_link` | Report each connection separately, including last valid data age; GPS validity is separate |
+
+Existing requirements for electrical RPM, duty cycle and input power remain in
+scope, especially for drift-cutoff logging. Keep raw measurements separate from
+derived values. Wheel speed needs verified poles, gearing and wheel diameter;
+until verified, any calculated speed must be labeled uncalibrated. Do not assume
+that one speed source can silently replace the other during a drift.
+
+Proposed validity and freshness conventions:
+
+- Every measurement/group carries validity, source and age. Use explicit
+  `valid`, `unavailable` or `invalid` states with a reason when needed. Freshness
+  is separate: a previously valid sample can become stale.
+- Missing/invalid readings use `null`, never a fabricated zero. A valid zero
+  remains meaningful for stopped speed, zero current and fault code 0.
+- Current motor temperature is `null`, `unavailable`, reason `sensor_not_wired`.
+  Do not substitute ESC temperature or treat the raw motor value 0 C as valid.
+- VESC and GPS samples can arrive at different times. Updating one source must
+  not refresh the other's timestamp or make cached data appear newly measured.
+- Use local monotonic elapsed time for freshness. If UTC is unsynchronized,
+  mark the timestamp unknown; do not compare monotonic clocks across devices.
+  Radio forwarding must preserve sample age and account for transit uncertainty.
+- A connected transport does not prove fresh telemetry. Track last valid sample
+  separately from connection state; an unheard radio peer is unknown/stale,
+  not proof that its kart is powered off.
+- Stale positions remain visibly stale or hidden according to the map filter;
+  never move an unavailable GPS fix to latitude/longitude zero.
+- A stale no-fault sample is not evidence of a currently fault-free controller.
+  Beginner mode affects driver presentation only, not recorded telemetry.
+
+Stale thresholds, update rates, radio encoding and the machine-readable schema
+remain to be settled during interface implementation and eight-kart airtime
+budgeting. Local logging may be faster and more detailed than LoRa summaries.
+This agreement does not enable any controller writes or change driving behavior.
+
 ## Proposed architecture
 
-Each kart has a Pi dashboard, a VESC BLE connection, and a USB-connected Heltec.
-The Pi handles UI, VESC protocol, local logs and fleet state. The Heltec handles
-GPS and LoRa and exchanges framed messages with the Pi. Persist the intended
-VESC identity per kart; never select the first device with a common BLE name.
+Each Heltec owns the VESC BLE connection, telemetry acquisition, GPS, LoRa and
+supervisory request validation/serialization. The Pi handles display, map assets
+and touchscreen requests; USB serial between Pi and Heltec is proposed. It must
+not own a competing VESC session. Persist the intended VESC identity on the
+Heltec per kart; never select the first device with a common BLE name. The pit
+stores fleet/session logs; persistent local logging/storage remains to be chosen
+and must not make Heltec operation depend on the display.
 
 The Pi 4 hosts the pit application and its authoritative fleet/race state, with
 an attached base-station radio. Multiple password-authenticated browser clients
@@ -72,8 +132,11 @@ assets local; runtime operation should not depend on cloud connectivity.
 
 Confirmed desired behavior:
 - Loss of the pit/LoRa link alone: continue driving normally.
-- Pi crash or loss of its VESC Bluetooth connection: continue on the VESC's
-  saved configuration, NOT the dashboard's NORMAL profile.
+- Display Pi crash/link loss: retain the earlier requested restoration to saved
+  VESC settings. Proposed detection/restore owner is the healthy Heltec; heartbeat
+  timeout, transition and interaction with pit requests remain to be designed.
+- Heltec crash or loss of its VESC Bluetooth connection: desired fallback is the
+  VESC's saved configuration, not NORMAL. This requires an independent mechanism.
 - Future geofence: owner wants a settable boundary that disables propulsion
   when breached, including while the pit link is unavailable.
 
@@ -81,7 +144,8 @@ These are requirements, not implemented guarantees. Current upstream
 COMM_SET_MCCONF_TEMP mutates runtime limits without a profile lease/expiry.
 A BLE disconnect must not be assumed to restore saved configuration. The
 ordinary motor-command timeout is not a saved-profile restoration mechanism.
-A dead/disconnected Pi cannot send a restore command.
+A dead/disconnected Heltec cannot send a restore command. Display failure is a
+separate case because a healthy Heltec may still communicate with the VESC.
 
 Before enabling temporary profiles, investigate controller-resident support
 for an expiring profile/heartbeat lease on the exact installed firmware. If
@@ -92,9 +156,9 @@ validation. Do not label this fallback operational until tested under power
 loss, process failure and BLE disconnect. Do not flash firmware or deploy such
 controller logic merely to complete documentation.
 
-A future geofence must be evaluated locally on the kart to survive pit-link
-loss. If implemented only on the Pi, it cannot enforce anything after Pi or
-VESC-link failure. Guaranteeing enforcement in those conditions requires an
+A future geofence is intended to be evaluated on the Heltec using its GPS to
+survive pit/display loss. It cannot enforce anything after Heltec or VESC-link
+failure. Guaranteeing enforcement in those conditions requires an
 independent controller/GPS/control path and an explicit precedence decision
 against saved-configuration fallback. Keep this limitation visible and leave
 geofence enforcement deferred until designed. GPS-loss policy, boundary
@@ -114,7 +178,7 @@ Kart view:
 - Own position plus fleet markers, online and race-entry filters, heading when
   valid, trails, and explicit last-seen age. Filters only change presentation;
   hiding a kart must not remove it from telemetry or command accounting.
-- Separate VESC, GPS, radio and pit connectivity states.
+- Separate VESC, GPS, radio, pit and display-to-Heltec connectivity states.
 - Explicit no-fix/stale readings rather than zero values on telemetry loss.
 - Beginner mode hides driver-facing fault alerts while retaining pit diagnostics
   and logging. Device faults/protection behavior remain active.
@@ -215,9 +279,11 @@ Store command history with telemetry for later inspection.
    delivery. Exercise shared browser control against a single pit authority.
 2. Initial USB runtime read of one development kart is complete (firmware 6.00,
    hardware ID 75_100_V2). Commercial model, saved baseline and other karts remain
-   to verify. Validate Pi BLE telemetry and identity selection without writes.
+   to verify. Validate Heltec BLE telemetry and identity selection without writes.
 3. One Pi, touchscreen and Heltec: check resolution, touch, GPS, boot/reconnect,
-   power supply and concurrent radio/Bluetooth performance.
+   independent Heltec power and concurrent radio/Bluetooth/USB performance.
+   Verify a frozen, disconnected or powered-off display does not block the
+   Heltec, and measure actual sample/command latency under load.
 4. Diagnose drift cutoff using configuration and event logs. Design profile
    speed/torque behavior and controller-side saved-baseline fallback; verify
    them before enabling temporary profile writes or changing limits.
@@ -244,7 +310,8 @@ Store command history with telemetry for later inspection.
 - Course route, map extent and any updated owner-supplied aerial image.
 - Controller-side saved-configuration fallback mechanism and timing.
 - Driver vs pit permissions for changing profiles; shared pit control is confirmed.
-- Pi/display regulated supply, enclosure/weather exposure and shutdown behavior.
+- Pi/display and independently powered Heltec regulated supplies, USB backfeed/
+  reset behavior, enclosure/weather exposure and shutdown behavior.
 - Installed Pi OS and development access, and target date for first field test.
 - Deferred: geofence and gradual-stop semantics, failure precedence, and restart.
 
