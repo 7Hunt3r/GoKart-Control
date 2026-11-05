@@ -92,7 +92,7 @@
       "preamble_symbols": 8,
       "sx1262_requested_power_dbm": 0,
       "external_fem_output_not_measured": true,
-      "interval_ms": 1000,
+      "interval_ms": 500,
       "payload_bytes": 46,
       "receiver_verified": false,
       "interval_jitter_ms": 50,
@@ -100,6 +100,20 @@
       "shared_header": "firmware/libraries/GoKartProtocol/GoKartProtocol.h",
       "pps_aligned": false,
       "development_kart_id": 1
+    },
+    "fleet_target": {
+      "telemetry_hz": 2,
+      "local_vesc_hz": 5,
+      "local_usb_hz": 5,
+      "slot_ms": 50,
+      "beacon_hz": 1,
+      "sync_priority": [
+        "gps_pps",
+        "pit_beacon",
+        "unslotted_jitter"
+      ],
+      "eight_kart_rf_validated": false,
+      "coordinated_base_kart_update_required": true
     }
   },
   "profiles": {
@@ -170,12 +184,12 @@
     "live_update_verified": true
   },
   "integration": {
-    "installed_kart1_firmware": "0.2.1-bench telemetry-only",
+    "installed_kart1_firmware": "0.2.2-bench telemetry-only",
     "command_firmware_hardware_validated": false,
     "required_write_identity": "commissioned BLE MAC plus VESC UUID and firmware 6.00",
     "temporary_limits": "fresh runtime copy, only currentMaxScale changed, complete subset verified",
-    "radio_contract": "GoKartProtocol v1 unchanged at 1 Hz",
-    "eamon_source_commit": "d91422b",
+    "radio_contract": "GoKartProtocol v1, 2 Hz target, fixed 50 ms ID slots; recovery image unslotted",
+    "eamon_source_commit": "d7ade6f",
     "colin_source_commit": "544b498"
   }
 }

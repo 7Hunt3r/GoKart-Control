@@ -4,17 +4,19 @@
 
 - `course.jpg` (in git): CT ECO 2023 spring 3-inch orthoimagery, CC0, exported from the
   `Ortho_2023_tiled` ImageServer in WGS84; the bounds in `map.json` are the export's
-  reported extent.
+  reported extent in the Manresa preset.
 - `course_skyfi.jpg` (NOT in git, license): a Vantor satellite image of 2026-10-12 bought
   through SkyFi, delivered as a plain PNG with no georeference. It was registered to
   the CT ECO ortho by affine image alignment (the frame is rotated about 10.8 degrees
   with slightly unequal pixel scales) and warped north-up onto the ortho's bounds at
   about 0.34 m/px. Checkerboard comparison against the ortho shows alignment within
-  roughly one ortho pixel (under a metre). `map.json` v2 points at it; swap `image`
+  roughly one ortho pixel (under a metre). `map.manresa.json` v2 points at it; swap `image`
   back to `course.jpg` if the file is missing. Next time, order the GeoTIFF.
-- `course_shop.jpg` (NOT in git, same license): the same SkyFi image cut around the shop
+- `course_shop_cteco.jpg` (in git, CC0): the state 2023 ortho exported for the shop box; the
+  bench preset uses it because the SkyFi shop cut below proved to be 25-40 m off there.
+- `course_shop.jpg` (NOT in git, same license, currently NOT used): the same SkyFi image cut around the shop
   at 50 Day St (box centred near 165 Water St; it covers both) for bench testing, using the island registration extrapolated about
-  2 km north; expect a few metres of error there.
+  2 km north; the observed 25–40 m error makes it unsuitable for shop alignment.
 
 Site presets: `map.manresa.json` (track) and `map.shop.json` (bench, 50 Day St). Copy one over
 `map.json` and restart `gokart-pit` so its fallback origin updates:
@@ -24,10 +26,11 @@ sudo cp /opt/gokart-pit/server/map/map.manresa.json /opt/gokart-pit/server/map/m
 ```
 
 
-The public Manresa image and preset geometry are bundled. The active shop
-preset references local-only licensed imagery; a fresh clone can show the map
-grid/pins but needs the appropriate local image or a different preset. Do not
-substitute Manresa imagery under shop bounds. Course geometry remains provisional.
+The public Manresa and shop images are bundled. The active shop preset uses
+`course_shop_cteco.jpg` and works from a fresh clone. For Manresa without the
+licensed image, select `course.jpg` in its preset and use CT ECO attribution.
+Do not substitute Manresa imagery under shop bounds. Course geometry remains
+provisional.
 
 `map.json` in this folder drives both the pit map background and
 `GET /map/package.json` (the endpoint kart displays will fetch on the pit Wi-Fi,

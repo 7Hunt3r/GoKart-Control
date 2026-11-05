@@ -1,6 +1,6 @@
 # Shared kart / base / pit integration
 
-This branch combines Eamon's `eamon/firmware-lora-starter` through `d91422b` and
+This branch combines Eamon's `eamon/firmware-lora-starter` through `d7ade6f` and
 Colin's `diagnostics/removable-bench-control` through `544b498`. It keeps one
 shared radio library and base serial contract. It does not imply that the
 integrated command build is already installed or hardware-validated.
@@ -9,14 +9,14 @@ integrated command build is already installed or hardware-validated.
 
 | Component | Build / role | Hardware status |
 | --- | --- | --- |
-| `firmware/heltec` | PlatformIO, telemetry-only recovery image | Installed/tested on Colin's kart 1, 0.2.1-bench |
+| `firmware/heltec` | PlatformIO, telemetry-only recovery image | Installed/tested on Colin's kart 1, 0.2.2-bench |
 | `firmware/kart-heltec-v4` | Arduino CLI `kart` (BLE), optional `kart-uart` | Eamon tested earlier kart 2 radio/ping/OTA without VESC; new guards compiled/offline-tested only |
 | `firmware/base-tbeam-s3` | Arduino CLI `base` | Eamon reports T-Beam reception/command transmission |
 | `pit/` | Pi 4 server/kiosk and laptop simulator | Local unit/e2e tests; Eamon reports real Pi kiosk running |
 | `firmware/bench-control` | Removable experiments, not normal vehicle firmware | Short direct BLE forward probe succeeded; longer tests aborted |
 
 Radio: GoKartProtocol v1, 46-byte telemetry, 915 MHz, BW500, SF7, CR4/5, sync
-0x12, preamble 8, 1 Hz per kart. The base also accepts the historical 47-byte
+0x12, preamble 8, 2 Hz per kart by default (integrated nodes also support 1 Hz). The base also accepts the historical 47-byte
 bench frame. Keep `firmware/libraries/GoKartProtocol/GoKartProtocol.h` canonical.
 Pit ↔ base JSON is defined in
 [`SERIAL_PROTOCOL.md`](../firmware/base-tbeam-s3/SERIAL_PROTOCOL.md).
@@ -64,6 +64,7 @@ For Colin's captured kart only:
 id 1
 vescmac d8:94:35:be:e5:32
 vescuuid 2c004c000951343037353739
+rate 2
 status
 ```
 
@@ -122,17 +123,48 @@ maintenance workflow. Its radio TX is opt-in after boot; the integrated kart
 transmits automatically as part of its commissioned fleet role. Fit its antenna
 before powering the integrated radio. No new OTA image has been deployed here.
 
-## Maps, rates and remaining integration
+## Maps and refresh rates
 
-Public CT ECO 2023 Manresa imagery is in Git. Licensed SkyFi/shop images are
-local-only; the active shop preset therefore needs Eamon's local asset. Select
-an appropriate map/preset as documented in [map README](../pit/server/map/README.md);
-do not use Manresa imagery with the shop's geographic bounds.
+Public CT ECO 2023 Manresa and shop imagery are in Git. The active shop preset
+uses `course_shop_cteco.jpg`; it now works from a clean clone. Licensed SkyFi
+images remain local-only. The Manresa preset still selects the licensed image;
+switch its `image` to `course.jpg` with matching CT ECO attribution when using
+public imagery. See [map README](../pit/server/map/README.md).
 
-Keep radio at 1 Hz for compatibility. Current local VESC polling is 4 Hz in the
-installed recovery image and 5 Hz in the integrated node. A proposed next target
-is 5–10 Hz local and 2 Hz radio per kart, after measured eight-kart load/coverage
-checks and coordinated base/kart scheduling. Nothing in this integration changes
-those rates. At the current 46-byte/SF7/BW500 settings, calculated airtime is about
-23 ms per packet; eight karts at 2 Hz use ~37% of channel time before other traffic.
-This is a calculation using [Semtech's formula](https://cdn.sparkfun.com/assets/7/7/3/2/2/SX1276_Datasheet.pdf), not a field result.
+| Feed | Next target / implementation |
+| --- | --- |
+| VESC GET_VALUES, both kart images | 200 ms / 5 Hz; actual replies depend on BLE latency |
+| Kart USB display feed, both images | 200 ms / 5 Hz; values may repeat if no new sample |
+| LoRa kart telemetry | 500 ms / 2 Hz default; integrated console `rate 1|2` persists |
+| Base beacon/status | 1 Hz |
+| Pit SSE | Existing ~4 Hz full state; independent of radio reception |
+| Pit moving map | Eamon's 20 fps interpolation; not 20 fresh GPS fixes per second |
+| GNSS module | Existing configuration, unchanged; report fix age/validity |
+
+The integrated kart and base share fixed 50 ms ID slots in two 500 ms rounds.
+A 1 Hz kart uses only the first round at the same ID offset. Transmission starts
+8–16 ms into its slot; calculated 46-byte airtime is 23.104 ms. The base's 22-byte
+beacon starts at/after 905 ms (14.144 ms airtime), followed by commands that fit
+before 985 ms. GPS PPS has priority; otherwise karts follow a fresh base beacon.
+Without either source, jittered fallback is unslotted and collisions are possible.
+A base without PPS only derives its clock from PPS-tagged kart packets, never
+from the unslotted recovery transmitter.
+
+**Deploy base and integrated kart images together.** The earlier 1 Hz schedule
+used 100 ms slots and can collide with the new second round. Packet formats and
+RF settings still match, but packet compatibility is not schedule compatibility.
+New integrated nodes default to 2 Hz; a stored 1 Hz preference is preserved until
+`rate 2` is explicitly issued. `rate 1` remains available for coverage/load tests.
+Firmware identifiers: `kart-0.1.2-config-guard-2hz`, `base-0.1.1-beacon-2hz`,
+and telemetry recovery `0.2.2-bench`.
+
+The read-only recovery image sends at 500 ms ±50 ms without receiving beacons or
+other karts. It remains suitable for the single-kart bench test, not a claim of
+fleet scheduling. The pit simulator now defaults to 2 Hz with `--rate 1` available.
+
+Eight karts at 2 Hz use 36.97% calculated telemetry airtime, before beacons,
+commands and retransmissions. This follows [Semtech's airtime formula](https://cdn.sparkfun.com/assets/7/7/3/2/2/SX1276_Datasheet.pdf)
+and is not an RF field result. Native tests cover all 256 mixed-rate fleets,
+slot boundaries and complete packet occupancy. Measure reception/loss and
+command latency with Eamon's base, then all eight karts, before raising rates
+again. A later 10 Hz local benchmark is not included in this change.

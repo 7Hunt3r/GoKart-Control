@@ -4,7 +4,7 @@
 // and GNSS rails before either chip answers; the rail map is from Meshtastic Power.cpp.
 #pragma once
 
-#define FW_VERSION "base-0.1.0"
+#define FW_VERSION "base-0.1.1-beacon-2hz"
 
 // LoRa (SX1262 module on the Supreme; LR1121 variants exist and are NOT handled yet)
 #define PIN_LORA_CS    10

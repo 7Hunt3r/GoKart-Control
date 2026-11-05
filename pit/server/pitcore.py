@@ -133,14 +133,21 @@ class KartState:
         self.trail = deque(maxlen=TRAIL_POINTS)
         self.packets = 0
         self.seq_gaps = 0               # tele packets missed, from the kart's own seq counter
+        self.rx_count = 0               # tele packets received
+        self.recent = deque(maxlen=600)   # (mono, received, gap) for a rolling loss figure
 
     def ingest_tele(self, msg, now, wall):
         seq = msg.get("seq")
         prev = self.status.get("seq")
+        self.rx_count += 1
+        gap_now = 0
         if isinstance(seq, int) and isinstance(prev, int):
             gap = (seq - prev - 1) % 256
+            if 0 < gap < 128:
+                gap_now = gap
             if 0 < gap < 128:           # ignore restarts/reorders
                 self.seq_gaps += gap
+        self.recent.append((now, 1, gap_now))
         self.packets += 1
         self.last_tele_mono = now
         self.last_tele_wall = wall
@@ -160,6 +167,12 @@ class KartState:
             if not self.trail or (self.trail[-1][1], self.trail[-1][2]) != (lat, lon):
                 self.trail.append((now, lat, lon))
 
+    def _loss_pct(self, now, window_s):
+        rx = lost = 0
+        for t, r, g in self.recent:
+            if now - t <= window_s: rx += r; lost += g
+        return round(100.0 * lost / (rx + lost), 1) if (rx + lost) else None
+
     def snapshot(self, now):
         link = link_status(self.last_tele_mono, now)
         vesc_age = _age(self.last_vesc_mono, now)
@@ -178,6 +191,8 @@ class KartState:
             "last_seen_wall": self.last_tele_wall,
             "packets": self.packets,
             "seq_gaps": self.seq_gaps,
+            "rx_count": self.rx_count,
+            "loss_pct_1m": self._loss_pct(now, 60.0),
             "status": dict(self.status),
             "mode_req_name": MODE_NAMES.get(mr) if mr is not None else None,
             "mode_actual_name": MODE_NAMES.get(ma) if ma is not None else None,

@@ -95,10 +95,11 @@ public:
   const VescActiveLimits& limits() const { return _limits; }
   uint32_t lastAckMs() const { return _lastAckMs; }
   bool linkUp(uint32_t maxAgeMs = 1000) const { return _values.receivedMs && (millis() - _values.receivedMs) < maxAgeMs; }
-  void markLinkLost() { _values.receivedMs = 0; _limits.receivedMs = 0; _rxLen = 0; _identitySeen = false; _uuidHex[0] = 0; fwMajor = fwMinor = 0; _lastAckMs = 0; }
+  void markLinkLost() { _values.receivedMs = 0; _limits.receivedMs = 0; _rxLen = 0; _identitySeen = false; fwSeenMs = 0; _uuidHex[0] = 0; fwMajor = fwMinor = 0; _lastAckMs = 0; }
 
   uint8_t fwMajor = 0, fwMinor = 0;
   char hwName[24] = {0};
+  uint32_t fwSeenMs = 0;
   uint32_t crcErrors = 0, packets = 0, badSignature = 0;
 
   static uint16_t crc16(const uint8_t* data, size_t len);

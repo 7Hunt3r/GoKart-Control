@@ -96,11 +96,14 @@ status line says so; that variant is not handled yet.
 
 ## Protocol in one paragraph
 
-Every kart transmits one 46-byte telemetry packet per second at 915 MHz, SF7, 500 kHz
-(matching Colin's bench transmitter, whose 47-byte frame the base also decodes),
-in a 100 ms slot chosen by kart id and aligned to the GPS PPS edge, so eight karts
-fill 800 ms without colliding. The base sends 14-byte commands in the remaining
-tail of the second. Commands carry a sequence number that the kart echoes with a
+Integrated karts default to two 46-byte telemetry packets per second at 915 MHz,
+SF7, BW500, CR4/5. Both supported rates (`rate 1|2`) use the same 50 ms ID slots;
+2 Hz adds a second round 500 ms later. Slots follow GPS PPS or the pit beacon;
+without sync, fallback is jittered and may collide. The base sends a 22-byte
+beacon and 14-byte commands after 905 ms. Update base and karts together; old
+100 ms slot schedules are incompatible. Local VESC polling and USB display
+output are 5 Hz. Colin's recovery image uses the same packet/RF settings at
+2 Hz but is unslotted; the base also decodes historical 47-byte frames. Commands carry a sequence number that the kart echoes with a
 result code in its next telemetry; the host retries until it sees the echo. See
 `libraries/GoKartProtocol/GoKartProtocol.h` and `base-tbeam-s3/SERIAL_PROTOCOL.md`.
 
@@ -117,9 +120,11 @@ insufficient. `status` reports identity verification. See the per-kart setup in
   ends the transaction with unknown; it is not automatically retried.
 - SET_MODE uses the historical ECO 80/140, NORMAL 100/140, SPORT 1.0 current scales.
   These are prototype behavior, not the owner's final top-speed profiles.
-- STOP clamps each 0.6 / 0.3 / 0.1 / 0 step to the newly observed scale, so it
+- STOP clamps each 0.5 / 0.2 / 0 step to the newly observed scale, so it
   never increases the allowance. The ramp ends on any failed step. STOPPED is
-  reported only after the observed scale is zero. Mechanical brakes are unchanged.
+  reported only after the observed scale is zero. The 150 ms step interval is
+  a minimum; fresh reads/ack/readback add latency, so this is not a guaranteed
+  half-second stop. Mechanical brakes are unchanged.
 - START re-applies the requested mode or the scale freshly captured before STOP.
   It does not request wheel movement. No configuration write occurs on boot,
   reconnect or communication loss, and pending transactions do not resume.
@@ -179,6 +184,6 @@ before anything is trusted:
 
 See [tested toolchain and native/simulator checks](../docs/integration.md#build-and-test).
 The native tests exercise the real VESC parser and write transaction against the
-captured identity/configuration, including lower-than-0.6 STOP, preservation of
+captured identity/configuration, including lower-than-requested-step STOP, preservation of
 non-default limits, wrong identity, missing replies, disconnect, readback mismatch,
 transport failure and timer rollover. Compilation/tests do not deploy firmware.

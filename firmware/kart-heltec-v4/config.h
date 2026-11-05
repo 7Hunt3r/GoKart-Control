@@ -3,7 +3,7 @@
 // variant (which runs on this exact board). Everything else is this project's choice.
 #pragma once
 
-#define FW_VERSION      "kart-0.1.1-config-guard"
+#define FW_VERSION      "kart-0.1.2-config-guard-2hz"
 #define DEFAULT_KART_ID 1            // runtime override: USB command "id N" (stored in flash)
 
 // ---- VESC writes -----------------------------------------------------------
@@ -82,12 +82,12 @@ static const ModeDef MODES[3] = {
 
 // Stop steps are upper bounds, clamped to each fresh live scale so they never
 // increase the allowance. Mechanical brakes are untouched.
-static const float STOP_RAMP[] = { 0.6f, 0.3f, 0.1f, 0.0f };
-#define STOP_RAMP_STEP_MS 300
+static const float STOP_RAMP[] = { 0.5f, 0.2f, 0.0f };
+#define STOP_RAMP_STEP_MS 150
 
 // ---- Timing ----------------------------------------------------------------
 #define OLED_REFRESH_MS    500
-#define USB_SELF_REPORT_MS 500
+#define USB_SELF_REPORT_MS 200 // 5 Hz local Pi display feed
 #define GPS_DETECT_STEP_MS 4000
 #define FLEET_STALE_MS     5000
 #define WDT_TIMEOUT_S      20

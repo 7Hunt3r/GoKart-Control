@@ -4,7 +4,8 @@ This is the target design, not a deployed fleet system. A
 [Heltec bench implementation](../firmware/heltec/README.md) now exercises BLE
 telemetry, GPS serial data, raw LoRa TX and authenticated maintenance OTA.
 The integrated branch also contains Eamon’s kart/base firmware and Python pit
-server/kiosk. The shared 46-byte GoKartProtocol runs at 1 Hz per kart; the
+server/kiosk. The shared 46-byte GoKartProtocol now targets 2 Hz per kart,
+with 5 Hz VESC polling/local USB output and PPS/pit-beacon slot sync; the
 on-kart Pi display and field validation remain open. See [integration](integration.md).
 
 ```mermaid

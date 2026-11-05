@@ -116,6 +116,11 @@ python3 -I pit/tests/test_e2e.py
   every serial line received (`rx`) and sent (`tx`), operator actions (`op`,
   with operator name and IP), command lifecycle and link events. Download from
   the operator page or `GET /api/log/download`.
+The simulator defaults to 2 Hz telemetry per kart (`--rate 1` for the older
+rate). Radio reception is independent of SSE refresh and the moving map's
+20 fps interpolation; interpolation does not create new GPS fixes. The kiosk
+includes Eamon's rolling 1-minute packet-loss and pit-link RSSI displays.
+
 - **HTTP.** `/` operator UI, `/kiosk`, `/events` (SSE, ~4 Hz full state),
   `GET /api/state`, `GET /api/log/recent?n=100[&lines=1]`, `POST /cmd`
   `{"cmd":"stop|start|mode|ping","kart":1-8|255,"arg":0-2}`, `POST /api/race`

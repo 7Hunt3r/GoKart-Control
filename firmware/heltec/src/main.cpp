@@ -19,8 +19,9 @@ static constexpr uint8_t EXPECTED_UUID[12]={0x2c,0,0x4c,0,9,0x51,0x34,0x30,0x37,
 static const char* SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_RX="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_TX="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-static const char* VERSION="0.2.1-bench";
+static const char* VERSION="0.2.2-bench";
 static constexpr uint32_t STALE_MS=1000;
+static constexpr uint32_t LOCAL_TELEMETRY_MS=200; // 5 Hz polling and USB display feed
 static constexpr uint32_t OTA_WINDOW_MS=600000;
 
 SPIClass radioSPI(FSPI);
@@ -50,8 +51,10 @@ void emitLine(const String& line){
 }
 void pumpOutput(){
     if(serialOffset>=serialLength)return;
-    int room=Serial.availableForWrite();if(room<=0)return;
-    size_t count=min(size_t(room),serialLength-serialOffset);
+    // Let HWCDC service reconnect/backpressure even when its ring buffer is full.
+    // availableForWrite()==0 alone can strand queued output after a host closes.
+    // A 64-byte write has a 1 ms timeout; never block BLE/radio on a display reader.
+    size_t count=min(size_t(64),serialLength-serialOffset);
     serialOffset+=Serial.write((const uint8_t*)serialOutput+serialOffset,count);
 }
 
@@ -128,7 +131,7 @@ void bleWorker(void*){
             }
             if(requestPending && millis()-lastQuery>1200){parser.reset();requestPending=false;event("vesc_response_timeout");}
             if(client->isConnected() && millis()-lastRx>6000){client->disconnect();event("ble_stale_disconnect_read_only");}
-            if(client->isConnected() && !requestPending && millis()-lastQuery>=250 && !maintenance){
+            if(client->isConnected() && !requestPending && millis()-lastQuery>=LOCAL_TELEMETRY_MS && !maintenance){
                 uint8_t frame[6];vesc::query(identified?4:0,frame);
                 lastQuery=millis();requestPending=true;
                 // This BLE characteristic write carries only allowlisted GET requests.
@@ -197,6 +200,7 @@ void status(){
     d["gps_chars"]=gps.charsProcessed();d["gps_checksum_pass"]=gps.passedChecksum();d["gps_fix"]=gps.location.isValid() && gps.location.age()<3000;
     if(d["gps_fix"].as<bool>()){d["latitude_deg"]=gps.location.lat();d["longitude_deg"]=gps.location.lng();}else{d["latitude_deg"]=nullptr;d["longitude_deg"]=nullptr;}
     d["satellites"]=gps.satellites.isValid() && gps.satellites.age()<3000?int(gps.satellites.value()):-1;
+    d["vesc_poll_interval_ms"]=LOCAL_TELEMETRY_MS;d["usb_report_interval_ms"]=LOCAL_TELEMETRY_MS;d["radio_interval_ms"]=GK_REPORT_PERIOD_MS;
     d["radio_payload_bytes"]=sizeof(GkTelemetry);d["radio_bandwidth_khz"]=GK_LORA_BW_KHZ;d["radio_sequence_next"]=uint8_t(sequence);d["pps_aligned"]=false;d["vesc_writes_enabled"]=false;
     d["radio_init"]=radioInit;d["tx_enabled"]=txEnabled;d["tx_completed"]=txCount;d["tx_errors"]=txErrors;
     d["maintenance"]=maintenance.load();d["ota_active"]=otaActive;d["free_heap"]=ESP.getFreeHeap();
@@ -241,7 +245,7 @@ void command(const String& line){
     }else event("command_rejected_no_vesc_write_api");
 }
 void setup(){
-    Serial.begin(115200);Serial.setTxTimeoutMs(0);
+    Serial.begin(115200);Serial.setTxTimeoutMs(1);
     bootId=esp_random();events=xQueueCreate(32,sizeof(Event));rxQueue=xQueueCreate(24,sizeof(Chunk));
     prefs.begin("gkc_bench",false);kartId=prefs.getUChar("kart_id",0);if(kartId>8)kartId=0;
     uint64_t mac=ESP.getEfuseMac();char name[32];snprintf(name,sizeof(name),"gkc-%06lx",(unsigned long)(mac&0xffffff));hostName=name;apName="GoKart-"+hostName;
@@ -269,6 +273,6 @@ void loop(){
     else {held=0;buttonHandled=false;}
     serviceMaintenance();transmit();
     Event e;if(serialOffset>=serialLength && xQueueReceive(events,&e,0)==pdTRUE){JsonDocument d;d["event"]=e.text;d["uptime_ms"]=millis();String line;serializeJson(d,line);emitLine(line);}
-    static uint32_t last=0;if(millis()-last>=1000){last=millis();status();}
+    static uint32_t last=0;if(millis()-last>=LOCAL_TELEMETRY_MS){last=millis();status();}
     pumpOutput();delay(2);
 }

@@ -1,12 +1,12 @@
 # Collaborator handoff
 
-Updated November 5, 2026. This integration combines Eamon's `d91422b` with
+Updated November 5, 2026. This integration combines Eamon's `d7ade6f` with
 Colin's telemetry/diagnostic `544b498`, plus guarded configuration transactions.
 Use [docs/integration.md](docs/integration.md) for exact build/commissioning steps.
 
 ## What is physically running
 
-**Colin, kart 1:** Heltec `firmware/heltec` 0.2.1-bench, telemetry only. BLE identity
+**Colin, kart 1:** Heltec `firmware/heltec` 0.2.2-bench, telemetry only. BLE identity
 verified; fresh values showed 0 A, 0 ERPM, fault 0 after all motor tests. Radio TX
 is enabled, maintenance off, 46-byte GoKartProtocol at 915 MHz/BW500/SF7/CR4/5.
 GPS NMEA is received but no outdoor fix is verified. Actual receipt of kart 1 at
@@ -24,16 +24,23 @@ Colin's installed image. Source updates and Git merges do not deploy hardware.
 
 ## What changed for integration
 
-- One unchanged canonical `GoKartProtocol` header and the existing base serial
-  contract serve both kart implementations and the pit. Radio stays at 1 Hz
-  per kart so it remains compatible with Eamon's running base.
+- One canonical `GoKartProtocol` header and the existing base serial contract
+  serve both kart implementations and the pit. Telemetry payload remains 46
+  bytes; the target is now 5 Hz local VESC/USB and 2 Hz LoRa per kart.
+- Eamon's 22-byte pit beacons, rolling packet-loss display, 20 fps moving-map
+  interpolation and public shop imagery are included. GPS acquisition rate is
+  unchanged; faster rendering/radio does not produce new GPS fixes.
+- Both 1 Hz and 2 Hz integrated karts use identical 50 ms ID slots, avoiding
+  mixed-rate overlap. The base sends its beacon/commands after 905 ms. Update
+  base and karts together; issue `rate 2` on nodes with a stored 1 Hz setting.
+  Tests cover all 256 mixtures of eight kart rates and full packet airtime.
 - BLE is the integrated kart default. It requires a pinned BLE MAC to connect
   and a pinned VESC UUID plus firmware 6.00 before any configuration write.
 - Every temporary-limit transaction first reads fresh settings, changes only
   current-max scale, and checks all transmitted limits after acknowledgment.
   Battery-current fields are omitted and checked for preservation.
-- STOP's steps are clamped to the newly read scale. A kart already below 0.6
-  cannot have its allowance raised by STOP. On failure the ramp ends with an
+- STOP's 0.5 / 0.2 / 0 steps are clamped to the newly read scale. A kart already
+  below a step cannot have its allowance raised by STOP. On failure the ramp ends with an
   unknown result; it does not retry itself or resume after reconnection.
 - Recent command outcomes are retained for duplicate replies, including rejected
   overlapping requests. No command backlog executes when a link returns.
@@ -56,8 +63,9 @@ Colin's installed image. Source updates and Git merges do not deploy hardware.
    wheels-up STOP/START test through the pit. Validate actual readback, wired
    throttle behavior, unknown outcomes and loss/reconnect behavior. START is
    not a wheel-spin command. These steps are not already passed.
-4. Validate GPS fixes, RF coverage, PPS scheduling and eight-kart airtime before
-   increasing radio rates. Then integrate the kart Pi touchscreen/map view.
+4. Validate GPS fixes, beacon/PPS sync and eight-kart loss/coverage at 2 Hz;
+   retain `rate 1` as a test fallback on integrated nodes. Then integrate the
+   kart Pi touchscreen/map view. A 10 Hz local target awaits measurement.
 
 Do not automatically flash as part of a Git pull. The owner requested basic
 telemetry after the motor experiments; that remains the current hardware state.

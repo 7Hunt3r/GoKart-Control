@@ -144,7 +144,7 @@ void VescLink::parseMotorConfig(const uint8_t* p, uint16_t len) {
 void VescLink::handlePacket(const uint8_t* p, uint16_t len) {
   switch (p[0]) {
     case VESC_COMM_FW_VERSION: {
-      _identitySeen = false;
+      _identitySeen = false; fwSeenMs = 0;
       _uuidHex[0] = 0;
       if (len < 4) return;
       size_t end = 3;
@@ -161,7 +161,7 @@ void VescLink::handlePacket(const uint8_t* p, uint16_t len) {
         _uuidHex[2*i+1] = digits[_uuid[i] & 15];
       }
       _uuidHex[24] = 0;
-      _identitySeen = true;
+      _identitySeen = true; fwSeenMs = millis();
       break;
     }
     case VESC_COMM_GET_VALUES: {

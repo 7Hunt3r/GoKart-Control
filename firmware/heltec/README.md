@@ -107,10 +107,11 @@ update and power-failure recovery need separate controlled tests before field us
 ## Radio receiver agreement for Eamon
 
 This adapter uses Eamon’s canonical
-[`GoKartProtocol.h`](../libraries/GoKartProtocol/GoKartProtocol.h), copied unchanged
-from his branch at `ab9404a`. The transmitter keeps the shared 46-byte packet.
-Eamon’s latest receiver moved to **BW500** and also accepts legacy 47-byte frames;
-version 0.2.1-bench follows that radio setting. The earlier 0.2.0-bench BW250 image
+[`GoKartProtocol.h`](../libraries/GoKartProtocol/GoKartProtocol.h). The integration
+includes his branch through `d7ade6f`; the transmitter keeps the shared 46-byte
+packet and **BW500**. Version `0.2.2-bench` raises VESC polling/local USB output
+to 5 Hz and unslotted radio reports to 2 Hz. The base also accepts legacy 47-byte
+frames. Version 0.2.1-bench used the same RF settings at 1 Hz. The earlier 0.2.0-bench BW250 image
 must be updated to receive on his latest base. No one should independently move
 the bandwidth again; change the canonical shared header and update both ends.
 
@@ -126,7 +127,7 @@ Custom raw LoRa, not LoRaWAN/Meshtastic:
 | Preamble | 8 symbols |
 | Header / CRC / IQ | Explicit / enabled / normal |
 | SX1262 requested output | 0 dBm; external FEM means this is not antenna EIRP |
-| Interval | 1 second ±50 ms jitter; 46-byte payload |
+| Interval | 500 ms ±50 ms jitter (2 Hz target); 46-byte payload |
 | Identity | Protocol 1, fleet 0x4B, telemetry type 1, kart 1, destination 255 |
 
 The packed shared struct is the source of truth for offsets and units. All

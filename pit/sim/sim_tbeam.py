@@ -216,7 +216,7 @@ class Sim:
             self.pending.append((now + random.uniform(0.15, 0.5), sk, msg))
 
     def run(self):
-        next_tele = {sk.k: time.monotonic() + 0.1 * sk.k for sk in self.karts}
+        next_tele = {sk.k: time.monotonic() + 0.05 * (sk.k - 1) + 0.008 for sk in self.karts}
         next_sec = time.monotonic()
         last = time.monotonic()
         while True:
@@ -232,7 +232,7 @@ class Sim:
                     sk.command(msg, now)
                 for sk in self.karts:
                     if now >= next_tele[sk.k]:
-                        next_tele[sk.k] += 1.0
+                        next_tele[sk.k] += 1.0 / self.args.rate
                         if not sk.silent(now):
                             self.rx += 1
                             self.emit(sk.tele(self.millis()))
@@ -323,6 +323,7 @@ def main():
     ap.add_argument("--offline", type=int, default=8)
     ap.add_argument("--novesc", type=int, default=0)
     ap.add_argument("--loss", type=float, default=0.1, help="per-kart command loss fraction")
+    ap.add_argument("--rate", type=int, choices=(1, 2), default=2, help="telemetry reports per kart per second (default: 2)")
     ap.add_argument("--seed", type=int)
     args = ap.parse_args()
     if args.seed is not None:

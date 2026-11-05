@@ -5,7 +5,8 @@
 // little-endian, with GkHeader first. Keep packets small: airtime is the scarce
 // resource with eight karts sharing one channel.
 //
-// Status: DESIGNED AND COMPILED, NOT YET EXERCISED OVER THE AIR.
+// Packet reception tested by Eamon at 1 Hz; the integrated 2 Hz fleet schedule
+// is compiled/offline-tested, with multi-kart RF validation still pending.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -20,8 +21,8 @@
 // ---- Radio parameters (identical on both ends) ----------------------------
 // US ISM band. These match Colin's installed Heltec bench transmitter
 // (firmware/heltec: 915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8) so both
-// frame formats share one channel. SF7/BW500 puts a 46-byte telemetry packet near
-// 20 ms airtime, comfortably inside the 100 ms kart slot. Change SF/BW on every
+// frame formats share one channel. SF7/BW500 puts a 46-byte telemetry packet at
+// 23.104 ms airtime, inside a 50 ms kart slot. Change SF/BW on every
 // board together. Range is traded for airtime; raise SF if the track proves too
 // big and lower the report rate to match. Not yet declared the final fleet setting.
 #define GK_LORA_FREQ_MHZ       915.0
@@ -32,19 +33,39 @@
 #define GK_LORA_PREAMBLE       8
 
 // ---- Slot timing -----------------------------------------------------------
-// Karts with a GPS PPS edge align their transmit to the top of the UTC second:
-// kart k transmits at (k-1) * GK_SLOT_MS after the edge. Without PPS a kart
-// free-runs at 1 Hz with random jitter and simply risks collisions. The base
-// station sends commands in the tail of the second (after slot 8) when it has
-// PPS, otherwise immediately.
-#define GK_REPORT_PERIOD_MS    1000
-#define GK_SLOT_MS             100
-#define GK_SLOT_GUARD_MS       8      // early offset so the preamble starts inside the slot
+// Default: 2 Hz, eight fixed 50 ms slots per 500 ms round. A 1 Hz kart uses
+// the SAME offsets in the first round, so mixed rates do not change kart slots.
+// PPS is preferred, then pit beacon sync; unsynced fallback has collision risk.
+// The base reserves the tail after 905 ms for its beacon and commands.
+#define GK_DEFAULT_REPORT_RATE 2
+#define GK_REPORT_PERIOD_MS    500
+#define GK_SLOT_MS             50
+#define GK_SLOT_GUARD_MS       8      // offset and allowed start-window width inside each slot
 #define GK_BASE_WINDOW_MS      (GK_MAX_KARTS * GK_SLOT_MS + 20)
+// Pit beacon: sent at this phase of the base's second, in the tail after all kart slots
+// (also clear of the second 2 Hz round, which ends at 900 ms with 50 ms slots).
+#define GK_BEACON_PHASE_MS     905
+// Calculated airtime at SF7/BW500, CR4/5, preamble 8, explicit header and CRC.
+#define GK_BEACON_AIRTIME_US   14144UL
+#define GK_TELEMETRY_AIRTIME_US 23104UL
+// A kart that hears the beacon but has no GPS PPS aligns its slots to it (sync source 2).
+#define GK_SYNC_MAX_AGE_MS     3000
+// Per-kart runtime setting: "rate 1|2"; both rates share these fixed offsets.
+
+// A narrow start window leaves room for the complete packet before the next slot.
+static inline uint32_t gkSlotOffsetUs(uint8_t kart) {
+  return ((uint32_t)(kart-1)*GK_SLOT_MS + GK_SLOT_GUARD_MS)*1000UL;
+}
+static inline bool gkSlotOpen(uint8_t kart, uint8_t rate, uint32_t sinceEdgeUs) {
+  if (kart < 1 || kart > GK_MAX_KARTS || (rate != 1 && rate != 2)) return false;
+  uint32_t phase=sinceEdgeUs; phase %= 1000000UL/rate;
+  uint32_t start=gkSlotOffsetUs(kart);
+  return phase>=start && phase<start+GK_SLOT_GUARD_MS*1000UL;
+}
 
 // ---- Message types ---------------------------------------------------------
 enum GkMsgType : uint8_t {
-  GK_MSG_TELEMETRY = 0x01,   // kart -> everyone, once per second
+  GK_MSG_TELEMETRY = 0x01,   // kart -> everyone, default twice per second
   GK_MSG_COMMAND   = 0x02,   // base -> one kart or all
   GK_MSG_BASE_INFO = 0x03,   // base -> everyone (base position, time), optional
 };
@@ -130,18 +151,21 @@ struct GkCommandMsg {
   uint32_t issued_utc_s;  // unix seconds at issue (0 = unknown)
 };
 
-struct GkBaseInfo {
+struct GkBaseInfo {       // pit beacon, once per second at GK_BEACON_PHASE_MS into the base's second
   GkHeader h;
   int32_t  lat_e7;
   int32_t  lon_e7;
-  uint32_t utc_s;         // unix seconds (for display sync), 0 if unknown
+  uint32_t utc_s;         // unix seconds at the top of this second (0 if the base has no GPS time)
+  uint16_t phase_ms;      // ms into the base's second when this packet started transmitting
+  uint8_t  sync_src;      // 0 free-running, 1 GPS PPS, 2 derived from kart slot timing
+  uint8_t  karts_online;  // how many karts the pit heard in the last 5 s
 };
 #pragma pack(pop)
 
 static_assert(sizeof(GkHeader) == 6, "header size");
 static_assert(sizeof(GkTelemetry) == 46, "telemetry size changed; update airtime budget and host decoder");
 static_assert(sizeof(GkCommandMsg) == 14, "command size");
-static_assert(sizeof(GkBaseInfo) == 18, "base info size");
+static_assert(sizeof(GkBaseInfo) == 22, "base info size");
 
 // ---- Helpers ---------------------------------------------------------------
 static inline void gkFillHeader(GkHeader& h, uint8_t type, uint8_t src, uint8_t dst, uint8_t seq) {
