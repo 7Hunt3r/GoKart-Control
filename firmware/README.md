@@ -73,7 +73,8 @@ status line says so; that variant is not handled yet.
 
 ## Protocol in one paragraph
 
-Every kart transmits one 46-byte telemetry packet per second at 915 MHz, SF7, 250 kHz,
+Every kart transmits one 46-byte telemetry packet per second at 915 MHz, SF7, 500 kHz
+(matching Colin's bench transmitter, whose 47-byte frame the base also decodes),
 in a 100 ms slot chosen by kart id and aligned to the GPS PPS edge, so eight karts
 fill 800 ms without colliding. The base sends 14-byte commands in the remaining
 tail of the second. Commands carry a sequence number that the kart echoes with a

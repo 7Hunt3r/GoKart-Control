@@ -70,8 +70,16 @@ Eamon's branch adds the first runnable firmware; see [firmware/README.md](firmwa
 
 Verified: both sketches compile (esp32 core 3.3.8); temp-limit payload checked against
 bldc release_6_00; mcconf offsets computed from the pinned schema; the base firmware
-boots on Eamon's T-Beam S3 with PMU, SX1262 and GNSS detected and USB JSON flowing.
-Not verified: any LoRa traffic, GPS fix/PPS, the kart node on hardware. The proposed VESC transport is wired UART from the Heltec (the
+boots on Eamon's T-Beam S3 with PMU, SX1262 and GNSS detected and USB JSON flowing;
+the pit server drove it over USB and a command was transmitted over LoRa.
+Not verified: any received LoRa packet, GPS fix/PPS, the kart node on hardware.
+
+Radio reconciliation with Colin's `firmware/heltec-bench-ota` (PR #2): this branch now
+uses the bench radio settings (915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8) and
+the T-Beam decodes the bench 47-byte `GK` frame alongside GoKartProtocol frames (byte 0
+distinguishes them), emitting it as a `tele` line with `"bench":true`. So Colin's
+installed transmitter and Eamon's receiver can be tested without reflashing the Heltec.
+Which frame becomes the fleet protocol is still an open decision for the integration PR. The proposed VESC transport is wired UART from the Heltec (the
 BLE module comes off the COMM port); `docs/architecture.md` still prefers BLE, so this
 is a second point to settle with the owner.
 

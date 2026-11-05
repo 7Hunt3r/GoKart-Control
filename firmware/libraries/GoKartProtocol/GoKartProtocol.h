@@ -18,12 +18,14 @@
 #define GK_ADDR_ALL        0xFF   // broadcast
 
 // ---- Radio parameters (identical on both ends) ----------------------------
-// US ISM band. SF7/BW250 keeps a 46-byte telemetry packet near 40 ms airtime,
-// which is what makes 8 karts at 1 Hz fit in 8 x 100 ms slots. Change SF/BW on
-// both ends together. Range is traded for airtime here; raise SF if the track
-// proves too big and lower the report rate to match.
+// US ISM band. These match Colin's installed Heltec bench transmitter
+// (firmware/heltec: 915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8) so both
+// frame formats share one channel. SF7/BW500 puts a 46-byte telemetry packet near
+// 20 ms airtime, comfortably inside the 100 ms kart slot. Change SF/BW on every
+// board together. Range is traded for airtime; raise SF if the track proves too
+// big and lower the report rate to match. Not yet declared the final fleet setting.
 #define GK_LORA_FREQ_MHZ       915.0
-#define GK_LORA_BW_KHZ         250.0
+#define GK_LORA_BW_KHZ         500.0
 #define GK_LORA_SF             7
 #define GK_LORA_CR             5       // 4/5
 #define GK_LORA_SYNC_WORD      0x12    // RadioLib "private" sync word, same on SX127x/SX126x
@@ -203,4 +205,52 @@ static inline uint32_t gkUnixFromCivil(int y, int m, int d, int hh, int mm, int 
   const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
   const long days = era * 146097L + (long)doe - 719468L;
   return (uint32_t)(days * 86400L + hh * 3600L + mm * 60L + ss);
+}
+
+// ---- Colin's Heltec bench frame (firmware/heltec, version 0.1.x-bench) ------
+// 47 bytes, little-endian: 'G' 'K' 0x01 kartId | u32 bootId | u32 seq | u32 millis |
+// u16 sampleAgeMs (65535 none) | u8 flags (bit0 VESC valid, bit1 GPS valid) |
+// u8 fault (255 none) | u16 volts*10 | i16 battA*10 | i16 motorA*10 | i32 erpm |
+// i16 escC*10 | i32 lat_e7 | i32 lon_e7 | u16 speed m/s*100 (65535 none) |
+// u8 sats (255 none) | u16 hdop*100 (65535 none) | u16 fixAgeMs (65535 none).
+// Byte 0 is 'G' (0x47) whereas a GoKartProtocol header starts with the version
+// byte 0x01, so a receiver can tell the two apart on one channel.
+#define GK_BENCH_FRAME_LEN 47
+struct GkBenchFrame {
+  uint8_t  kartId; uint32_t bootId, seq, millis; uint16_t sampleAgeMs; uint8_t flags, fault;
+  float volts, battA, motorA; int32_t erpm; float escC;
+  int32_t lat_e7, lon_e7; uint16_t speedCms, hdop100, fixAgeMs; uint8_t sats;
+  bool vescValid, gpsValid;
+};
+static inline uint16_t gkLe16(const uint8_t* b) { return (uint16_t)b[0] | ((uint16_t)b[1] << 8); }
+static inline uint32_t gkLe32(const uint8_t* b) { return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24); }
+static inline bool gkIsBenchFrame(const uint8_t* b, size_t len) { return len == GK_BENCH_FRAME_LEN && b[0] == 'G' && b[1] == 'K' && b[2] == 1; }
+static inline bool gkDecodeBenchFrame(const uint8_t* b, size_t len, GkBenchFrame& f) {
+  if (!gkIsBenchFrame(b, len)) return false;
+  f.kartId = b[3]; f.bootId = gkLe32(b + 4); f.seq = gkLe32(b + 8); f.millis = gkLe32(b + 12);
+  f.sampleAgeMs = gkLe16(b + 16); f.flags = b[18]; f.fault = b[19];
+  f.vescValid = f.flags & 1; f.gpsValid = f.flags & 2;
+  f.volts = gkLe16(b + 20) / 10.0f; f.battA = (int16_t)gkLe16(b + 22) / 10.0f; f.motorA = (int16_t)gkLe16(b + 24) / 10.0f;
+  f.erpm = (int32_t)gkLe32(b + 26); f.escC = (int16_t)gkLe16(b + 30) / 10.0f;
+  f.lat_e7 = (int32_t)gkLe32(b + 32); f.lon_e7 = (int32_t)gkLe32(b + 36);
+  f.speedCms = gkLe16(b + 40); f.sats = b[42]; f.hdop100 = gkLe16(b + 43); f.fixAgeMs = gkLe16(b + 45);
+  return true;
+}
+// JSON "tele" line for a bench frame, same field names as the contract; absent values are null.
+static inline int gkBenchToJson(char* out, size_t n, const GkBenchFrame& f, float rssi, float snr, uint32_t rxMs) {
+  char lat[20] = "null", lon[20] = "null", volts[12] = "null", ma[12] = "null", ba[12] = "null", erpm[16] = "null", esc[12] = "null", fault[6] = "null", sats[6] = "null", kph[12] = "null", hdop[10] = "null";
+  if (f.gpsValid) { snprintf(lat, sizeof lat, "%.7f", f.lat_e7 / 1e7); snprintf(lon, sizeof lon, "%.7f", f.lon_e7 / 1e7); }
+  if (f.vescValid) { snprintf(volts, sizeof volts, "%.1f", f.volts); snprintf(ma, sizeof ma, "%.1f", f.motorA); snprintf(ba, sizeof ba, "%.1f", f.battA); snprintf(erpm, sizeof erpm, "%ld", (long)f.erpm); snprintf(esc, sizeof esc, "%.1f", f.escC); if (f.fault != 255) snprintf(fault, sizeof fault, "%u", f.fault); }
+  if (f.sats != 255) snprintf(sats, sizeof sats, "%u", f.sats);
+  if (f.speedCms != 65535) snprintf(kph, sizeof kph, "%.1f", f.speedCms / 100.0 * 3.6);
+  if (f.hdop100 != 65535) snprintf(hdop, sizeof hdop, "%.2f", f.hdop100 / 100.0);
+  return snprintf(out, n,
+    "{\"t\":\"tele\",\"bench\":true,\"kart\":%u,\"seq\":%lu,\"boot_id\":%lu,\"lat\":%s,\"lon\":%s,\"fix\":%s,\"gps_age_s\":%u,"
+    "\"sats\":%s,\"hdop\":%s,\"gps_kph\":%s,\"heading\":null,\"volts\":%s,\"motor_a\":%s,\"batt_a\":%s,\"erpm\":%s,\"duty\":null,\"esc_c\":%s,"
+    "\"fault\":%s,\"mode_req\":null,\"mode_actual\":null,\"scale\":null,\"stopped\":false,\"vesc_link\":%s,\"mode_confirmed\":false,"
+    "\"pps\":false,\"wifi\":false,\"writes\":false,\"last_cmd_seq\":0,\"cmd_result\":0,\"ah\":null,\"uptime_s\":%lu,\"base_rssi\":0,"
+    "\"sample_age_ms\":%s,\"rssi\":%.0f,\"snr\":%.1f,\"rx_ms\":%lu}",
+    f.kartId, (unsigned long)f.seq, (unsigned long)f.bootId, lat, lon, gkBool(f.gpsValid),
+    f.fixAgeMs == 65535 ? 255 : (unsigned)(f.fixAgeMs / 1000), sats, hdop, kph, volts, ma, ba, erpm, esc, fault, gkBool(f.vescValid),
+    (unsigned long)(f.millis / 1000), f.sampleAgeMs == 65535 ? "null" : "0", (double)rssi, (double)snr, (unsigned long)rxMs);
 }

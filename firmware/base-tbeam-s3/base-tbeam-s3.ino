@@ -62,6 +62,7 @@ double   fixLat = 0, fixLon = 0;
 GkTelemetry fleet[GK_MAX_KARTS + 1];
 uint32_t    fleetMs[GK_MAX_KARTS + 1];
 float       fleetRssi[GK_MAX_KARTS + 1];
+GkBenchFrame benchLast; uint32_t benchRx = 0, benchMs = 0; float benchRssi = 0;   // Colin's bench transmitter (kart id 0 = uncommissioned)
 struct QueuedCmd { GkCommandMsg msg; bool used; };
 QueuedCmd cmdQueue[CMD_QUEUE_LEN];
 int cmdHead = 0, cmdTail = 0;
@@ -152,6 +153,23 @@ static void serviceLoraRx() {
   float rssi = radio.getRSSI(), snr = radio.getSNR();
   radio.startReceive();
   if (st != RADIOLIB_ERR_NONE) { loraRxBad++; return; }
+  // Colin's bench transmitter (firmware/heltec) sends a 47-byte 'GK' frame on the same channel.
+  GkBenchFrame bf;
+  if (gkDecodeBenchFrame(buf, len, bf)) {
+    loraRx++; benchRx++; benchMs = millis(); benchRssi = rssi; benchLast = bf;
+    if (bf.kartId >= 1 && bf.kartId <= GK_MAX_KARTS) {
+      // Count it as that kart on the OLED; fill the fleet slot with what the frame carries.
+      GkTelemetry& t = fleet[bf.kartId]; memset(&t, 0, sizeof t);
+      gkFillHeader(t.h, GK_MSG_TELEMETRY, bf.kartId, GK_ADDR_ALL, (uint8_t)bf.seq);
+      t.volts_x10 = (uint16_t)(bf.volts * 10); t.mode_req = GK_MODE_UNKNOWN; t.mode_actual = GK_MODE_UNKNOWN; t.scale_x1000 = 65535;
+      t.flags = (bf.vescValid ? GK_FLAG_VESC_LINK : 0) | (bf.gpsValid ? GK_FLAG_GPS_FIX : 0) | ((bf.vescValid && bf.fault && bf.fault != 255) ? GK_FLAG_FAULT : 0);
+      fleetMs[bf.kartId] = millis(); fleetRssi[bf.kartId] = rssi;
+    }
+    char out[700];
+    gkBenchToJson(out, sizeof out, bf, rssi, snr, millis());
+    Serial.println(out);
+    return;
+  }
   uint8_t type = gkValidate(buf, len);
   if (!type) { loraRxBad++; return; }
   loraRx++;
@@ -260,9 +278,11 @@ static void serviceHost() {
                   lat, lon, gkBool(fix), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0, utc, gkBool(ppsFresh()));
     char wifi[24] = "null";
     if (WiFi.status() == WL_CONNECTED) snprintf(wifi, sizeof wifi, "\"%s\"", WiFi.localIP().toString().c_str());
-    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d}\n",
+    char benchAge[12] = "null"; if (benchMs) snprintf(benchAge, sizeof benchAge, "%lu", (unsigned long)((millis() - benchMs) / 1000));
+    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s}\n",
                   FW_VERSION, radioOk ? "sx1262" : "none", (unsigned long)loraRx, (unsigned long)loraTx, (unsigned long)loraRxBad,
-                  (unsigned long)(millis() / 1000), (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, wifi, kartsOnline());
+                  (unsigned long)(millis() / 1000), (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, wifi, kartsOnline(),
+                  (unsigned long)benchRx, benchAge);
   }
 }
 
@@ -317,6 +337,7 @@ static void serviceOled() {
     snprintf(l, sizeof l, "K%d %-6.6s %4.1fV %3.0f %lus%s", i, (t.flags & GK_FLAG_STOPPED) ? "STOP" : mode, t.volts_x10 / 10.0, fleetRssi[i], (unsigned long)age, (t.flags & GK_FLAG_FAULT) ? "F" : "");
     oled.drawStr(0, y, l); y += 11; shown++;
   }
+  if (!shown && benchMs && now - benchMs < 10000) { snprintf(l, sizeof l, "bench K%u %4.1fV %3.0fdBm %lus", benchLast.kartId, benchLast.vescValid ? benchLast.volts : 0.0f, benchRssi, (unsigned long)((now - benchMs) / 1000)); oled.drawStr(0, 35, l); shown = 1; }
   if (!shown) oled.drawStr(0, 35, "no karts heard yet");
   bool fix = lastFixMs && (now - lastFixMs) < 3000;
   snprintf(l, sizeof l, "GPS %s%u%s tx%lu rx%lu", fix ? "fix " : "", gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0, ppsFresh() ? "P" : "", (unsigned long)loraTx, (unsigned long)loraRx);
