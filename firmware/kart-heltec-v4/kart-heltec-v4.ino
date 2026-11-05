@@ -2,7 +2,7 @@
  * GoKart Control — kart node firmware for Heltec WiFi LoRa 32 V4.3 (ESP32-S3 + SX1262 + L76K).
  *
  * The Heltec is the kart supervisor:
- *   - talks to the VESC (wired UART by default, BLE optional), polls telemetry 5 Hz,
+ *   - talks to the VESC (BLE by default, wired UART optional), polls telemetry 5 Hz,
  *     reads the live limits back (read-only reconciliation) and applies mode / stop /
  *     start ONLY when a deliberate command arrives from the pit or over USB;
  *   - reads the L76K GPS and uses its PPS edge to transmit in its own LoRa time slot;
@@ -30,6 +30,7 @@
 #include <esp_task_wdt.h>
 #include <GoKartProtocol.h>
 #include <VescLink.h>
+#include <VescWriteGuard.h>
 #include "config.h"
 #if !VESC_TRANSPORT_UART
 #include <NimBLEDevice.h>
@@ -38,7 +39,7 @@
 // ---------------------------------------------------------------- settings
 Preferences prefs;
 uint8_t kartId = DEFAULT_KART_ID;
-String  wifiSsid, wifiPass, otaPass, vescMac;
+String  wifiSsid, wifiPass, otaPass, vescMac, vescUuid;
 
 // ---------------------------------------------------------------- radio
 SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
@@ -89,9 +90,9 @@ public:
   size_t write(uint8_t c) override { return write(&c, 1); }
   size_t write(const uint8_t* b, size_t n) override {
     if (!_tx) return 0;
-    // Respect the negotiated MTU: chunk writes at 180 bytes.
+    // Twenty-byte chunks also fit the minimum BLE MTU. Report failed writes.
     size_t sent = 0;
-    while (sent < n) { size_t k = min((size_t)180, n - sent); _tx->writeValue(b + sent, k, false); sent += k; }
+    while (sent < n) { size_t k = min((size_t)20, n - sent); if (!_tx->writeValue(b + sent, k, false)) return sent; sent += k; }
     return n;
   }
 };
@@ -114,16 +115,11 @@ uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
 uint8_t  lastCmdSeq = 0, lastCmdSrc = 0xFE, cmdResult = GK_RES_NONE;
-// Per-source duplicate detection: a retransmit (same source, same seq, same issue time)
-// is reported again but never re-applied. Index 0 = pit base, 1 = USB/local.
-uint8_t  dupSeq[2] = {0, 0};
-uint32_t dupIssued[2] = {0, 0};
-bool     dupValid[2] = {false, false};
+VescCommandHistory commandHistory;
+uint32_t lastCmdIssued = 0;
 bool     modeConfirmed = false;
-enum WriteState { W_IDLE, W_SENT, W_VERIFY };
-WriteState wState = W_IDLE;
-float    wTarget = 0;
-uint32_t wSentMs = 0, wAckSeen = 0;
+VescWriteGuard writeGuard(vesc);
+bool capturePreStop = false;
 int      rampIdx = -1;
 uint32_t rampNextMs = 0;
 uint8_t  usbSeq = 0;
@@ -215,44 +211,40 @@ static void fillTelemetry(GkTelemetry& t) {
 }
 
 // ---------------------------------------------------------------- vesc writes
-static bool startWrite(float scale) {
-  if (!writesEnabled() || !vescUp()) return false;
-  VescTempLimits l;
-  l.currentMinScale = BASE_CURRENT_MIN_SCALE;
-  l.currentMaxScale = scale;
-  l.minErpm = BASE_MIN_ERPM; l.maxErpm = BASE_MAX_ERPM;
-  l.minDuty = BASE_MIN_DUTY; l.maxDuty = BASE_MAX_DUTY;
-  l.wattMin = BASE_WATT_MIN; l.wattMax = BASE_WATT_MAX;
-  l.sendInCurrent = false;
-  wAckSeen = vesc.lastAckMs();
-  vesc.sendTempLimits(l);
-  wState = W_SENT; wTarget = scale; wSentMs = millis();
-  logf("vesc write scale %.3f", scale);
-  return true;
+static bool startWrite(float scale, bool onlyReduce = false) {
+  if (!writesEnabled() || !vescUp() || !vesc.identityVerified()) return false;
+  return writeGuard.begin(scale, onlyReduce, millis());
+}
+
+static void cancelWritesOnLinkLoss() {
+  if (writeGuard.busy() || rampIdx >= 0) cmdResult = GK_RES_UNKNOWN;
+  writeGuard.cancel(); rampIdx = -1; capturePreStop = false;
+  modeConfirmed = false;
+  commandHistory.remember(lastCmdSrc, lastCmdSeq, lastCmdIssued, cmdResult);
 }
 
 static void serviceWrites() {
   uint32_t now = millis();
-  if (rampIdx >= 0 && wState == W_IDLE && (int32_t)(now - rampNextMs) >= 0) {
+  if (!vescUp() || !vesc.identityVerified()) { cancelWritesOnLinkLoss(); return; }
+  if (rampIdx >= 0 && !writeGuard.busy() && (int32_t)(now - rampNextMs) >= 0) {
     const int n = sizeof(STOP_RAMP) / sizeof(STOP_RAMP[0]);
-    if (!startWrite(STOP_RAMP[rampIdx])) { cmdResult = GK_RES_NO_VESC; rampIdx = -1; }
+    if (!startWrite(STOP_RAMP[rampIdx], true)) { cmdResult = GK_RES_UNKNOWN; rampIdx = -1; }
     else { rampIdx++; rampNextMs = now + STOP_RAMP_STEP_MS; if (rampIdx >= n) rampIdx = -1; }
   }
-  switch (wState) {
-    case W_IDLE: break;
-    case W_SENT:
-      if (vesc.lastAckMs() != wAckSeen) { wState = W_VERIFY; wSentMs = now; vesc.requestMotorConfig(); }
-      else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) cmdResult = GK_RES_UNKNOWN; logf("vesc write: no ack"); }
-      break;
-    case W_VERIFY:
-      if (vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - wSentMs) >= 0) {
-        wState = W_IDLE;
-        bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL;
-        if (rampIdx < 0) cmdResult = ok ? GK_RES_APPLIED : GK_RES_UNKNOWN;
-        modeConfirmed = ok && !stopActive && modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL;
-        logf("vesc write verify %s (scale %.3f)", ok ? "ok" : "MISMATCH", vesc.limits().currentMaxScale);
-      } else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) cmdResult = GK_RES_UNKNOWN; }
-      break;
+  bool wasBusy = writeGuard.busy();
+  writeGuard.service(now);
+  if (capturePreStop && writeGuard.snapshotReady()) {
+    preStopScale = writeGuard.before().currentMaxScale;
+    capturePreStop = false;
+  }
+  if (wasBusy && !writeGuard.busy()) {
+    bool ok = writeGuard.result() == VescWriteGuard::Applied;
+    if (!ok) { rampIdx = -1; capturePreStop = false; }
+    if (rampIdx < 0) cmdResult = ok ? GK_RES_APPLIED : GK_RES_UNKNOWN;
+    modeConfirmed = ok && !stopActive && modeReq != GK_MODE_UNKNOWN &&
+      fabsf(writeGuard.target() - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL;
+    commandHistory.remember(lastCmdSrc, lastCmdSeq, lastCmdIssued, cmdResult);
+    logf("vesc write verify %s (scale %.3f)", ok ? "ok" : "UNKNOWN", vesc.limits().currentMaxScale);
   }
 }
 
@@ -262,13 +254,18 @@ static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg) {
 }
 
 static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint16_t ttl, uint32_t issued) {
-  int si = (src == GK_ADDR_BASE) ? 0 : 1;
-  if (dupValid[si] && dupSeq[si] == seq && dupIssued[si] == issued) { emitCmd(src, seq, cmd, arg); return; }   // retransmit: report, do not re-apply
-  dupValid[si] = true; dupSeq[si] = seq; dupIssued[si] = issued;
-  lastCmdSeq = seq; lastCmdSrc = src;
+  uint8_t priorResult;
+  if (commandHistory.lookup(src,seq,issued,priorResult)) {
+    uint8_t saved=cmdResult; cmdResult=priorResult; emitCmd(src,seq,cmd,arg); cmdResult=saved; return;
+  }
+  if (writeGuard.busy() || rampIdx >= 0) {
+    commandHistory.remember(src,seq,issued,GK_RES_REJECTED);
+    uint8_t saved=cmdResult; cmdResult=GK_RES_REJECTED; emitCmd(src,seq,cmd,arg); cmdResult=saved; return;
+  }
+  lastCmdSeq = seq; lastCmdSrc = src; lastCmdIssued = issued;
   if (ttl && issued) {
     uint32_t now = gpsUnix();
-    if (now && now > issued + ttl) { cmdResult = GK_RES_REJECTED; logf("command %u expired", seq); emitCmd(src, seq, cmd, arg); return; }
+    if (now && now > issued + ttl) { cmdResult = GK_RES_REJECTED; commandHistory.remember(src,seq,issued,cmdResult); logf("command %u expired", seq); emitCmd(src, seq, cmd, arg); return; }
   }
   cmdResult = GK_RES_ACCEPTED;
   switch (cmd) {
@@ -277,19 +274,19 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
     case GK_CMD_SET_MODE:
       if (arg >= GK_MODE_COUNT) { cmdResult = GK_RES_REJECTED; break; }
       modeReq = arg; modeConfirmed = false;
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+      if (!writesEnabled() || !vesc.identityVerified()) { cmdResult = GK_RES_REJECTED; break; }
       if (stopActive) break;                             // remembered; applied at START
       if (!startWrite(MODES[arg].currentMaxScale)) cmdResult = GK_RES_NO_VESC;
       break;
     case GK_CMD_STOP:
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+      if (!writesEnabled() || !vesc.identityVerified()) { cmdResult = GK_RES_REJECTED; break; }
       if (!vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
-      if (!stopActive) preStopScale = vesc.limits().receivedMs ? vesc.limits().currentMaxScale : -1.0f;
+      if (!stopActive) { preStopScale = -1; capturePreStop = true; }
       stopActive = true; modeConfirmed = false;
       rampIdx = 0; rampNextMs = millis();
       break;
     case GK_CMD_START: {
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+      if (!writesEnabled() || !vesc.identityVerified()) { cmdResult = GK_RES_REJECTED; break; }
       stopActive = false; rampIdx = -1;
       float s = (modeReq != GK_MODE_UNKNOWN) ? MODES[modeReq].currentMaxScale : preStopScale;
       if (s < 0) { cmdResult = GK_RES_REJECTED; logf("start: no mode to restore"); break; }
@@ -299,6 +296,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
     default:
       cmdResult = GK_RES_REJECTED;
   }
+  commandHistory.remember(src,seq,issued,cmdResult);
   emitCmd(src, seq, cmd, arg);
 }
 
@@ -379,7 +377,7 @@ static void bleService() {
 static void serviceVesc() {
 #if !VESC_TRANSPORT_UART
   bleService();
-  if (!bleConnected) { if (vescLinkWas) { vescLinkWas = false; modeConfirmed = false; logf("vesc link lost"); } return; }
+  if (!bleConnected) { vesc.markLinkLost(); cancelWritesOnLinkLoss(); if (vescLinkWas) { vescLinkWas = false; logf("vesc link lost"); } return; }
 #endif
   vesc.poll();
   uint32_t now = millis();
@@ -390,10 +388,10 @@ static void serviceVesc() {
     modeConfirmed = false;
     logf("vesc link up");
   }
-  if (!up && vescLinkWas) { modeConfirmed = false; logf("vesc link lost"); }
+  if (!up && vescLinkWas) { vesc.markLinkLost(); cancelWritesOnLinkLoss(); logf("vesc link lost"); }
   vescLinkWas = up;
   if (now - vescPollMs >= VESC_POLL_MS) { vescPollMs = now; vesc.requestValues(); }
-  if (up && now - vescMcconfMs >= VESC_MCCONF_REFRESH_MS && wState == W_IDLE) { vescMcconfMs = now; vesc.requestMotorConfig(); }
+  if (up && now - vescMcconfMs >= VESC_MCCONF_REFRESH_MS && !writeGuard.busy() && rampIdx < 0) { vescMcconfMs = now; vesc.requestMotorConfig(); }
 }
 
 // ---------------------------------------------------------------- gps
@@ -530,7 +528,10 @@ static void usbCommand(char* line) {
   while (*line == ' ') line++;
   char* arg = strchr(line, ' ');
   if (arg) { *arg++ = 0; while (*arg == ' ') arg++; }
-  if (!strcmp(line, "status")) usbStatus();
+  if (!strcmp(line, "status")) {
+    usbStatus();
+    Serial.printf("{\"t\":\"identity\",\"uuid\":\"%s\",\"verified\":%s}\n", vesc.uuidHex(), gkBool(vesc.identityVerified()));
+  }
   else if (!strcmp(line, "id") && arg) { int n = atoi(arg); if (n >= 1 && n <= GK_MAX_KARTS) { kartId = n; prefs.putUChar("id", kartId); logf("kart id %u stored; reboot to rename OTA host", kartId); } else logf("id must be 1..8"); }
   else if (!strcmp(line, "mode") && arg) handleCommand(0xFE, ++usbSeq, GK_CMD_SET_MODE, atoi(arg), 0, 0);
   else if (!strcmp(line, "stop"))  handleCommand(0xFE, ++usbSeq, GK_CMD_STOP, 0, 0, 0);
@@ -542,7 +543,16 @@ static void usbCommand(char* line) {
     logf("wifi credentials stored for '%s'; reboot to apply", arg);
   }
   else if (!strcmp(line, "otapw") && arg) { prefs.putString("otapw", arg); logf("ota password stored; reboot to apply"); }
+  else if (!strcmp(line, "vescuuid") && arg) {
+    cancelWritesOnLinkLoss();
+    if (!strcmp(arg, "clear")) {
+      prefs.remove("vescuuid"); vescUuid = ""; vesc.setExpectedUuid(""); logf("VESC UUID cleared; writes blocked");
+    } else if (vesc.setExpectedUuid(arg)) {
+      vescUuid = arg; prefs.putString("vescuuid", vescUuid); logf("VESC UUID pinned");
+    } else { logf("UUID must be 24 hexadecimal characters; writes blocked"); }
+  }
   else if (!strcmp(line, "vescmac") && arg) {
+    cancelWritesOnLinkLoss(); vesc.markLinkLost();
     if (!strcmp(arg, "clear")) { prefs.remove("vescmac"); vescMac = ""; logf("vesc address cleared"); }
     else { prefs.putString("vescmac", arg); vescMac = arg; logf("vesc address pinned to %s", arg); }
 #if !VESC_TRANSPORT_UART
@@ -553,7 +563,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | vescuuid HEX24 | vescuuid clear | blescan | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -615,6 +625,8 @@ void setup() {
   wifiPass = prefs.getString("pass", "");
   otaPass  = prefs.getString("otapw", "");
   vescMac  = prefs.getString("vescmac", "");
+  vescUuid = prefs.getString("vescuuid", "");
+  vesc.setExpectedUuid(vescUuid.c_str());
   if (kartId < 1 || kartId > GK_MAX_KARTS) kartId = DEFAULT_KART_ID;
 
   // OLED (Vext powers it, active low)

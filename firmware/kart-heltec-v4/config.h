@@ -3,7 +3,7 @@
 // variant (which runs on this exact board). Everything else is this project's choice.
 #pragma once
 
-#define FW_VERSION      "kart-0.1.0"
+#define FW_VERSION      "kart-0.1.1-config-guard"
 #define DEFAULT_KART_ID 1            // runtime override: USB command "id N" (stored in flash)
 
 // ---- VESC writes -----------------------------------------------------------
@@ -65,16 +65,8 @@
 #define PIN_GNSS_TX    38   // ESP32 transmits here (labelled GNSS_RX)
 // If the L76K wiring turns out swapped, the firmware detects it automatically.
 
-// ---- Baseline limits (hardware/vesc/baseline-kart/2026-11-05) ---------------
-// Sent back unchanged in every temporary-limit write so only the current scale
-// moves. Battery current limits are never sent (the VESC keeps its own).
-#define BASE_CURRENT_MIN_SCALE  1.0f
-#define BASE_MIN_ERPM     -150000.0f
-#define BASE_MAX_ERPM      150000.0f
-#define BASE_MIN_DUTY      0.005f
-#define BASE_MAX_DUTY      0.95f
-#define BASE_WATT_MIN   -1500000.0f
-#define BASE_WATT_MAX    1500000.0f
+// Temporary writes preserve limits from a fresh GET_MCCONF reply. No BASE_*
+// constants are sent back to the controller. A pinned VESC UUID/6.00 is required.
 
 // ---- Modes ----------------------------------------------------------------
 // Ported from the Core2 dashboard: motor-current scale relative to the 140 A
@@ -88,7 +80,8 @@ static const ModeDef MODES[3] = {
 };
 #define MODE_MATCH_TOL 0.015f
 
-// Stop = ramp the current scale down, then hold at 0. Mechanical brakes are untouched.
+// Stop steps are upper bounds, clamped to each fresh live scale so they never
+// increase the allowance. Mechanical brakes are untouched.
 static const float STOP_RAMP[] = { 0.6f, 0.3f, 0.1f, 0.0f };
 #define STOP_RAMP_STEP_MS 300
 

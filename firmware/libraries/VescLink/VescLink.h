@@ -1,6 +1,6 @@
 // VescLink.h — minimal VESC UART client for firmware 6.00.
 //
-// Implements exactly what the kart needs and nothing that can hurt:
+// Implements telemetry and explicitly gated temporary configuration writes:
 //   * COMM_FW_VERSION       (0)  identity check
 //   * COMM_GET_VALUES       (4)  telemetry poll, 6.00 74-byte layout
 //   * COMM_GET_MCCONF       (14) read-only: live limit scales for reconciliation
@@ -76,13 +76,17 @@ struct VescTempLimits {
 class VescLink {
 public:
   explicit VescLink(Stream* port = nullptr) : _port(port) {}
-  void setPort(Stream* port) { _port = port; _rxLen = 0; }
+  void setPort(Stream* port) { _port = port; markLinkLost(); }
 
   void requestValues();       // GET_VALUES; reply parsed by poll()
   void requestFirmware();     // FW_VERSION; reply parsed into fwMajor/fwMinor/hwName
   void requestMotorConfig();  // GET_MCCONF (read-only); reply parsed into limits()
   // SET_MCCONF_TEMP with ack requested. forwardCan=false, store=false always.
-  void sendTempLimits(const VescTempLimits& l);
+  bool sendTempLimits(const VescTempLimits& l);
+  bool setExpectedUuid(const char* hex);
+  bool identityVerified() const;
+  const char* uuidHex() const { return _uuidHex; }
+  uint32_t limitsRevision() const { return _limitsRevision; }
 
   // Feed incoming bytes; call often. Returns true if a complete valid packet was handled.
   bool poll();
@@ -91,7 +95,7 @@ public:
   const VescActiveLimits& limits() const { return _limits; }
   uint32_t lastAckMs() const { return _lastAckMs; }
   bool linkUp(uint32_t maxAgeMs = 1000) const { return _values.receivedMs && (millis() - _values.receivedMs) < maxAgeMs; }
-  void markLinkLost() { _values.receivedMs = 0; _limits.receivedMs = 0; _rxLen = 0; }
+  void markLinkLost() { _values.receivedMs = 0; _limits.receivedMs = 0; _rxLen = 0; _identitySeen = false; _uuidHex[0] = 0; fwMajor = fwMinor = 0; _lastAckMs = 0; }
 
   uint8_t fwMajor = 0, fwMinor = 0;
   char hwName[24] = {0};
@@ -102,10 +106,14 @@ public:
   static float getFloat32Auto(const uint8_t* buf, int32_t* index);
 
 private:
-  void sendPayload(const uint8_t* payload, uint16_t len);
+  bool sendPayload(const uint8_t* payload, uint16_t len);
   void handlePacket(const uint8_t* payload, uint16_t len);
   void parseMotorConfig(const uint8_t* p, uint16_t len);
 
+  uint8_t _expectedUuid[12] = {}, _uuid[12] = {};
+  char _uuidHex[25] = {};
+  bool _expectedSet = false, _identitySeen = false;
+  uint32_t _limitsRevision = 0;
   Stream* _port;
   VescValues _values;
   VescActiveLimits _limits;

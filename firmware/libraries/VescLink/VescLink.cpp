@@ -43,24 +43,25 @@ static int32_t rd32(const uint8_t* b, int32_t* i) { int32_t v = ((uint32_t)b[*i]
 static float   rdF(const uint8_t* b, int32_t i) { return VescLink::getFloat32Auto(b, &i); }
 static float   rdS16(const uint8_t* b, int32_t i, float scale) { return rd16(b, &i) / scale; }
 
-void VescLink::sendPayload(const uint8_t* payload, uint16_t len) {
-  if (!_port) return;
+bool VescLink::sendPayload(const uint8_t* payload, uint16_t len) {
+  if (!_port) return false;
   uint8_t frame[8 + 300];
-  if (len > 256 + 40) return;
+  if (len > 256 + 40) return false;
   int n = 0;
   if (len < 256) { frame[n++] = 2; frame[n++] = (uint8_t)len; }
   else           { frame[n++] = 3; frame[n++] = len >> 8; frame[n++] = len & 0xFF; }
   memcpy(frame + n, payload, len); n += len;
   uint16_t crc = crc16(payload, len);
   frame[n++] = crc >> 8; frame[n++] = crc & 0xFF; frame[n++] = 3;
-  _port->write(frame, n);
+  return _port->write(frame, n) == size_t(n);
 }
 
 void VescLink::requestValues()      { uint8_t p = VESC_COMM_GET_VALUES; sendPayload(&p, 1); }
 void VescLink::requestFirmware()    { uint8_t p = VESC_COMM_FW_VERSION; sendPayload(&p, 1); }
 void VescLink::requestMotorConfig() { uint8_t p = VESC_COMM_GET_MCCONF; sendPayload(&p, 1); }
 
-void VescLink::sendTempLimits(const VescTempLimits& l) {
+bool VescLink::sendTempLimits(const VescTempLimits& l) {
+  if (!identityVerified()) return false;
   uint8_t p[64]; int32_t i = 0;
   p[i++] = VESC_COMM_SET_MCCONF_TEMP;
   p[i++] = 0;   // store: NEVER write flash from this firmware
@@ -79,7 +80,7 @@ void VescLink::sendTempLimits(const VescTempLimits& l) {
     appendFloat32Auto(p, l.inCurrentMin, &i);
     appendFloat32Auto(p, l.inCurrentMax, &i);
   }
-  sendPayload(p, i);
+  return sendPayload(p, i);
 }
 
 bool VescLink::poll() {
@@ -111,9 +112,9 @@ bool VescLink::poll() {
 void VescLink::parseMotorConfig(const uint8_t* p, uint16_t len) {
   // Offsets from payload[0] for the 6.00 schema (482-byte payload). Computed with
   // the same type rules as tools/vesc/decode.py; see firmware/README.md.
-  if (len < 482) return;
+  if (len != 482) { _limits.receivedMs = 0; return; }
   uint32_t sig = ((uint32_t)p[1] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 8) | p[4];
-  if (sig != VESC_MCCONF_SIGNATURE_6_00) { badSignature++; return; }
+  if (sig != VESC_MCCONF_SIGNATURE_6_00) { badSignature++; _limits.receivedMs = 0; return; }
   VescActiveLimits& L = _limits;
   L.signature       = sig;
   L.currentMax      = rdF(p, 9);
@@ -137,15 +138,30 @@ void VescLink::parseMotorConfig(const uint8_t* p, uint16_t len) {
   L.batteryCells    = p[462];
   L.batteryAh       = rdF(p, 463);
   L.receivedMs      = millis();
+  ++_limitsRevision;
 }
 
 void VescLink::handlePacket(const uint8_t* p, uint16_t len) {
   switch (p[0]) {
     case VESC_COMM_FW_VERSION: {
+      _identitySeen = false;
+      _uuidHex[0] = 0;
       if (len < 4) return;
+      size_t end = 3;
+      while (end < len && p[end]) ++end;
+      if (end == len || end + 1 + 12 > len) return;
       fwMajor = p[1]; fwMinor = p[2];
-      size_t n = 0; while (3 + n < len && p[3 + n] && n < sizeof(hwName) - 1) { hwName[n] = p[3 + n]; n++; }
-      hwName[n] = 0;
+      size_t n = end - 3;
+      if (n >= sizeof(hwName)) n = sizeof(hwName) - 1;
+      memcpy(hwName, p + 3, n); hwName[n] = 0;
+      memcpy(_uuid, p + end + 1, 12);
+      const char* digits = "0123456789abcdef";
+      for (size_t i = 0; i < 12; ++i) {
+        _uuidHex[2*i] = digits[_uuid[i] >> 4];
+        _uuidHex[2*i+1] = digits[_uuid[i] & 15];
+      }
+      _uuidHex[24] = 0;
+      _identitySeen = true;
       break;
     }
     case VESC_COMM_GET_VALUES: {
@@ -186,4 +202,30 @@ void VescLink::handlePacket(const uint8_t* p, uint16_t len) {
     default:
       break;
   }
+}
+
+static int hexDigit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+bool VescLink::setExpectedUuid(const char* hex) {
+  _expectedSet = false;
+  if (!hex || strlen(hex) != 24) return false;
+  uint8_t candidate[12];
+  for (size_t i = 0; i < 12; ++i) {
+    int a = hexDigit(hex[2*i]), b = hexDigit(hex[2*i+1]);
+    if (a < 0 || b < 0) return false;
+    candidate[i] = uint8_t((a << 4) | b);
+  }
+  memcpy(_expectedUuid, candidate, 12);
+  _expectedSet = true;
+  return true;
+}
+
+bool VescLink::identityVerified() const {
+  return _expectedSet && _identitySeen && fwMajor == 6 && fwMinor == 0 &&
+         memcmp(_uuid, _expectedUuid, 12) == 0;
 }
