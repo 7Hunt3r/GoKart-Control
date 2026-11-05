@@ -68,7 +68,7 @@ GkBenchFrame benchLast; uint32_t benchRx = 0, benchMs = 0; float benchRssi = 0; 
 // else derived from kart slot timing (kart k transmits (k-1)*100 ms after the edge), else free-running.
 #define GK_TELE_AIRTIME_MS 22
 uint32_t edgeMicros = 0, edgeSetMs = 0; uint8_t edgeSrc = 0;
-uint32_t beaconTx = 0, lastBeaconIdx = 0xFFFFFFFF; uint8_t beaconSeq = 0;
+uint32_t beaconTx = 0, lastBeaconMicros = 0; uint8_t beaconSeq = 0;
 struct QueuedCmd { GkCommandMsg msg; bool used; };
 QueuedCmd cmdQueue[CMD_QUEUE_LEN];
 int cmdHead = 0, cmdTail = 0;
@@ -244,9 +244,10 @@ static void transmitBeacon(uint8_t src) {
 static void serviceLoraTx() {
   uint8_t src; uint32_t phase = basePhaseUs(&src);
   // Once per second, in the tail after all kart slots: beacon first, then queued commands.
-  uint32_t idx = baseSecondIdx();
   bool inWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
-  if (inWindow && idx != lastBeaconIdx) { lastBeaconIdx = idx; transmitBeacon(src); }
+  // One beacon per second: the edge estimate moves with every kart packet, so key on elapsed
+  // time since the last beacon rather than on a second index derived from the edge.
+  if (inWindow && (uint32_t)(micros() - lastBeaconMicros) > 600000UL) { lastBeaconMicros = micros(); transmitBeacon(src); }
   if (cmdHead == cmdTail) return;
   if (src != 0 && !inWindow) return;          // synced: commands only in the tail window
   while (cmdHead != cmdTail) {
