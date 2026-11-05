@@ -659,7 +659,7 @@ void setup() {
   otaPass  = prefs.getString("otapw", "");
   vescMac  = prefs.getString("vescmac", "");
   vescUuid = prefs.getString("vescuuid", "");
-  reportRate = prefs.getUChar("rate", 1); if (reportRate != 2) reportRate = 1;
+  reportRate = prefs.getUChar("rate", 2); if (reportRate != 1) reportRate = 2;   // default 2 Hz (owner: "go faster")
   if (kartId < 1 || kartId > GK_MAX_KARTS) kartId = DEFAULT_KART_ID;
 
   // OLED (Vext powers it, active low)
