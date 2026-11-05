@@ -89,6 +89,13 @@ static const ModeDef MODES[3] = {
 #define MODE_MATCH_TOL 0.015f
 
 // Stop = ramp the current scale down, then hold at 0. Mechanical brakes are untouched.
+// At the same time the kart asks the VESC's brake script (firmware/vesc-lisp/gokart_brake.lisp)
+// for regen braking; without that script loaded, or with Motor Current Max Brake = 0, the
+// request is a no-op and the kart coasts.
+#define STOP_BRAKE_AMPS   40     // requested brake current, A (the VESC clamps to its own brake limit)
+#define STOP_BRAKE_SECS   2.5f   // how long the script brakes before releasing to the pedal app
+// Slow = cap the ERPM limit to a speed (mph) using the controller's own poles/gear/wheel values.
+#define SLOW_DEFAULT_MPH  5
 static const float STOP_RAMP[] = { 0.5f, 0.2f, 0.0f };
 #define STOP_RAMP_STEP_MS 150   // ~0.5 s to zero torque plus ack/verify
 

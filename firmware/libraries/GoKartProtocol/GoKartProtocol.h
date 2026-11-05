@@ -71,6 +71,7 @@ enum GkCommand : uint8_t {
   GK_CMD_STOP     = 2,   // ramp motor current scale to zero and hold
   GK_CMD_START    = 3,   // release stop, re-apply requested mode
   GK_CMD_PING     = 4,   // no-op; kart reports the seq back
+  GK_CMD_SLOW     = 5,   // cap speed: arg = mph (0 = 5 mph); sets the ERPM limit from the controller's own drivetrain numbers
 };
 
 // Result of the last command a kart received, reported inside telemetry.

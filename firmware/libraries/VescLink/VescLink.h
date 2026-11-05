@@ -15,6 +15,7 @@ enum VescComm : uint8_t {
   VESC_COMM_FW_VERSION      = 0,
   VESC_COMM_GET_VALUES      = 4,
   VESC_COMM_GET_MCCONF      = 14,
+  VESC_COMM_CUSTOM_APP_DATA = 36,
   VESC_COMM_SET_MCCONF_TEMP = 48,
 };
 
@@ -83,6 +84,8 @@ public:
   void requestMotorConfig();  // GET_MCCONF (read-only); reply parsed into limits()
   // SET_MCCONF_TEMP with ack requested. forwardCan=false, store=false always.
   void sendTempLimits(const VescTempLimits& l);
+  // COMM_CUSTOM_APP_DATA: delivered to a LispBM script on the VESC (event-data-rx); ignored if none runs.
+  void sendCustomAppData(const uint8_t* data, size_t n);
 
   // Feed incoming bytes; call often. Returns true if a complete valid packet was handled.
   bool poll();

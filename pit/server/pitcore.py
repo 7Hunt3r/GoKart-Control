@@ -317,7 +317,7 @@ HISTORY = 40
 ECHOED = {"received", "accepted", "applied", "no_vesc", "rejected", "unknown"}
 FINAL = {"applied", "no_vesc", "rejected", "unknown", "no_ack", "offline",
          "superseded", "cancelled", "link_lost"}
-VALID_CMDS = {"mode", "stop", "start", "ping"}
+VALID_CMDS = {"mode", "stop", "start", "ping", "slow"}
 
 
 class CommandError(ValueError):
@@ -358,7 +358,7 @@ class Command:
     def to_dict(self):
         return {
             "id": self.id, "seq": self.seq, "cmd": self.cmd, "kart": self.kart, "arg": self.arg,
-            "arg_name": MODE_NAMES.get(self.arg) if self.cmd == "mode" else None,
+            "arg_name": (MODE_NAMES.get(self.arg) if self.cmd == "mode" else (f"{self.arg or 5} mph" if self.cmd == "slow" else None)),
             "ttl": self.ttl, "source": self.source, "state": self.state,
             "created_wall": self.created_wall, "first_tx_wall": self.first_tx_wall,
             "tx_count": self.tx_count, "radio_sent": self.radio_sent,
@@ -411,6 +411,10 @@ class CommandManager:
         self._ids += 1
         c.id = self._ids
         self.history.append(c)
+        if cmd == "slow":
+            arg = 5 if arg in (None, "") else int(arg)
+            if not 1 <= arg <= 60:
+                raise CommandError("slow: mph must be 1-60")
         if cmd == "stop":
             self._preempt(c, now)
             self._transmit_first(c, now, wall)      # STOP never waits in the queue

@@ -82,6 +82,12 @@ void VescLink::sendTempLimits(const VescTempLimits& l) {
   sendPayload(p, i);
 }
 
+void VescLink::sendCustomAppData(const uint8_t* data, size_t n) {
+  uint8_t p[64]; if (n > 63) return;
+  p[0] = VESC_COMM_CUSTOM_APP_DATA; memcpy(p + 1, data, n);
+  sendPayload(p, n + 1);
+}
+
 bool VescLink::poll() {
   if (!_port) return false;
   bool handled = false;

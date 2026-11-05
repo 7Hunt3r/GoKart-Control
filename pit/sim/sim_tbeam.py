@@ -160,6 +160,8 @@ class SimKart:
             return
         if cmd == "stop":
             self.stopped, self.cmd_result = True, 2
+        elif cmd == "slow":
+            self.slow_mph = int(msg.get("arg") or 5); self.cmd_result = 2
         elif cmd == "start":
             self.stopped, self.cmd_result = False, 2
         elif cmd == "mode" and msg.get("arg") in (0, 1, 2):

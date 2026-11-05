@@ -201,3 +201,6 @@ input, textarea { -webkit-user-select: text; user-select: text; }   /* iOS: inpu
 /* iOS: inputs must be selectable or the keyboard never appears */
 body.login { -webkit-user-select: text; user-select: text; touch-action: auto; }
 input, textarea, select { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default; touch-action: auto; font-size: 16px; }
+
+.b-slow { background: #f0a500; color: #000; font-weight: 800; }
+.hold.slowall { background: #f0a500; color: #000; }

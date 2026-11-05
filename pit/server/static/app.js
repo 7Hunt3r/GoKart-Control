@@ -92,6 +92,7 @@ function kartButtons(k) {
     <button data-c="mode" data-k="${k}" data-a="0">ECO</button>
     <button data-c="mode" data-k="${k}" data-a="1">NORMAL</button>
     <button data-c="mode" data-k="${k}" data-a="2">SPORT</button>
+    <button class="b-slow" data-c="slow" data-k="${k}" data-a="5">SLOW</button>
     <button class="b-stop" data-c="stop" data-k="${k}">STOP</button>
     <button class="b-start" data-c="start" data-k="${k}">START</button></div>`;
 }
@@ -626,6 +627,7 @@ function watchdog() {
 buildCards();
 setupMapInput();
 holdButton($("stopAll"), 1000, () => sendCmd("stop", 255));
+holdButton($("slowAll"), 1000, () => sendCmd("slow", 255, 5));
 holdButton($("startAll"), 1000, () => sendCmd("start", 255));
 const TAB_KEY = MOBILE ? "gk_mtab" : "gk_tab";
 if (KIOSK || MOBILE) {

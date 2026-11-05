@@ -128,6 +128,10 @@ static const char* NUS_RX      = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
+bool     slowActive = false; float slowErpm = 0;
+// Limits as first read from this controller after link-up: everything we write echoes these
+// (not the capture constants), so each kart keeps its own configuration.
+VescActiveLimits origLimits; bool origValid = false;
 uint8_t  lastCmdSeq = 0, lastCmdSrc = 0xFE, cmdResult = GK_RES_NONE;
 // Per-source duplicate detection: a retransmit (same source, same seq, same issue time)
 // is reported again but never re-applied. Index 0 = pit base, 1 = USB/local.
@@ -232,16 +236,35 @@ static void fillTelemetry(GkTelemetry& t) {
 }
 
 // ---------------------------------------------------------------- vesc writes
+static float scaleTarget() {
+  if (stopActive) return 0.0f;
+  if (modeReq != GK_MODE_UNKNOWN) return MODES[modeReq].currentMaxScale;
+  return origValid ? origLimits.currentMaxScale : 1.0f;
+}
+static float mphToErpm(float mph) {
+  const VescActiveLimits& L = origLimits;
+  if (!origValid || L.motorPoles == 0 || L.gearRatio <= 0 || L.wheelDiameter <= 0) return 0;
+  float wheel_rpm = mph * 1609.34f / 60.0f / (3.14159265f * L.wheelDiameter);
+  return wheel_rpm * L.gearRatio * (L.motorPoles / 2.0f);
+}
+static void requestBrake() {
+  // "GKB" + amps + tenths of seconds -> the on-VESC brake script (no-op if none is loaded)
+  uint8_t d[5] = { 'G', 'K', 'B', (uint8_t)STOP_BRAKE_AMPS, (uint8_t)(STOP_BRAKE_SECS * 10) };
+  vesc.sendCustomAppData(d, sizeof d);
+  logf("brake request sent to VESC script: %u A for %.1f s", STOP_BRAKE_AMPS, STOP_BRAKE_SECS);
+}
+
 static bool startWrite(float scale) {
   if (!writesEnabled() || !vescUp() || vescIdentityBad) return false;
   // Per-vehicle: every field except the motor-current scale is echoed back from the live
   // configuration just read out of THIS controller (GET_MCCONF). Never write before that read.
-  const VescActiveLimits& L = vesc.limits();
-  if (!L.receivedMs) { logf("refusing write: this VESC's limits have not been read yet"); return false; }
+  if (!origValid) { logf("refusing write: this VESC's limits have not been read yet"); return false; }
+  const VescActiveLimits& L = origLimits;
   VescTempLimits l;
   l.currentMinScale = L.currentMinScale;
   l.currentMaxScale = scale;
   l.minErpm = L.minErpm; l.maxErpm = L.maxErpm;
+  if (slowActive) { l.maxErpm = slowErpm; if (l.minErpm < -slowErpm) l.minErpm = -slowErpm; }
   l.minDuty = L.minDuty; l.maxDuty = L.maxDuty;
   l.wattMin = L.wattMin; l.wattMax = L.wattMax;
   l.sendInCurrent = false;                     // battery limits: always the controller's own
@@ -269,6 +292,7 @@ static void serviceWrites() {
       if (vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - wSentMs) >= 0) {
         wState = W_IDLE;
         bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL;
+        if (slowActive && fabsf(vesc.limits().maxErpm - slowErpm) > 50) ok = false;
         if (rampIdx < 0) cmdResult = ok ? GK_RES_APPLIED : GK_RES_UNKNOWN;
         modeConfirmed = ok && !stopActive && modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL;
         logf("vesc write verify %s (scale %.3f)", ok ? "ok" : "MISMATCH", vesc.limits().currentMaxScale);
@@ -305,16 +329,28 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
     case GK_CMD_STOP:
       if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
       if (!vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
-      if (!stopActive) preStopScale = vesc.limits().receivedMs ? vesc.limits().currentMaxScale : -1.0f;
+      if (!stopActive) preStopScale = origValid ? origLimits.currentMaxScale : -1.0f;
       stopActive = true; modeConfirmed = false;
+      requestBrake();                                   // regen via the VESC script, if present
       rampIdx = 0; rampNextMs = millis();
       break;
     case GK_CMD_START: {
       if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      stopActive = false; rampIdx = -1;
-      float s = (modeReq != GK_MODE_UNKNOWN) ? MODES[modeReq].currentMaxScale : preStopScale;
-      if (s < 0) { cmdResult = GK_RES_REJECTED; logf("start: no mode to restore"); break; }
+      stopActive = false; slowActive = false; rampIdx = -1;
+      float s = scaleTarget();
+      if (!origValid) { cmdResult = GK_RES_NO_VESC; break; }
       if (!startWrite(s)) cmdResult = GK_RES_NO_VESC;
+      break;
+    }
+    case GK_CMD_SLOW: {
+      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+      if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
+      float mph = arg ? (float)arg : (float)SLOW_DEFAULT_MPH;
+      float e = mphToErpm(mph);
+      if (e < 100) { cmdResult = GK_RES_REJECTED; logf("slow: drivetrain numbers unavailable"); break; }
+      slowActive = true; slowErpm = e;
+      logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
+      if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC;
       break;
     }
     default:
@@ -409,8 +445,14 @@ static void serviceVesc() {
   if (up && !vescLinkWas) {              // link came up: read-only reconciliation only
     vesc.requestFirmware();
     vesc.requestMotorConfig(); vescMcconfMs = now;
-    modeConfirmed = false; vescIdentityBad = false; vescIdCheckedMs = 0;
+    modeConfirmed = false; vescIdentityBad = false; vescIdCheckedMs = 0; origValid = false;
     logf("vesc link up");
+  }
+  if (up && !origValid && vesc.limits().receivedMs && wState == W_IDLE) {
+    origLimits = vesc.limits(); origValid = true;
+    logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m",
+         origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
+         origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
   }
   if (up && vesc.fwSeenMs && vesc.fwSeenMs != vescIdCheckedMs) {
     vescIdCheckedMs = vesc.fwSeenMs;
@@ -587,6 +629,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "stop"))  handleCommand(0xFE, ++usbSeq, GK_CMD_STOP, 0, 0, 0);
   else if (!strcmp(line, "start")) handleCommand(0xFE, ++usbSeq, GK_CMD_START, 0, 0, 0);
   else if (!strcmp(line, "ping"))  handleCommand(0xFE, ++usbSeq, GK_CMD_PING, 0, 0, 0);
+  else if (!strcmp(line, "slow"))  handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, arg ? atoi(arg) : 0, 0, 0);
   else if (!strcmp(line, "wifi") && arg) {
     char* pw = strchr(arg, ' '); if (pw) { *pw++ = 0; }
     prefs.putString("ssid", arg); prefs.putString("pass", pw ? pw : "");
@@ -611,7 +654,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -636,6 +679,7 @@ static void serviceOled() {
   snprintf(l, sizeof l, "K%u %s%s", kartId, ma != GK_MODE_UNKNOWN ? MODES[ma].name : (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].name : "----"), modeConfirmed ? "*" : "");
   oled.drawStr(0, 9, l);
   if (stopActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
+  else if (slowActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "SLOW"); oled.setDrawColor(1); }
   else if (!writesEnabled()) oled.drawStr(100, 9, "RO");
   const VescValues& v = vesc.values();
   if (vescUp()) snprintf(l, sizeof l, "VESC %.1fV %.0fA %.0fC%s", v.inputVoltage, v.inputCurrent, v.tempMosfet, v.faultCode ? " F" : "");

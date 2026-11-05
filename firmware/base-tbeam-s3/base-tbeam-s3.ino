@@ -267,6 +267,7 @@ static uint8_t cmdFromName(const char* s) {
   if (!strcmp(s, "stop"))  return GK_CMD_STOP;
   if (!strcmp(s, "start")) return GK_CMD_START;
   if (!strcmp(s, "ping"))  return GK_CMD_PING;
+  if (!strcmp(s, "slow"))  return GK_CMD_SLOW;
   return GK_CMD_NONE;
 }
 
@@ -283,6 +284,7 @@ static void hostJson(const char* line) {
   if (!(kart == GK_ADDR_ALL || (kart >= 1 && kart <= GK_MAX_KARTS))) { logf("bad kart %d", kart); return; }
   if (seq < 1 || seq > 255) { logf("seq must be 1..255"); return; }
   if (cmd == GK_CMD_SET_MODE && (arg < 0 || arg >= GK_MODE_COUNT)) { logf("bad mode %d", arg); return; }
+  if (cmd == GK_CMD_SLOW && (arg < 0 || arg > 60)) { logf("bad slow mph %d", arg); return; }
   GkCommandMsg m; memset(&m, 0, sizeof m);
   gkFillHeader(m.h, GK_MSG_COMMAND, GK_ADDR_BASE, (uint8_t)kart, (uint8_t)seq);
   m.cmd = cmd; m.arg = (uint8_t)arg; m.ttl_s = (uint16_t)ttl; m.issued_utc_s = gpsUnix();
