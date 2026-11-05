@@ -1,5 +1,19 @@
 # Course map package (pit side)
 
+**Current state (2026-11-05):** two images exist for Manresa Island.
+
+- `course.jpg` (in git): CT ECO 2023 spring 3-inch orthoimagery, CC0, exported from the
+  `Ortho_2023_tiled` ImageServer in WGS84; the bounds in `map.json` are the export's
+  reported extent.
+- `course_skyfi.jpg` (NOT in git, license): a Vantor satellite image of 2026-10-12 bought
+  through SkyFi, delivered as a plain PNG with no georeference. It was registered to
+  the CT ECO ortho by affine image alignment (the frame is rotated about 10.8 degrees
+  with slightly unequal pixel scales) and warped north-up onto the ortho's bounds at
+  about 0.34 m/px. Checkerboard comparison against the ortho shows alignment within
+  roughly one ortho pixel (under a metre). `map.json` v2 points at it; swap `image`
+  back to `course.jpg` if the file is missing. Next time, order the GeoTIFF.
+
+
 Status: **no imagery, course line or pit location is bundled.** The pit map
 currently draws karts and the base on a blank local east/north grid in metres.
 

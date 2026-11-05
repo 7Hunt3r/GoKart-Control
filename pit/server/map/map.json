@@ -1,7 +1,7 @@
 {
-  "_comment": "Course map package. See README.md. Imagery: CT ECO 2023 spring 4-band 3-inch orthoimagery, exported from the Ortho_2023_tiled ImageServer on 2026-11-05 as a 3000x2382 natural-colour JPEG in WGS84; bounds are the export's reported extent. Course line and pit point not yet drawn.",
-  "version": 1,
-  "image": "course.jpg",
+  "_comment": "Course map package. See README.md. course_skyfi.jpg is local-only (license); course.jpg is the public CT ECO fallback. Course line and pit point not yet drawn.",
+  "version": 2,
+  "image": "course_skyfi.jpg",
   "bounds": {
     "north": 41.0815,
     "south": 41.068,
@@ -14,6 +14,6 @@
   },
   "course": [],
   "pit": null,
-  "source": "CT ECO / CT State GIS Office, CT 2023 Spring Aerial Imagery (4-band, 3 inch), https://cteco.uconn.edu/ctraster/rest/services/images/Ortho_2023_tiled/ImageServer, CC0",
-  "attribution": "CT ECO 2023 aerial"
+  "source": "SkyFi order 26378IFJ-3, Vantor satellite image 2026-10-12 15:32Z (SUPER_HIGH), delivered as a non-georeferenced PNG; georeferenced by affine registration (ECC) against the CT ECO 2023 ortho on 2026-11-05 (rotation -10.81 deg, ~0.367 m/px), warped north-up to the ortho's bounds at 0.34 m/px. Licensed to Eamon Doherty; NOT redistributable, file kept out of git. Fallback: course.jpg (CT ECO 2023, CC0).",
+  "attribution": "Vantor via SkyFi, Oct 2026"
 }

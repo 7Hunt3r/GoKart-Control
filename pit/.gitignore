@@ -7,3 +7,5 @@ build/
 __pycache__/
 *.pyc
 .DS_Store
+# licensed imagery, local only
+server/map/course_skyfi.jpg
