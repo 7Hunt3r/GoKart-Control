@@ -72,10 +72,13 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
 - Keep three profile names. Desired eventual behavior is top-speed limits with
   strong acceleration, but do not replace current limits based on historical code.
 - Losing the pit radio link should not stop the kart.
-- Preserve the desired **saved VESC configuration** fallback. For display/Pi
-  failure, a healthy Heltec would detect the missing heartbeat and restore the
-  verified baseline. For Heltec/VESC-link failure, an independent controller-side
-  mechanism is needed. Neither mechanism nor its timing is implemented.
+- **Reliability first:** loss of display, Heltec, BLE, GPS or pit communication
+  must leave the ESC running its installed firmware and current active settings.
+  This supersedes the earlier saved-configuration restore requirement. Do not
+  change profiles, reset, stop or write settings because a link drops or returns.
+  Reconnect read-only, reconcile actual state, and never replay cached commands.
+  Hardwired inputs and normal ESC protections remain authoritative; bench
+  verification is still required. See [acceptance checks](docs/requirements.md#reliability-and-link-loss-behavior).
 - Drivers see their own and other kart positions, with online and race-entry filters.
 - MPH. Beginner mode hides driver-facing fault alerts, while pit/logging retains them.
 - Driver messages, gradual remote stop and geofence enforcement are deferred.
@@ -99,8 +102,10 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
    Test filtering, stale/no-fix states, shared browser state and command outcomes.
 5. Implement the Heltec serial contract and a two-radio bench link, then load-test
    eight-kart traffic before choosing field update rates.
-6. Design and bench-verify controller-side saved-config fallback before enabling
-   temporary profile writes. A disconnected Heltec cannot send a restore command.
+6. Bench-verify brief/sustained accessory and link failures plus reconnect:
+   no state-changing commands, unchanged active settings and uninterrupted
+   hardwired input response with normal protections. Validate this before
+   enabling profile writes. Treat actual ESC reboot/persistence separately.
 7. Investigate drift cutoff with logs, then propose any tuning as a separate change.
 
 The [requirements](docs/requirements.md) contain broader acceptance criteria.

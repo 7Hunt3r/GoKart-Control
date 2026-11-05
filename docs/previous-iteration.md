@@ -40,7 +40,9 @@ Port the protocol behavior and product features behind platform-specific adapter
    copy this behavior without checking the actual installed firmware.
 4. UI activeMap changes immediately and does not process a map acknowledgement
    or verify the resulting configuration. SPORT is initially shown without an
-   initial application or readback. Reconnect reapplies the selected map.
+   initial application or readback. Reconnect reapplies the selected map. This behavior must not be ported:
+   the current reliability requirement mandates read-only reconnect and no
+   automatic cached-profile writes.
 5. Telemetry failures render zero readings. The port needs explicit invalid and
    stale states, especially for speed and vehicle status.
 6. BLE selection by a common advertised name is unsuitable for eight nearby

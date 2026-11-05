@@ -90,6 +90,9 @@ with imagery; use a suitable asset store or Git LFS for large imagery once chose
 - Heltec owns the VESC connection and supervisory requests; the kart Pi owns only
   display/interface behavior. VESC motor control and wired inputs remain local.
 - Maintain explicit stale/unknown states and requested vs confirmed commands.
+- Loss/recovery of accessories or communications must not change driving state.
+  Reconnect read-only; do not replay profiles or install a heartbeat-driven restore.
+  Preserve existing ESC protections and validate actual hardware behavior.
 - Identify the intended VESC per kart; common BLE advertisement names are insufficient.
 - Pit server arbitrates writes from multiple browsers; browsers never own serial ports.
 - Scope any future control changes to verified hardware and a documented test plan.

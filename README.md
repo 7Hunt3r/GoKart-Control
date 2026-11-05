@@ -57,6 +57,12 @@ The Heltec handles supervisory telemetry/profile requests; the VESC continues
 to run motor control. The display exchanges data and UI requests with the Heltec
 over a proposed USB serial interface. Profile writes remain disabled.
 
+**Vehicle reliability comes first.** Display, Heltec or communication failures
+must leave the ESC running with its current active settings and hardwired
+controls. No automatic restore, profile switch, stop or reset on disconnect or
+reconnect. This requirement still needs bench validation; existing ESC protections
+remain active. See [reliability requirements](docs/requirements.md#reliability-and-link-loss-behavior).
+
 Throttle and reverse remain wired to the ESC. Pedal braking is mechanical.
 Motor braking is currently configured to 0 A. Motors have no temperature
 sensors wired; motor temperature must display as unavailable, not 0 C.

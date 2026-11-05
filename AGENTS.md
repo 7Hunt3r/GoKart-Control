@@ -12,6 +12,11 @@
 - The Heltec owns the VESC connection, GPS, LoRa and supervisory profile logic.
   The kart Pi is display/interface only. BLE remains the preferred VESC transport.
   Driver inputs and motor control remain with the ESC; profile writes are disabled.
+- Reliability first: no driving-state changes on display/Heltec/link loss or
+  reconnect. Keep current active VESC settings; no saved-profile restore,
+  heartbeat-dependent driving lease, stop/reset or cached-command replay.
+  Reconnect read-only and reconcile actual state. Existing ESC protections remain
+  intact. This supersedes the earlier saved-configuration fallback requirement.
 - Driver messages, gradual remote stop and geofence enforcement are deferred.
 - The owner now explicitly authorizes ongoing commits/pushes at coherent, checked
   milestones so Colin and Eamon share current work. This supersedes the earlier

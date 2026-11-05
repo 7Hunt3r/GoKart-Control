@@ -128,46 +128,60 @@ Keep an adapter boundary for optional wired VESC diagnostics. Choose the UI
 framework after display identification and Pi performance checks. Keep course
 assets local; runtime operation should not depend on cloud connectivity.
 
-## Link-loss behavior and saved-configuration fallback
+## Reliability and link-loss behavior
 
-Confirmed desired behavior:
-- Loss of the pit/LoRa link alone: continue driving normally.
-- Display Pi crash/link loss: retain the earlier requested restoration to saved
-  VESC settings. Proposed detection/restore owner is the healthy Heltec; heartbeat
-  timeout, transition and interaction with pit requests remain to be designed.
-- Heltec crash or loss of its VESC Bluetooth connection: desired fallback is the
-  VESC's saved configuration, not NORMAL. This requires an independent mechanism.
-- Future geofence: owner wants a settable boundary that disables propulsion
-  when breached, including while the pit link is unavailable.
+The owner's latest decision supersedes the earlier saved-configuration restore
+requirement: the kart is a reliable vehicle first. The ESC continues running its
+installed firmware and current active settings under hardwired driver control.
+A communications interruption must not itself change propulsion behavior.
+Firmware is the controller software; active settings/profile are separate. No
+firmware reload, saved-settings restoration or switch to NORMAL is requested.
 
-These are requirements, not implemented guarantees. Current upstream
-COMM_SET_MCCONF_TEMP mutates runtime limits without a profile lease/expiry.
-A BLE disconnect must not be assumed to restore saved configuration. The
-ordinary motor-command timeout is not a saved-profile restoration mechanism.
-A dead/disconnected Heltec cannot send a restore command. Display failure is a
-separate case because a healthy Heltec may still communicate with the VESC.
+Required behavior for loss of display/Pi, Heltec, BLE, GPS or pit/LoRa:
 
-Before enabling temporary profiles, investigate controller-resident support
-for an expiring profile/heartbeat lease on the exact installed firmware. If
-supported, expiry should restore the verified saved baseline without replacing
-hardwired driver inputs or reflashing/restoring the whole controller while
-moving. The exact mechanism, timeout and transition behavior require bench
-validation. Do not label this fallback operational until tested under power
-loss, process failure and BLE disconnect. Do not flash firmware or deploy such
-controller logic merely to complete documentation.
+- Do not issue throttle, brake, stop, reset, profile or configuration commands
+  merely because a connection, heartbeat or GPS fix disappeared.
+- Leave the last successfully applied VESC settings in effect. Do not install a
+  communications lease that expires into another driving profile. Heartbeats
+  may indicate connectivity only; they must not be needed to sustain propulsion.
+- Hardwired inputs and the VESC's own protections retain their normal behavior.
+  This policy does not bypass controller faults, electrical protection or
+  mechanical brakes, or claim that the kart can continue through ESC power loss.
+- Mark missing telemetry/positions stale or unavailable and reconnect quietly.
+  The Pi/Heltec startup and reconnect paths begin with read-only reconciliation:
+  read actual state before reporting a profile as applied. Do not automatically
+  resend the UI's cached/default profile or replay pending commands.
+- If a profile command loses its acknowledgement, mark its outcome unknown.
+  Query actual settings when communication returns; do not assume either success
+  or failure and do not retry a write solely because the connection returned.
 
-A future geofence is intended to be evaluated on the Heltec using its GPS to
-survive pit/display loss. It cannot enforce anything after Heltec or VESC-link
-failure. Guaranteeing enforcement in those conditions requires an
-independent controller/GPS/control path and an explicit precedence decision
-against saved-configuration fallback. Keep this limitation visible and leave
-geofence enforcement deferred until designed. GPS-loss policy, boundary
-hysteresis, disable ramp, re-enable behavior and the meaning of 'turn off' are
-not yet specified. Mechanical brakes remain directly operated by the driver.
+Future profile changes require a deliberate new user request, verified limits
+and a controlled transition. Command expiry limits when an unexecuted request
+may be accepted; it must not expire a successfully applied driving profile.
+Profile writes remain disabled until disconnect/reconnect behavior is validated.
+An actual ESC reboot may load persisted settings; persistence/startup policy is
+still to be designed and must be distinguished from ordinary communication loss.
+No ESC timeout, protection, firmware or configuration is being changed now.
 
-Upstream references (not proof of installed firmware behavior):
-https://github.com/vedderb/bldc/blob/master/comm/commands.c
-https://github.com/vedderb/bldc/blob/master/timeout.c
+Acceptance checks, on a controlled bench setup before driving tests:
+
+- Inspect the actual firmware/application timeout and input behavior; the
+  stationary capture alone does not prove uninterrupted drive operation.
+- Interrupt the display process, USB link and display power; separately interrupt
+  BLE, Heltec operation/power and the pit link. Include brief and sustained loss.
+- Verify the supervisory software emits no state-changing commands on loss,
+  startup or reconnect, and no default/cached profile is reapplied.
+- Verify hardwired input response and active VESC settings remain unchanged by
+  those interruptions, with normal controller protections intact. Record evidence.
+- Test simultaneous BLE, GPS, LoRa and display load, stale data and lost command
+  acknowledgements. Keep controller-power interruption as a separate test case.
+
+Remote stop and geofence enforcement remain deferred. Neither is an implicit
+reaction to connectivity or GPS loss. Any future intervention needs explicit
+behavior, validation and a separate decision consistent with this reliability
+priority. A Heltec geofence could operate independently of the display/pit, but
+cannot guarantee enforcement after Heltec or VESC-link failure. Boundary policy,
+GPS-loss handling, transitions and restart behavior remain unresolved.
 
 ## Interface scope
 
@@ -285,8 +299,8 @@ Store command history with telemetry for later inspection.
    Verify a frozen, disconnected or powered-off display does not block the
    Heltec, and measure actual sample/command latency under load.
 4. Diagnose drift cutoff using configuration and event logs. Design profile
-   speed/torque behavior and controller-side saved-baseline fallback; verify
-   them before enabling temporary profile writes or changing limits.
+   speed/torque behavior and verify that link loss/reconnect leaves active
+   settings and hardwired input response unchanged before enabling profile writes.
 5. Two-radio link, then eight-kart plus pit load simulation and field tests.
    Measure airtime, packet age/loss, latency, retries, and pit-link loss behavior.
 6. Course package and local Pi 4 server deployment. Validate GPS/map alignment,
@@ -308,7 +322,9 @@ Store command history with telemetry for later inspection.
   photo-identified; packaging lists HF 863–928, but no configuration was read.
 - Pit base radio model, LAN/network provisioning and Pi 4 setup/access.
 - Course route, map extent and any updated owner-supplied aerial image.
-- Controller-side saved-configuration fallback mechanism and timing.
+- Bench verification of uninterrupted hardwired control during accessory/link
+  failures, actual controller timeout behavior, and future profile persistence
+  across ESC reboot (distinct from communication loss).
 - Driver vs pit permissions for changing profiles; shared pit control is confirmed.
 - Pi/display and independently powered Heltec regulated supplies, USB backfeed/
   reset behavior, enclosure/weather exposure and shutdown behavior.

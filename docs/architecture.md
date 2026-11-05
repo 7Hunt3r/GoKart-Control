@@ -22,9 +22,9 @@ and coverage measurements. Neither path is currently implemented.
 
 | Component | Owns | Does not imply |
 | --- | --- | --- |
-| VESC | Hardwired throttle/reverse, motor control, configured protection | Automatic saved-profile restore after BLE loss |
+| VESC | Hardwired throttle/reverse, motor control, configured protection | A tested guarantee of accessory-failure isolation |
 | Kart Pi | Touchscreen rendering, map assets, presentation cache and UI requests | Ownership of the VESC link or control policy |
-| Heltec V4.3 + L76K | VESC BLE client, telemetry, GPS, LoRa, validation/serialization of supervisory requests | Verified timing, automatic fallback or implemented profile writes |
+| Heltec V4.3 + L76K | VESC BLE client, telemetry, GPS, LoRa, validation/serialization of supervisory requests | Verified timing, fault isolation or implemented profile writes |
 | Pit Pi 4 | Fleet/race state, authentication, command arbitration, radio session | An internet/cloud dependency |
 | Browser | Operator interaction and live state | Direct ownership of the radio or authoritative command success |
 
@@ -89,24 +89,27 @@ Choose airtime/rate/payload together for eight karts and retain command capacity
 
 ## Failure requirements
 
-Pit/LoRa loss alone should allow normal driving. Mark remote positions stale.
-The earlier owner requirement to restore saved VESC settings on Pi failure is
-retained: a healthy Heltec could detect loss of the display heartbeat and request
-a verified restoration. This is a proposed mechanism; timeout/transition and
-interaction with pit commands need design and testing. The display itself must
-not be required to send a final restore message.
+Reliability takes priority: display/Pi, Heltec, BLE, GPS and pit-link failures
+must not trigger a driving-state change. Leave the ESC running its installed
+firmware and last successfully applied active settings with hardwired inputs
+and normal controller protections. This supersedes saved-profile restoration
+on link loss; no communications-dependent profile lease is wanted.
 
-Heltec failure or loss of its VESC link is a separate case: restoration requires
-verified VESC-resident support or another independent mechanism. A dead Heltec
-cannot send a restore command. The ordinary motor-command timeout does not
-restore an entire configuration. No fallback is currently implemented.
+Startup/reconnect is read-only reconciliation, not profile initialization.
+Report stale data and unknown command outcomes honestly. Do not reset the VESC,
+reapply a cached/default profile or replay queued commands when a link returns.
+Future writes require a deliberate new request. Command expiry is about rejecting
+old requests before execution, not undoing settings already applied.
 
-A future geofence can be evaluated on the Heltec using its GPS, independently of
-the display and pit. It cannot guarantee enforcement after Heltec/VESC-link failure
-without an independent control path.
-The precedence between geofence state and saved-baseline fallback remains open
-for that later feature. Remote stop is also deferred and would reduce propulsion
-gradually; no active-braking behavior is approved or implemented.
+This is a requirement, not a hardware-tested guarantee. Verify actual controller
+input/timeout behavior and power/reset coupling on the bench. An ESC reboot or
+power loss is distinct from an accessory/link outage and may load persisted
+settings. Neither controller protections nor its timeout settings are modified
+by this documentation change. See the [reliability acceptance checks](requirements.md#reliability-and-link-loss-behavior).
+
+Remote stop and geofence enforcement remain deferred; lost communications or
+GPS never implicitly enables either. Future geofence behavior on the Heltec,
+including its failure boundaries, needs a separate explicit design decision.
 
 ## Map packaging
 

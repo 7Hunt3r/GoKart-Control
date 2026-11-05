@@ -95,12 +95,16 @@
     "geofence_enforcement"
   ],
   "failure_behavior": {
-    "pit_link_loss": "continue_normally",
-    "saved_config_fallback_implemented": false,
-    "geofence_enforcement_implemented": false,
-    "display_pi_or_link_loss_desired": "healthy_heltec_restores_verified_saved_vesc_configuration; detection_and_transition_pending",
-    "heltec_or_vesc_link_loss_desired": "restore_saved_vesc_configuration; independent_mechanism_required",
-    "display_loss_fallback_implemented": false
+    "priority": "vehicle_reliability_and_uninterrupted_hardwired_control",
+    "on_display_heltec_or_communications_loss": "leave_vesc_current_active_settings_unchanged",
+    "on_reconnect": "read_only_reconcile_actual_state_no_automatic_writes",
+    "auto_restore_saved_configuration": false,
+    "communications_dependent_profile_lease": false,
+    "replay_pending_commands_on_reconnect": false,
+    "preserve_vesc_protections": true,
+    "hardware_failure_behavior_verified": false,
+    "esc_reboot_persistence_policy": "not_yet_designed_separate_from_link_loss",
+    "geofence_enforcement_implemented": false
   },
   "controls": {
     "driver_inputs": "hardwired_to_esc_independent_of_pi",
