@@ -246,15 +246,17 @@ static void serviceLoraTx() {
   // Once per second, in the tail after all kart slots: beacon first, then queued commands.
   bool beaconWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
   bool cmdWindow = phase >= (uint32_t)GK_CMD_WINDOW_START_MS * 1000UL && phase < (uint32_t)GK_CMD_WINDOW_END_MS * 1000UL;
-  // Commands first, in their own window, spaced GK_TX_SPACING_MS apart; then one beacon per
-  // second (keyed on elapsed time: the edge estimate moves with every kart packet).
   static uint32_t lastTxMicros = 0;
-  if (cmdHead != cmdTail && (src == 0 || cmdWindow) && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
+  // Without a real GPS pulse the edge estimate is only as good as the karts' timing, so send
+  // commands immediately; with PPS use the window. One packet per GK_TX_SPACING_MS.
+  if (cmdHead != cmdTail && (src != 1 || cmdWindow) && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
     transmitCommand(cmdQueue[cmdHead].msg); lastTxMicros = micros();
     cmdQueue[cmdHead].used = false;
     cmdHead = (cmdHead + 1) % CMD_QUEUE_LEN;
   }
-  if (beaconWindow && (uint32_t)(micros() - lastBeaconMicros) > 600000UL && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
+  // Never put a beacon within 150 ms after a command: a kart that has not yet read the command
+  // out of its radio would lose it to the beacon. Skipping a beacon now and then is harmless.
+  if (beaconWindow && (uint32_t)(micros() - lastBeaconMicros) > 600000UL && (uint32_t)(micros() - lastTxMicros) > 150000UL) {
     lastBeaconMicros = micros(); lastTxMicros = micros(); transmitBeacon(src);
   }
 }
