@@ -29,14 +29,21 @@ while establishing a trustworthy telemetry and configuration baseline.
 - Runtime configuration and a stationary telemetry sample captured and decoded.
 - Raw response payloads, capture manifest/hashes and schema provenance retained.
 - Read-only capture/offline decode tools, and tests against the real baseline.
+- Heltec bench firmware and authenticated Wi-Fi OTA are implemented and exercised
+  on one board; live VESC UUID/6.00 telemetry, GPS NMEA and radio TX completion
+  verified. See [bench results](docs/heltec-bench-test.md) and
+  [receiver/OTA instructions](firmware/heltec/README.md).
 
-No controller settings were written. No firmware update, reboot, motor test,
+During VESC inspection and Heltec testing, no VESC settings were written. No VESC
+firmware update, VESC reboot, motor test,
 CAN enumeration, terminal command or motor actuation was performed. Telemetry
 queries can reset the controller's averaging accumulators as part of ordinary
 GET_VALUES behavior, but do not change drive settings.
 
-The application has not been built. BLE operation with a Heltec, LoRa coverage,
-GPS reception, touchscreen behavior and failure recovery remain untested.
+The dashboard and pit application have not been built. Heltec BLE telemetry,
+GPS serial reception and OTA reboot/reconnection now work on the bench. Outdoor
+GPS fix, receipt on Eamon's radio, LoRa coverage, touchscreen behavior and
+physical driving response under link/accessory failures remain untested.
 
 ## The connected kart: findings that matter
 
@@ -94,14 +101,16 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
 2. Establish the saved-config baseline without overwriting settings or disrupting
    driving; coordinate a controlled inspection with the owner. Do not power-cycle
    or change firmware merely to fill a documentation gap.
-3. Run a read-only Heltec BLE telemetry spike against this kart. Confirm intended
-   device selection, packet fragmentation and reconnect. Measure latency while
-   GPS, LoRa and USB display traffic run concurrently; verify display loss does
-   not block VESC servicing. Validate independent Heltec power/reset behavior.
+3. Extend the working read-only Heltec bench test: quantify latency under GPS,
+   LoRa and USB load; verify physical driving response through accessory/link
+   failures on a controlled bench. BLE identity/readout and OTA reconnect have
+   passed, but independent power and broader failure testing remain open.
 4. Build an explicitly labeled eight-kart simulator and responsive kart/pit views.
    Test filtering, stale/no-fix states, shared browser state and command outcomes.
-5. Implement the Heltec serial contract and a two-radio bench link, then load-test
-   eight-kart traffic before choosing field update rates.
+5. Eamon is preparing the second board. Match the published raw LoRa bench
+   settings and 47-byte frame, confirm reception/decoding, then load-test fleet
+   traffic. Current bench TX is opt-in and uncommissioned kart ID 0; these are
+   not final eight-kart radio settings. Obtain an outdoor GPS fix.
 6. Bench-verify brief/sustained accessory and link failures plus reconnect:
    no state-changing commands, unchanged active settings and uninterrupted
    hardwired input response with normal protections. Validate this before

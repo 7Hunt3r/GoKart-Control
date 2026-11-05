@@ -34,8 +34,12 @@ As of November 5, 2026:
   identifying the L7 display, Heltec V4.3 and Quectel L76K GPS module.
 - Captured a stationary telemetry sample: 76.4 V, 22.3 C ESC temperature, no active fault.
 - Prepared offline decode tools and protocol tests using the real captured data.
-- **The dashboard, pit server, BLE adapter and LoRa firmware are not implemented.**
-- No course image/route is packaged, and no radio/GPS/display integration is tested.
+- [Heltec bench firmware](firmware/heltec/README.md) now reads the baseline VESC
+  over BLE, receives GPS NMEA and transmits custom LoRa telemetry. Authenticated
+  Wi-Fi OTA has been exercised on the physical board. See [bench results](docs/heltec-bench-test.md).
+- **The dashboard, pit server and profile-writing/control features are not implemented.**
+- No course image/route is packaged. Outdoor GPS fix, receiver confirmation,
+  field coverage, display integration and driving fault-isolation tests remain open.
 
 The captured configuration is the current **runtime** configuration. It is not
 proof of the saved flash baseline, a tuning recommendation, or a flashable image.
@@ -83,7 +87,9 @@ Serial capture supports macOS/Linux and requires device permissions. It is not
 a Windows serial implementation.
 
 For read-only hardware inspection, follow [tools/vesc/README.md](tools/vesc/README.md).
-There is no app launch or deployment command yet.
+For Heltec build, USB installation and Wi-Fi OTA, follow
+[firmware/heltec/README.md](firmware/heltec/README.md). There is no dashboard or
+pit app launch command yet.
 
 ## Repository layout
 
@@ -95,13 +101,16 @@ AGENTS.md                 Project-specific agent conventions
 config/project.json       Planning configuration; not a runtime app config
 docs/                     Requirements, architecture, hardware and history
 hardware/vesc/            Baseline evidence and decoded settings
+firmware/heltec/          Bench BLE/GPS/LoRa firmware and maintenance OTA
+tools/heltec/             Local provisioning, OTA upload and radio decoder
 tools/vesc/               Allowlisted read-only capture and offline decoder
 tests/                    Protocol and baseline regression checks
 third_party/vesc_tool/     Pinned 6.00 schemas, license and provenance
 .github/                  Pull request template
 ```
 
-No new application stack is selected. Avoid creating empty service skeletons
+The bench firmware uses pinned PlatformIO/Arduino ESP32 dependencies. The
+dashboard and pit application stacks remain unselected. Avoid creating empty service skeletons
 until the first runnable milestone has a clear interface and acceptance checks.
 
 ## Sources and licensing

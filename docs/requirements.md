@@ -18,8 +18,9 @@ requirements from proposed implementation and unresolved details. See the
   and USB-HID capacitive touch on the touch variant. Guide revision is 2.1; exact
   product suffix and live display/touch operation still need confirmation.
 - Radio/GPS: photo-identified Heltec HTIT-WB32LAF V4.3 with a cabled Quectel L76K
-  module and ceramic GPS patch antenna. Packaging lists HF 863–928. Installed
-  firmware, radio settings and live GPS operation remain unverified.
+  module and ceramic GPS patch antenna. Packaging lists HF 863–928. One board
+  now runs bench firmware with valid GPS NMEA, BLE readout and radio TX completion.
+  GPS fix and receiver/range confirmation remain pending; see [bench results](heltec-bench-test.md).
 - Kart roles: Heltec owns VESC communication, GPS, LoRa and supervisory profile
   logic; the Raspberry Pi 3 is display/interface only. The VESC retains motor
   control and hardwired driver inputs. Profile writes are not yet implemented.
@@ -293,7 +294,8 @@ Store command history with telemetry for later inspection.
    delivery. Exercise shared browser control against a single pit authority.
 2. Initial USB runtime read of one development kart is complete (firmware 6.00,
    hardware ID 75_100_V2). Commercial model, saved baseline and other karts remain
-   to verify. Validate Heltec BLE telemetry and identity selection without writes.
+   to verify. Heltec BLE UUID verification and read-only telemetry now work on
+   this baseline; extend validation to the other development karts.
 3. One Pi, touchscreen and Heltec: check resolution, touch, GPS, boot/reconnect,
    independent Heltec power and concurrent radio/Bluetooth/USB performance.
    Verify a frozen, disconnected or powered-off display does not block the
@@ -318,8 +320,9 @@ Store command history with telemetry for later inspection.
   settings are captured; motor-temperature sensors are absent, as owner confirmed.
 - LESOWN exact product suffix and mounted orientation; verify manual-derived
   1024×600 mode and USB-HID touch on the actual Pi. Photos/manual are saved.
-- Heltec V4.3/L76K serial firmware, GPS operation and RF settings. Assembly is
-  photo-identified; packaging lists HF 863–928, but no configuration was read.
+- Heltec bench serial/BLE/GPS/LoRa and Wi-Fi OTA implementation is available.
+  Still verify outdoor GPS fix, the second radio, fleet airtime, field RF settings
+  and power isolation. See the bench report for the exact tested scope.
 - Pit base radio model, LAN/network provisioning and Pi 4 setup/access.
 - Course route, map extent and any updated owner-supplied aerial image.
 - Bench verification of uninterrupted hardwired control during accessory/link

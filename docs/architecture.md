@@ -1,7 +1,9 @@
 # Architecture and interface plan
 
-This is the target design, not a deployed system. Framework and radio protocol
-choices remain open pending hardware checks.
+This is the target design, not a deployed fleet system. A
+[Heltec bench implementation](../firmware/heltec/README.md) now exercises BLE
+telemetry, GPS serial data, raw LoRa TX and authenticated maintenance OTA.
+Fleet protocol/update rates and dashboard/pit framework choices remain open.
 
 ```mermaid
 flowchart LR
@@ -16,7 +18,8 @@ flowchart LR
 
 The diagram shows one kart; repeat it up to eight times. Kart-to-kart position
 sharing can use direct reception or a pit fleet summary; choose after airtime
-and coverage measurements. Neither path is currently implemented.
+and coverage measurements. The bench transmitter sends direct broadcasts;
+receipt, fleet sharing and pit relaying are not yet verified or implemented.
 
 ## Boundaries
 
@@ -60,6 +63,14 @@ remains unselected. Power-source isolation is not yet tested.
 Hardware capability sources: [Heltec V4](https://heltec.org/project/wifi-lora-32-v4/),
 [Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3).
 Capability documentation does not establish this project's runtime performance.
+See the [bench report](heltec-bench-test.md) for measured observations.
+
+OTA is explicit parked maintenance: physical USER-button hold or local serial
+request with fresh zero-ERPM telemetry, authenticated on provisioned Wi-Fi.
+Maintenance pauses BLE and LoRa without writing the VESC; successful OTA reboots
+only the Heltec. Startup is read-only reconciliation. OTA and TX default off
+after reboot. Credentials and credential-bearing binaries are excluded from Git.
+This bench updater is not a signed fleet deployment or automatic rollback system.
 
 ## Proposed contracts
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "hardware_baseline_captured_application_not_implemented",
+  "status": "heltec_bench_telemetry_and_ota_tested_dashboard_and_pit_not_implemented",
   "project": "GoKart Control",
   "site": {
     "name": "Manresa Island",
@@ -59,7 +59,10 @@
     "vesc_connection_owner": "heltec",
     "kart_pi_role": "display_and_touch_interface",
     "pi_heltec_transport_proposed": "usb_serial",
-    "heltec_power_independent_of_display_required": true
+    "heltec_power_independent_of_display_required": true,
+    "heltec_bench_firmware": "firmware/heltec",
+    "gps_serial_verified": true,
+    "gps_position_fix_verified": false
   },
   "features_in_scope": [
     "vesc_telemetry",
@@ -77,7 +80,20 @@
     "region_target": "US",
     "frequency_hz": null,
     "tx_power_dbm": null,
-    "position_interval_ms": null
+    "position_interval_ms": null,
+    "bench_profile": {
+      "frequency_hz": 915000000,
+      "bandwidth_hz": 500000,
+      "spreading_factor": 7,
+      "coding_rate_denominator": 5,
+      "sync_word_hex": "12",
+      "preamble_symbols": 8,
+      "sx1262_requested_power_dbm": 0,
+      "external_fem_output_not_measured": true,
+      "interval_ms": 2000,
+      "payload_bytes": 47,
+      "receiver_verified": false
+    }
   },
   "profiles": {
     "names": [
@@ -134,5 +150,14 @@
     "controller_id": 69,
     "firmware_name": "no_hw_limits",
     "motor_temp_sensors_wired": false
+  },
+  "ota": {
+    "transport": "provisioned_wifi",
+    "maintenance_only": true,
+    "authentication_required": true,
+    "credentials_in_git": false,
+    "dual_app_slots": true,
+    "automatic_health_rollback": false,
+    "live_update_verified": true
   }
 }

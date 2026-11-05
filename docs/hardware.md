@@ -8,7 +8,7 @@
 | VESC | Firmware 6.00, `75_100_V2`, `no_hw_limits`, controller ID 69 | USB read on one baseline kart |
 | Commercial controller model | Unknown | Need physical label/product link; firmware ID is insufficient |
 | VESC USB | Accessible, read successfully on Mac | Verified |
-| VESC BLE | Preferred existing link; original code uses Nordic UART Service | Owner report + historical code; Heltec link/module identity unverified |
+| VESC BLE | Nordic UART Service to baseline firmware 6.00 controller | Heltec read-only identity/UUID and live telemetry verified; commercial module model unknown |
 | Driver input | ADC and UART / Current Reverse Button | Configuration verified; physical wiring owner reported |
 | Brakes | Mechanical pedal; motor braking limit 0 A | Owner report + runtime configuration |
 | Motor temperature | No temperature sensors wired; sensing disabled | Owner confirmed + configuration |
@@ -18,8 +18,8 @@
 | Battery metadata | 20 cells, 20 Ah | Configured values, not battery/BMS rating verification |
 | Battery/BMS rating | Unknown | Configured VESC BMS type is not proof of a connected BMS |
 | Display | LESOWN L7 family, 7-inch IPS, 1024×600; HDMI video and USB-HID touch | Supplied guide Rev 2.1 + connector photos; exact suffix and live mode/touch still unverified |
-| Heltec | HTIT-WB32LAF V4.3; packaging lists HF 863–928 | Photo-identified board; installed firmware and RF settings unverified |
-| GPS | Quectel L76K with ceramic patch antenna, cabled to Heltec | Module marking and antenna visible; fix/serial operation untested |
+| Heltec | HTIT-WB32LAF V4.3; ESP32-S3, 16 MB flash, 2 MB PSRAM | Chip/flash read; bench firmware installed, radio initialization and TX-done verified; receive/range pending |
+| GPS | Quectel L76K; 9600 baud, MCU RX39, UART transmit disconnected | Valid NMEA received; satellite fix still pending |
 | Base-station radio | LoRa attached to pit Pi 4 | Model/inventory pending |
 | Pi/display/Heltec power | Regulated supply details unknown; Heltec must survive display power loss | Independent supply, USB backfeed and reset behavior need validation |
 | Network | Pi 3 B has Wi-Fi/BLE and Ethernet; pit accessible locally | Board capability verified; site network not configured |
