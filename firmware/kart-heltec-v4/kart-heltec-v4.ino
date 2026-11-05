@@ -95,11 +95,18 @@ public:
   int read() override { if (_head == _tail) return -1; uint8_t c = _buf[_tail]; _tail = (_tail + 1) % BUF; return c; }
   void flush() override {}
   size_t write(uint8_t c) override { return write(&c, 1); }
+  size_t chunk = 20;   // negotiated MTU - 3; the VESC NRF51 UART bridge is usually MTU 23
   size_t write(const uint8_t* b, size_t n) override {
     if (!_tx) return 0;
-    // Respect the negotiated MTU: chunk writes at 180 bytes.
+    // The bridge is a transparent byte pipe; the VESC reassembles the packet, so chunk at the MTU.
     size_t sent = 0;
-    while (sent < n) { size_t k = min((size_t)180, n - sent); _tx->writeValue(b + sent, k, false); sent += k; }
+    while (sent < n) {
+      size_t k = min(chunk, n - sent);
+      bool ok = _tx->writeValue(b + sent, k, false);
+      if (!ok) { ok = _tx->writeValue(b + sent, k, true); }
+      if (!ok) return sent;
+      sent += k;
+    }
     return n;
   }
 };
@@ -227,13 +234,17 @@ static void fillTelemetry(GkTelemetry& t) {
 // ---------------------------------------------------------------- vesc writes
 static bool startWrite(float scale) {
   if (!writesEnabled() || !vescUp() || vescIdentityBad) return false;
+  // Per-vehicle: every field except the motor-current scale is echoed back from the live
+  // configuration just read out of THIS controller (GET_MCCONF). Never write before that read.
+  const VescActiveLimits& L = vesc.limits();
+  if (!L.receivedMs) { logf("refusing write: this VESC's limits have not been read yet"); return false; }
   VescTempLimits l;
-  l.currentMinScale = BASE_CURRENT_MIN_SCALE;
+  l.currentMinScale = L.currentMinScale;
   l.currentMaxScale = scale;
-  l.minErpm = BASE_MIN_ERPM; l.maxErpm = BASE_MAX_ERPM;
-  l.minDuty = BASE_MIN_DUTY; l.maxDuty = BASE_MAX_DUTY;
-  l.wattMin = BASE_WATT_MIN; l.wattMax = BASE_WATT_MAX;
-  l.sendInCurrent = false;
+  l.minErpm = L.minErpm; l.maxErpm = L.maxErpm;
+  l.minDuty = L.minDuty; l.maxDuty = L.maxDuty;
+  l.wattMin = L.wattMin; l.wattMax = L.wattMax;
+  l.sendInCurrent = false;                     // battery limits: always the controller's own
   wAckSeen = vesc.lastAckMs();
   vesc.sendTempLimits(l);
   wState = W_SENT; wTarget = scale; wSentMs = millis();
@@ -355,9 +366,10 @@ static bool bleConnectTo(const NimBLEAddress& target) {
   if (!pTxChar || !pRxChar) { pClient->disconnect(); logf("ble: NUS characteristics missing"); return false; }
   if (pRxChar->canNotify()) pRxChar->subscribe(true, onNotify);
   bleStream.clear(); bleStream.setTx(pTxChar);
+  { uint16_t mtu = pClient->getMTU(); bleStream.chunk = (mtu > 23) ? (size_t)(mtu - 3) : 20; }
   vesc.setPort(&bleStream);
   bleConnected = true; bleConnectedMs = millis();
-  logf("ble connected %s", target.toString().c_str());
+  logf("ble connected %s mtu %u (write chunk %u)", target.toString().c_str(), (unsigned)pClient->getMTU(), (unsigned)bleStream.chunk);
   return true;
 }
 static void bleService() {

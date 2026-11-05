@@ -197,3 +197,7 @@ body.mobile .mlinks a { flex: 1; min-height: 48px; display: flex; align-items: c
 body.mobile .toast { bottom: calc(80px + env(safe-area-inset-bottom)); font-size: 17px; }
 body.login form { max-width: calc(100vw - 32px); }
 input, textarea { -webkit-user-select: text; user-select: text; }   /* iOS: inputs inside user-select:none are not editable */
+
+/* iOS: inputs must be selectable or the keyboard never appears */
+body.login { -webkit-user-select: text; user-select: text; touch-action: auto; }
+input, textarea, select { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default; touch-action: auto; font-size: 16px; }

@@ -18,9 +18,9 @@
   <h2 style="margin:0">GoKart Pit</h2>
   <div id="bad" class="faultline hidden">Wrong password.</div>
   <label class="lbl" for="name">Your name (shown in the command log)</label>
-  <input id="name" name="name" autocomplete="nickname" maxlength="24" placeholder="operator">
+  <input id="name" name="name" autocomplete="nickname" maxlength="24" placeholder="operator" autocapitalize="off" autocorrect="off">
   <label class="lbl" for="pw">Pit password</label>
-  <input id="pw" name="password" type="password" autocomplete="current-password" autofocus>
+  <input id="pw" name="password" type="password" autocomplete="current-password" inputmode="text" autocapitalize="off" autocorrect="off">
   <input type="hidden" id="next" name="next" value="">
   <button type="submit">Log in</button>
 </form>

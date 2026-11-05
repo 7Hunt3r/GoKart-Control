@@ -7,7 +7,7 @@ check what you got.
 
 | File | Board | Build | SHA-256 |
 | --- | --- | --- | --- |
-| `kart-heltec-v4-ble-0.1.0.merged.bin` | Heltec WiFi LoRa 32 V4.3 | kart node, VESC over BLE, writes enabled, 2 Hz, 16777216 bytes | `46db276d41ab990bbc67fb05c9782261ad58cec95ed84bc10428436b4b3d76d6` |
+| `kart-heltec-v4-ble-0.1.0.merged.bin` | Heltec WiFi LoRa 32 V4.3 | kart node, VESC over BLE (MTU-chunked writes), per-controller limits, 2 Hz, 16777216 bytes | `ccf91923c25d2eb6e45ae9c1fcb94662903bcb4af485f29dc47c1fbaeac5b051` |
 
 ## Flash with esptool (PlatformIO's or pip's)
 
