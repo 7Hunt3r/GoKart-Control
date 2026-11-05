@@ -43,13 +43,17 @@ echo
 echo "About to ERASE $DISK  ($NAME, $SIZE). Current contents:"
 diskutil list "$DISK"
 for part in $(diskutil list "$DISK" | awk '/[0-9]:/{print $NF}' | grep -E "^$(basename "$DISK")s[0-9]+$"); do
-  MP="$(diskutil info "/dev/$part" | grep -E '^\s*Mount Point:' | sed -E 's/.*Mount Point:\s+//')"
+  MP="$(diskutil info "/dev/$part" | { grep -E '^\s*Mount Point:' || true; } | sed -E 's/.*Mount Point:\s+//')"
   if [ -n "$MP" ] && [ -d "$MP" ]; then
     echo "--- files on /dev/$part ($MP):"; ls -la "$MP" | head -25
   fi
 done
 echo
-read -r -p "Type the disk id ($DISK) to continue: " CONFIRM
+if [ "${FLASH_CONFIRM:-}" = "$DISK" ]; then
+  CONFIRM="$DISK"; echo "FLASH_CONFIRM matches $DISK; proceeding without a prompt"
+else
+  read -r -p "Type the disk id ($DISK) to continue: " CONFIRM < /dev/tty
+fi
 [ "$CONFIRM" = "$DISK" ] || { echo "aborted"; exit 1; }
 
 # --- 3. image + write ----------------------------------------------------------
