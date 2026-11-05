@@ -1,0 +1,37 @@
+# Installed by pit/install.sh (@PIT_USER@ is substituted). Untested on hardware.
+# cage (single-app Wayland compositor) runs Chromium full screen on tty1 as the
+# pit user. The PAM session (/etc/pam.d/gokart-kiosk -> pam_systemd) registers a
+# logind session on seat0/tty1, which is what lets cage (via libseat's logind
+# backend) open the DRM display and the touch/input devices without root or seatd.
+# Pattern from the cage project's "Starting Cage on boot with systemd" wiki page.
+[Unit]
+Description=GoKart pit kiosk (cage + Chromium on HDMI, tty1)
+After=systemd-user-sessions.service plymouth-quit-wait.service dbus.socket systemd-logind.service
+After=gokart-pit.service getty@tty1.service
+Wants=gokart-pit.service dbus.socket systemd-logind.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=simple
+User=@PIT_USER@
+PAMName=gokart-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+# The page is served by gokart-pit on localhost; wait (max 60 s) so Chromium
+# does not open on an error page. It never needs Wi-Fi.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:8080/healthz && exit 0; sleep 1; done; exit 0'
+ExecStart=/usr/bin/cage -d -s -- /opt/gokart-pit/kiosk/start-chromium.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

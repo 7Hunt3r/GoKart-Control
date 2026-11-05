@@ -1,0 +1,6 @@
+# LilyGo T-Beam S3 Core (ESP32-S3 native USB CDC) -> stable /dev/tbeam
+# VID/PID 303a:1001 is Espressif's generic USB-JTAG/serial ID, so also match the
+# product string to avoid grabbing some other ESP32-S3 plugged into the Pi.
+# Product string "LilyGo TBeam_S3_Core" is from the brief; not yet read from a real board
+# (check with: udevadm info -a -n /dev/ttyACM0 | grep -i product).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{product}=="LilyGo TBeam_S3_Core", SYMLINK+="tbeam", GROUP="dialout", MODE="0660"

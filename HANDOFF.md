@@ -57,8 +57,16 @@ Eamon's branch adds the first runnable firmware; see [firmware/README.md](firmwa
   OLED, ArduinoOTA.
 - `firmware/libraries/`: shared packet format and a self-contained VESC 6.00 UART layer
   (the old Core2 sketch needed a hand-edited VescUart; this does not).
-- `pit/`: Pi 4 pit station (SD-card kit, kiosk touch UI, server, simulator) in progress
-  on the same branch.
+- `pit/`: Pi 4 pit station. `pit/server` (Python stdlib + pyserial): T-Beam serial link
+  with reconnect, fleet state with explicit online/stale/offline and null-not-zero,
+  command delivery with retries and eight per-kart outcomes, JSONL session logs,
+  password-protected operator page plus a 1024x600 touch kiosk page (per-kart
+  ECO/NORMAL/SPORT/STOP/START, hold-to-fire STOP ALL, race entry filters and race
+  mode, local-meters map with optional georeferenced imagery). `pit/sim` fakes eight
+  karts over a pty so the whole loop runs on a laptop; 26 unit/end-to-end tests pass.
+  `pit/sdcard` is a cloud-init SD kit (hostname gokart-pit, kiosk via cage+Chromium,
+  udev `/dev/tbeam`, systemd units). Tested only on the Mac against the simulator;
+  nothing has run on a Pi yet. See [pit/README.md](pit/README.md).
 
 Verified: both sketches compile (esp32 core 3.3.8); temp-limit payload checked against
 bldc release_6_00; mcconf offsets computed from the pinned schema. Not verified: any

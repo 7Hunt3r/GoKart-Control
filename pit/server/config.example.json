@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to config.json (gitignored). password = shared pit operator password; empty means only the local kiosk (127.0.0.1) can connect.",
+  "password": "",
+  "bind": "0.0.0.0",
+  "http_port": 8080,
+  "trust_localhost": true,
+  "serial_port": null,
+  "tcp": null,
+  "cmd_ttl_s": 10,
+  "origin": null,
+  "log_dir": null
+}

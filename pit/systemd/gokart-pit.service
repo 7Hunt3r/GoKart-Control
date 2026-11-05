@@ -1,0 +1,19 @@
+# Installed by pit/install.sh (@PIT_USER@ is substituted). Untested on hardware.
+[Unit]
+Description=GoKart pit server (T-Beam serial link + web UI on :8080)
+After=network.target
+# No dependency on Wi-Fi: the pit must run in the field with no network.
+
+[Service]
+Type=simple
+User=@PIT_USER@
+Group=@PIT_USER@
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/gokart-pit/server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/gokart-pit/server/pit_server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

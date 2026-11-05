@@ -1,0 +1,11 @@
+{
+  "_comment": "Course map package source. See README.md in this folder. No imagery or course route is bundled yet.",
+  "version": 0,
+  "image": null,
+  "bounds": null,
+  "origin": null,
+  "course": [],
+  "pit": null,
+  "source": null,
+  "attribution": null
+}

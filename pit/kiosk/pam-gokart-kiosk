@@ -1,0 +1,6 @@
+# /etc/pam.d/gokart-kiosk  (installed by pit/install.sh)
+# Opens a logind session for the kiosk service so cage can use the display/input.
+auth           required        pam_unix.so nullok
+account        required        pam_unix.so
+session        required        pam_unix.so
+session        required        pam_systemd.so

@@ -1,0 +1,47 @@
+#cloud-config
+# GoKart pit station (Pi 4): first-boot configuration (cloud-init NoCloud).
+# Generated from this template by gen_cloudinit.py; do not edit build/user-data by hand.
+hostname: {{HOSTNAME}}
+manage_etc_hosts: true
+timezone: {{TIMEZONE}}
+keyboard:
+  model: pc105
+  layout: us
+
+# Rename the image's default UID-1000 user (keeps its sudo/video/input/dialout groups).
+user:
+  name: {{USER}}
+  shell: /bin/bash
+  lock_passwd: false
+  passwd: {{PASSWORD_HASH}}
+ssh_pwauth: true
+
+package_update: true
+packages:
+  - rsync
+  - curl
+
+write_files:
+  - path: /opt/gokart-pit/server/config.json
+    permissions: "0600"
+    owner: root:root
+    content: {{PIT_CONFIG_JSON}}
+  - path: /root/tailscale.key
+    permissions: "0600"
+    owner: root:root
+    content: {{TAILSCALE_AUTHKEY}}
+  - path: /opt/gokart-pit-payload.tar.gz
+    permissions: "0644"
+    owner: root:root
+    encoding: b64
+    content: {{PAYLOAD_B64}}
+
+runcmd:
+  - [systemctl, enable, --now, ssh]
+  - mkdir -p /opt/gokart-pit && tar xzf /opt/gokart-pit-payload.tar.gz -C /opt/gokart-pit --no-same-owner
+  - bash /opt/gokart-pit/sdcard/firstboot.sh {{USER}} {{HOSTNAME}} {{WIFI_SSID}} 2>&1 | tee /var/log/gokart-pit-firstboot.log
+
+power_state:
+  mode: reboot
+  message: "GoKart pit first boot complete, rebooting"
+  condition: true
