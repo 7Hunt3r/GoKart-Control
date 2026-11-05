@@ -127,8 +127,22 @@ Later the same evening (17:00-17:30):
   so suspect the board (antenna, front-end variant V4.2 vs V4.3, or an older build).
   Needs its console `status` (lora_rx, lora_rx_bad, built) or a bench swap of boards.
 
-Not yet: a stop against a real VESC (blocked on kart 1's receive problem), a range
-test, PPS at the base (indoors), alignment field check.
+**17:40, first verified remote STOP on a real VESC.** Eamon's Heltec (kart 2) was pinned to
+Colin's controller (address + UUID check) with Colin's own Heltec unplugged. Root cause of
+the earlier silent writes: the VESC BLE UART module negotiates MTU 23, so the 42-byte
+temp-config write has to be sent in 20-byte chunks. Each ramp step was then acknowledged
+and read back (scale 0.5, 0.2, 0.0); START restored 1.0. Writes now echo the limits read
+from that specific controller at link-up, never capture constants.
+
+**SLOW** (cap speed to N mph via the ERPM limit, using the controller's own poles/gear/wheel)
+was added for the pit, kiosk and phone page. **Regen on STOP**: the Heltec now also sends a
+brake request to an on-VESC LispBM script, `firmware/vesc-lisp/gokart_brake.lisp`; without
+the script, or with Motor Current Max Brake = 0 (this fleet's baseline), it is a no-op and the
+kart coasts. Loading the script and enabling brake current are per-kart VESC Tool steps and an
+owner decision; see `firmware/vesc-lisp/README.md`.
+
+Not yet: wheels-up throttle check during STOP (next), the brake script on any kart, a range
+test, PPS at the base (indoors), alignment field check, kart 1's receive problem.
 
 **For Colin, to run the command-capable build on his kart (his decision):** a prebuilt
 image and the console steps are in [firmware/releases/README.md](firmware/releases/README.md); or build it:
