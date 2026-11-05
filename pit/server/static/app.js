@@ -388,15 +388,59 @@ function drawMap() {
 function setupMapInput() {
   const cv = $("map");
   if (!cv) return;
-  let drag = null;
-  cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; cv.setPointerCapture(e.pointerId); });
-  cv.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    if (Math.abs(dx) + Math.abs(dy) > 4) view.fit = false;
-    if (!view.fit) { view.cx = drag.cx - dx / view.scale; view.cy = drag.cy + dy / view.scale; if (S) drawMap(); }
+  // One finger / mouse: pan. Two fingers: pinch zoom anchored on the midpoint. Wheel: zoom at cursor.
+  const ptrs = new Map();
+  let drag = null, pinch = null;
+  const MIN_SCALE = 0.02, MAX_SCALE = 60;   // px per metre
+  const local = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const clampScale = (v) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
+  // world metres under a canvas point
+  const world = (x, y) => [view.cx + (x - cv.clientWidth / 2) / view.scale, view.cy - (y - cv.clientHeight / 2) / view.scale];
+  const zoomAt = (x, y, factor) => {
+    const [wx, wy] = world(x, y);
+    view.scale = clampScale(view.scale * factor);
+    view.cx = wx - (x - cv.clientWidth / 2) / view.scale;
+    view.cy = wy + (y - cv.clientHeight / 2) / view.scale;
+    view.fit = false;
+  };
+  cv.addEventListener("pointerdown", (e) => {
+    cv.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, local(e));
+    if (ptrs.size === 1) { const [x, y] = local(e); drag = { x, y, cx: view.cx, cy: view.cy, moved: false }; pinch = null; }
+    else if (ptrs.size === 2) {
+      drag = null;
+      const [a, b] = [...ptrs.values()];
+      pinch = { d0: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, scale0: view.scale, anchor: world((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) };
+      view.fit = false;
+    }
   });
-  ["pointerup", "pointercancel"].forEach((ev) => cv.addEventListener(ev, () => { drag = null; }));
+  cv.addEventListener("pointermove", (e) => {
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.set(e.pointerId, local(e));
+    if (pinch && ptrs.size >= 2) {
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1;
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      view.scale = clampScale(pinch.scale0 * d / pinch.d0);
+      view.cx = pinch.anchor[0] - (mx - cv.clientWidth / 2) / view.scale;
+      view.cy = pinch.anchor[1] + (my - cv.clientHeight / 2) / view.scale;
+      if (S) drawMap();
+    } else if (drag && ptrs.size === 1) {
+      const [x, y] = local(e);
+      const dx = x - drag.x, dy = y - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; view.fit = false; }
+      if (drag.moved) { view.cx = drag.cx - dx / view.scale; view.cy = drag.cy + dy / view.scale; if (S) drawMap(); }
+    }
+  });
+  const release = (e) => {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinch = null;
+    if (ptrs.size === 1) { const [x, y] = [...ptrs.values()][0]; drag = { x, y, cx: view.cx, cy: view.cy, moved: true }; }
+    if (ptrs.size === 0) drag = null;
+  };
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach((ev) => cv.addEventListener(ev, release));
+  cv.addEventListener("wheel", (e) => { e.preventDefault(); const [x, y] = local(e); zoomAt(x, y, Math.pow(1.0015, -e.deltaY)); if (S) drawMap(); }, { passive: false });
+  cv.addEventListener("dblclick", (e) => { const [x, y] = local(e); zoomAt(x, y, 1.6); if (S) drawMap(); });
 }
 
 /* ------------------------------------------------------------ kiosk sheet */
