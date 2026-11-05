@@ -1,0 +1,11 @@
+{
+  "recorded_utc": "2026-11-05T20:41:20.329296+00:00",
+  "scope": "current runtime motor/app settings; not saved flash; no tuning or settings writes",
+  "transport": "Heltec bench-control-0.1.8 USB JSON export of CRC-verified BLE VESC replies",
+  "identity_gate": "firmware 6.00 and UUID 2c004c000951343037353739 verified by diagnostic; identity payload not re-exported",
+  "sha256": {
+    "motor": "03e67cd45d6468c3267b64dc970c9dd5cb430f1f386f1c6a2ee28eea5c071d8c",
+    "app": "df26cba6b5e919cab3b9601deb5845e6ab24a2d53da86728d81147aa84877d05"
+  },
+  "original_capture": "../2026-11-05"
+}

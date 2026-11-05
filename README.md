@@ -40,7 +40,10 @@ As of November 5, 2026:
 - This branch has no dashboard/pit app or VESC control. Eamon has a pit-server,
   kiosk and simulator prototype on [PR #1](https://github.com/colinfost3r/GoKart-Control/pull/1);
   its integration with this physical kart remains pending.
-- No course image/route is packaged. Outdoor GPS fix, receiver confirmation,
+- A separate [removable motor-test diagnostic](docs/bench-control-test.md) is a
+  draft: live zero-current tests aborted; no powered spin has been performed.
+- No course image/route is packaged on this branch (Eamon’s branch now includes
+  a Manresa imagery package). Outdoor GPS fix, receiver confirmation,
   field coverage, display integration and driving fault-isolation tests remain open.
 
 The captured configuration is the current **runtime** configuration. It is not

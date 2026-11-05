@@ -34,9 +34,12 @@ while establishing a trustworthy telemetry and configuration baseline.
   verified. See [bench results](docs/heltec-bench-test.md) and
   [receiver/OTA instructions](firmware/heltec/README.md).
 
-During VESC inspection and Heltec testing, no VESC settings were written. No VESC
-firmware update, VESC reboot, motor test,
-CAN enumeration, terminal command or motor actuation was performed. Telemetry
+During the initial USB inspection and normal Heltec telemetry/OTA tests, no VESC
+settings, firmware, resets, motor commands, CAN enumeration or terminal commands
+were sent. Later isolated diagnostic trials sent zero-current requests and finite
+ADC handoff/release commands; no positive-current request or wheel-spin test was
+performed, and no configuration or firmware was written. See the diagnostic
+findings below. Telemetry
 queries can reset the controller's averaging accumulators as part of ordinary
 GET_VALUES behavior, but do not change drive settings.
 
@@ -138,7 +141,11 @@ an event log and verified component ratings.
 
 ## Parallel firmware integration note
 
-Eamon’s `eamon/firmware-lora-starter` is at `dfe83d8` (PR #1) as last fetched.
+Eamon’s `eamon/firmware-lora-starter` is at `ab9404a` (PR #1) as last fetched.
+Recent changes add pit SD-card/display setup and Manresa orthoimagery; the
+46-byte telemetry structure remains unchanged, but Eamon has now moved the
+radio to BW500 and added legacy 47-byte reception. The restored 0.2.0 image uses
+BW250; reconcile the current radio settings before claiming receiver compatibility.
 It contains the T-Beam S3 base, another kart starter, a Pi 4 pit server/kiosk,
 simulator and SD-card setup. His notes report base boot, radio initialization
 and GNSS serial reception verified; no received LoRa packet or outdoor fix yet.
@@ -160,10 +167,17 @@ writes disabled. Retain authenticated maintenance-only OTA. No changes have
 been made to Eamon’s branch and no remote commands are handled here.
 
 The owner also requested a removable, separate bench-control diagnostic for a
-wheels-up ten-second forward pulse. It has not been implemented or run yet.
+wheels-up forward pulse, later revised to **five seconds at mid speed**.
+A separate prototype exists in `firmware/bench-control`, but its live zero-current
+trials failed freshness checks and some BLE preflights stalled. No positive-current
+request or motor spin was sent. The normal kart-1 telemetry image was restored
+and verified. See [diagnostic findings](docs/bench-control-test.md).
 Do not add a general motor-write API to the normal telemetry build. Validate
-bounded stopping and physical direction before the requested sustained test;
+bounded stopping and physical direction before the requested five-second test;
 this diagnostic is separate from deferred fleet remote stop/profile control.
+The owner wants to extend validated motor testing to Eamon’s base station next,
+after this local setup/test works. This is a future bench-test objective, not
+authorization to enable the unvalidated fleet STOP/profile implementation.
 
 ## Collaboration and delivery state
 
