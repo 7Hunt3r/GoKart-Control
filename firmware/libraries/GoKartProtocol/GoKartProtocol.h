@@ -44,6 +44,11 @@
 // Pit beacon: sent at this phase of the base's second, in the tail after all kart slots
 // (also clear of the second 2 Hz round, which ends at 900 ms with 50 ms slots).
 #define GK_BEACON_PHASE_MS     905
+// Pit commands go out in their own window just before the beacon, spaced so a kart can
+// read one packet out of the radio before the next arrives.
+#define GK_CMD_WINDOW_START_MS 815
+#define GK_CMD_WINDOW_END_MS   895
+#define GK_TX_SPACING_MS       30
 // Airtime of a 22-byte beacon at SF7/BW500 (preamble 8, explicit header, CRC), rounded up.
 #define GK_BEACON_AIRTIME_MS   12
 // A kart that hears the beacon but has no GPS PPS aligns its slots to it (sync source 2).

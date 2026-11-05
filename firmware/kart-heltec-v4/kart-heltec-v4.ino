@@ -437,7 +437,11 @@ static void emitFleet(uint8_t id, float rssi, float snr) {
   Serial.println(buf);
 }
 
+static void serviceLoraRxOne();
 static void serviceLoraRx() {
+  for (int i = 0; i < 4 && radioOk && loraIrq; i++) serviceLoraRxOne();   // drain back-to-back packets
+}
+static void serviceLoraRxOne() {
   if (!radioOk || !loraIrq) return;
   loraIrq = false;
   uint8_t buf[80];
@@ -541,7 +545,7 @@ static void usbReport() {
 static void usbStatus() {
   const VescActiveLimits& L = vesc.limits();
   char hdopStr[12] = "null"; if (gps.hdop.isValid()) snprintf(hdopStr, sizeof hdopStr, "%.2f", gps.hdop.hdop());
-  Serial.printf("{\"t\":\"status\",\"kart\":%u,\"fw\":\"%s\",\"writes\":%s,\"transport\":\"%s\",\"radio\":%s,\"radio_status\":%d,"
+  Serial.printf("{\"t\":\"status\",\"kart\":%u,\"fw\":\"%s\",\"built\":\"" __DATE__ " " __TIME__ "\",\"writes\":%s,\"transport\":\"%s\",\"radio\":%s,\"radio_status\":%d,"
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
@@ -710,7 +714,7 @@ void setup() {
 
   randomSeed(esp_random());
   memset(fleetMs, 0, sizeof fleetMs);
-  logf("boot %s kart %u transport %s writes %s radio %s (%d)", FW_VERSION, kartId, VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(writesEnabled()), radioOk ? "ok" : "FAILED", radioStatus);
+  logf("boot %s (built " __DATE__ " " __TIME__ ") kart %u transport %s writes %s radio %s (%d)", FW_VERSION, kartId, VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(writesEnabled()), radioOk ? "ok" : "FAILED", radioStatus);
 }
 
 void loop() {
@@ -723,5 +727,6 @@ void loop() {
   serviceLoraTx();
   serviceWifi();
   serviceOled();
+  serviceLoraRx();                       // again after the slow OLED/WiFi work
   delay(1);
 }
