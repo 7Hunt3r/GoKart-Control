@@ -43,15 +43,23 @@ String  wifiSsid, wifiPass, otaPass, vescMac;
 // ---------------------------------------------------------------- radio
 SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
 volatile bool loraIrq = false;
-void IRAM_ATTR onLoraIrq() { loraIrq = true; }
+volatile uint32_t loraIrqMicros = 0;
+void IRAM_ATTR onLoraIrq() { loraIrq = true; loraIrqMicros = micros(); }
 bool     radioOk = false;
 int      radioStatus = -999;
 uint32_t loraTx = 0, loraRx = 0, loraRxBad = 0;
 int8_t   baseRssi = 0;
 uint32_t baseHeardMs = 0;
 uint8_t  txSeq = 0;
-uint32_t lastTxMs = 0, lastTxPps = 0;
+uint32_t lastTxMs = 0;
+uint32_t lastTxEdge = 0, lastTxRound = 0xFFFFFFFF;
 uint16_t txJitter = 0;
+uint8_t  reportRate = 1;                      // 1 or 2 reports per second ("rate N" on the console)
+// Beacon sync: when there is no GPS PPS, align slots to the pit beacon's second.
+uint32_t syncEdgeMicros = 0, syncMs = 0;
+uint32_t baseUtc = 0, baseUtcMs = 0; uint8_t pitKartsOnline = 0; uint8_t baseSyncSrc = 0;
+// VESC identity pin (UUID from FW_VERSION), optional
+String   vescUuid; bool vescIdentityBad = false; uint32_t vescIdCheckedMs = 0;
 
 // ---------------------------------------------------------------- gps
 TinyGPSPlus gps;
@@ -159,8 +167,10 @@ static bool writesEnabled() {
 static bool vescUp() { return vesc.linkUp(VESC_LINK_TIMEOUT_MS); }
 
 static uint32_t gpsUnix() {
-  if (!gps.date.isValid() || !gps.time.isValid() || gps.date.age() > 5000) return 0;
-  return gkUnixFromCivil(gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second());
+  if (gps.date.isValid() && gps.time.isValid() && gps.date.age() <= 5000)
+    return gkUnixFromCivil(gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second());
+  if (baseUtc && millis() - baseUtcMs < 120000) return baseUtc + (millis() - baseUtcMs) / 1000;   // pit beacon time
+  return 0;
 }
 
 static bool ppsFresh() {
@@ -216,7 +226,7 @@ static void fillTelemetry(GkTelemetry& t) {
 
 // ---------------------------------------------------------------- vesc writes
 static bool startWrite(float scale) {
-  if (!writesEnabled() || !vescUp()) return false;
+  if (!writesEnabled() || !vescUp() || vescIdentityBad) return false;
   VescTempLimits l;
   l.currentMinScale = BASE_CURRENT_MIN_SCALE;
   l.currentMaxScale = scale;
@@ -387,8 +397,14 @@ static void serviceVesc() {
   if (up && !vescLinkWas) {              // link came up: read-only reconciliation only
     vesc.requestFirmware();
     vesc.requestMotorConfig(); vescMcconfMs = now;
-    modeConfirmed = false;
+    modeConfirmed = false; vescIdentityBad = false; vescIdCheckedMs = 0;
     logf("vesc link up");
+  }
+  if (up && vesc.fwSeenMs && vesc.fwSeenMs != vescIdCheckedMs) {
+    vescIdCheckedMs = vesc.fwSeenMs;
+    bool bad = vescUuid.length() == 24 && !vescUuid.equalsIgnoreCase(vesc.uuidHex);
+    if (bad != vescIdentityBad) { vescIdentityBad = bad; logf(bad ? "VESC IDENTITY MISMATCH: uuid %s, pinned %s; writes refused" : "vesc identity ok uuid %s", vesc.uuidHex, vescUuid.c_str()); }
+    else if (!bad) logf("vesc fw %u.%02u %s uuid %s", vesc.fwMajor, vesc.fwMinor, vesc.hwName, vesc.uuidHex);
   }
   if (!up && vescLinkWas) { modeConfirmed = false; logf("vesc link lost"); }
   vescLinkWas = up;
@@ -445,21 +461,34 @@ static void serviceLoraRx() {
       if (gkAddressedToMe(c.h, kartId)) handleCommand(c.h.src, c.h.seq, c.cmd, c.arg, c.ttl_s, c.issued_utc_s);
       break;
     }
+    case GK_MSG_BASE_INFO: {
+      GkBaseInfo b; memcpy(&b, buf, len);
+      syncEdgeMicros = loraIrqMicros - ((uint32_t)b.phase_ms + GK_BEACON_AIRTIME_MS) * 1000UL;
+      syncMs = millis(); baseSyncSrc = b.sync_src; pitKartsOnline = b.karts_online;
+      if (b.utc_s) { baseUtc = b.utc_s; baseUtcMs = millis(); }
+      break;
+    }
     default: break;
   }
 }
 
+static bool syncFresh() { return syncMs && millis() - syncMs < GK_SYNC_MAX_AGE_MS; }
 static bool slotDue() {
   uint32_t now = millis();
-  if (ppsFresh()) {
-    noInterrupts(); uint32_t pc = ppsCount, pm = ppsMicros; interrupts();
-    if (lastTxPps == pc) return false;
-    int32_t since = (int32_t)(micros() - pm);
-    int32_t start = (int32_t)(kartId - 1) * GK_SLOT_MS * 1000 - GK_SLOT_GUARD_MS * 1000;
-    if (since >= start && since < start + 60000) { lastTxPps = pc; return true; }
+  uint32_t edge = 0; bool have = false;
+  if (ppsFresh()) { noInterrupts(); edge = ppsMicros; interrupts(); have = true; }
+  else if (syncFresh()) { edge = syncEdgeMicros; have = true; }
+  if (have) {
+    uint32_t periodUs = 1000000UL / reportRate;
+    uint32_t slotUs = (reportRate == 2 ? GK_SLOT_MS_2HZ : GK_SLOT_MS) * 1000UL;
+    uint32_t since = micros() - edge;             // the edge may be a few seconds old (beacon sync)
+    uint32_t round = since / periodUs, inRound = since % periodUs;
+    int32_t start = (int32_t)((kartId - 1) * slotUs) - GK_SLOT_GUARD_MS * 1000;
+    if (edge == lastTxEdge && round == lastTxRound) return false;
+    if ((int32_t)inRound >= start && (int32_t)inRound < start + 40000) { lastTxEdge = edge; lastTxRound = round; return true; }
     return false;
   }
-  return (now - lastTxMs) >= (uint32_t)(GK_REPORT_PERIOD_MS + txJitter);
+  return (now - lastTxMs) >= (uint32_t)(1000 / reportRate + txJitter);
 }
 
 static void serviceLoraTx() {
@@ -470,7 +499,7 @@ static void serviceLoraTx() {
   loraIrq = false;                       // the TX-done interrupt also raised DIO1
   radio.startReceive();
   digitalWrite(PIN_LED, LOW);
-  lastTxMs = millis(); txJitter = random(0, 150); txSeq++;
+  lastTxMs = millis(); txJitter = random(0, reportRate == 2 ? 80 : 150); txSeq++;
   if (st == RADIOLIB_ERR_NONE) loraTx++; else logf("lora tx error %d", st);
 }
 
@@ -515,7 +544,8 @@ static void usbStatus() {
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
-                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\",\"heap\":%lu}\n",
+                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
+                "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,\"heap\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
                 (unsigned long)loraTx, (unsigned long)loraRx, (unsigned long)loraRxBad, gkBool(gpsLocked),
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
@@ -523,6 +553,7 @@ static void usbStatus() {
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
                 L.motorPoles, L.gearRatio, L.wheelDiameter,
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", wifiSsid.c_str(), vescMac.c_str(),
+                vesc.uuidHex, vescUuid.c_str(), gkBool(!vescIdentityBad), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 (unsigned long)ESP.getFreeHeap());
 }
 
@@ -542,6 +573,13 @@ static void usbCommand(char* line) {
     logf("wifi credentials stored for '%s'; reboot to apply", arg);
   }
   else if (!strcmp(line, "otapw") && arg) { prefs.putString("otapw", arg); logf("ota password stored; reboot to apply"); }
+  else if (!strcmp(line, "rate") && arg) { int r = atoi(arg); if (r == 1 || r == 2) { reportRate = r; prefs.putUChar("rate", r); logf("report rate %d Hz", r); } else logf("rate must be 1 or 2"); }
+  else if (!strcmp(line, "vescuuid") && arg) {
+    if (!strcmp(arg, "clear")) { prefs.remove("vescuuid"); vescUuid = ""; vescIdentityBad = false; logf("vesc uuid pin cleared"); }
+    else if (!strcmp(arg, "now") && vesc.uuidHex[0]) { vescUuid = vesc.uuidHex; prefs.putString("vescuuid", vescUuid); vescIdentityBad = false; logf("vesc uuid pinned to %s", vescUuid.c_str()); }
+    else if (strlen(arg) == 24) { vescUuid = arg; prefs.putString("vescuuid", vescUuid); vescIdCheckedMs = 0; logf("vesc uuid pinned to %s", arg); }
+    else logf("usage: vescuuid <24 hex> | now | clear");
+  }
   else if (!strcmp(line, "vescmac") && arg) {
     if (!strcmp(arg, "clear")) { prefs.remove("vescmac"); vescMac = ""; logf("vesc address cleared"); }
     else { prefs.putString("vescmac", arg); vescMac = arg; logf("vesc address pinned to %s", arg); }
@@ -553,7 +591,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -594,7 +632,8 @@ static void serviceOled() {
   oled.drawStr(0, 31, l);
   snprintf(l, sizeof l, "LoRa%s tx%lu rx%lu", radioOk ? "" : "!", (unsigned long)loraTx, (unsigned long)loraRx);
   oled.drawStr(0, 42, l);
-  if (baseHeardMs) snprintf(l, sizeof l, "pit %ddBm %lus ago", baseRssi, (unsigned long)((millis() - baseHeardMs) / 1000));
+  if (vescIdentityBad) snprintf(l, sizeof l, "VESC ID MISMATCH!");
+  else if (baseHeardMs) snprintf(l, sizeof l, "pit %ddBm %lus %s", baseRssi, (unsigned long)((millis() - baseHeardMs) / 1000), ppsFresh() ? "PPS" : (syncFresh() ? "sync" : ""));
   else snprintf(l, sizeof l, "pit -- not heard");
   oled.drawStr(0, 53, l);
   if (WiFi.status() == WL_CONNECTED) snprintf(l, sizeof l, "wifi %s", WiFi.localIP().toString().c_str());
@@ -615,6 +654,8 @@ void setup() {
   wifiPass = prefs.getString("pass", "");
   otaPass  = prefs.getString("otapw", "");
   vescMac  = prefs.getString("vescmac", "");
+  vescUuid = prefs.getString("vescuuid", "");
+  reportRate = prefs.getUChar("rate", 1); if (reportRate != 2) reportRate = 1;
   if (kartId < 1 || kartId > GK_MAX_KARTS) kartId = DEFAULT_KART_ID;
 
   // OLED (Vext powers it, active low)

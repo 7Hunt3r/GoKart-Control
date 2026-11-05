@@ -89,8 +89,8 @@ static const ModeDef MODES[3] = {
 #define MODE_MATCH_TOL 0.015f
 
 // Stop = ramp the current scale down, then hold at 0. Mechanical brakes are untouched.
-static const float STOP_RAMP[] = { 0.6f, 0.3f, 0.1f, 0.0f };
-#define STOP_RAMP_STEP_MS 300
+static const float STOP_RAMP[] = { 0.5f, 0.2f, 0.0f };
+#define STOP_RAMP_STEP_MS 150   // ~0.5 s to zero torque plus ack/verify
 
 // ---- Timing ----------------------------------------------------------------
 #define OLED_REFRESH_MS    500

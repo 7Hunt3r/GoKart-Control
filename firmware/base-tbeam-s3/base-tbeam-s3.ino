@@ -38,7 +38,8 @@ bool pmuOk = false;
 // ---------------------------------------------------------------- radio
 SX1262 radio = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
 volatile bool loraIrq = false;
-void IRAM_ATTR onLoraIrq() { loraIrq = true; }
+volatile uint32_t loraIrqMicros = 0;
+void IRAM_ATTR onLoraIrq() { loraIrq = true; loraIrqMicros = micros(); }
 bool     radioOk = false;
 int      radioStatus = -999;
 uint32_t loraTx = 0, loraRx = 0, loraRxBad = 0;
@@ -63,6 +64,11 @@ GkTelemetry fleet[GK_MAX_KARTS + 1];
 uint32_t    fleetMs[GK_MAX_KARTS + 1];
 float       fleetRssi[GK_MAX_KARTS + 1];
 GkBenchFrame benchLast; uint32_t benchRx = 0, benchMs = 0; float benchRssi = 0;   // Colin's bench transmitter (kart id 0 = uncommissioned)
+// Second-boundary estimate for the beacon and the command window: GPS PPS when available,
+// else derived from kart slot timing (kart k transmits (k-1)*100 ms after the edge), else free-running.
+#define GK_TELE_AIRTIME_MS 22
+uint32_t edgeMicros = 0, edgeSetMs = 0; uint8_t edgeSrc = 0;
+uint32_t beaconTx = 0, lastBeaconIdx = 0xFFFFFFFF; uint8_t beaconSeq = 0;
 struct QueuedCmd { GkCommandMsg msg; bool used; };
 QueuedCmd cmdQueue[CMD_QUEUE_LEN];
 int cmdHead = 0, cmdTail = 0;
@@ -89,6 +95,19 @@ static bool ppsFresh() { return ppsCount && (uint32_t)(micros() - ppsMicros) < 2
 static uint32_t gpsUnix() {
   if (!gps.date.isValid() || !gps.time.isValid() || gps.date.age() > 5000) return 0;
   return gkUnixFromCivil(gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second());
+}
+
+static bool ppsFreshB() { return ppsCount && (uint32_t)(micros() - ppsMicros) < 2000000UL; }
+// microseconds into the current second, and which reference it is based on
+static uint32_t basePhaseUs(uint8_t* src) {
+  if (ppsFreshB()) { if (src) *src = 1; return (uint32_t)(micros() - ppsMicros) % 1000000UL; }
+  if (edgeSetMs && millis() - edgeSetMs < 5000) { if (src) *src = 2; return (uint32_t)(micros() - edgeMicros) % 1000000UL; }
+  if (src) *src = 0; return (micros() % 1000000UL);
+}
+static uint32_t baseSecondIdx() {
+  if (ppsFreshB()) return ppsCount;
+  if (edgeSetMs && millis() - edgeSetMs < 5000) return 0x40000000UL + (uint32_t)(micros() - edgeMicros) / 1000000UL;
+  return 0x80000000UL + micros() / 1000000UL;
 }
 
 static int kartsOnline() {
@@ -176,6 +195,17 @@ static void serviceLoraRx() {
   const GkHeader* h = (const GkHeader*)buf;
   if (type == GK_MSG_TELEMETRY && h->src >= 1 && h->src <= GK_MAX_KARTS) {
     memcpy(&fleet[h->src], buf, len); fleetMs[h->src] = millis(); fleetRssi[h->src] = rssi;
+    if (!ppsFreshB()) {
+      // Kart slots start (k-1)*100 ms after the edge; a 2 Hz kart's second-round packet lands
+      // 500 ms later, so ignore candidates that sit ~500 ms from the current estimate.
+      uint32_t cand = loraIrqMicros - ((uint32_t)(h->src - 1) * GK_SLOT_MS + GK_TELE_AIRTIME_MS) * 1000UL;
+      bool accept = true;
+      if (edgeSetMs && millis() - edgeSetMs < 5000) {
+        uint32_t d = (uint32_t)(cand - edgeMicros) % 1000000UL;
+        if (d > 440000UL && d < 560000UL) accept = false;
+      }
+      if (accept) { edgeMicros = cand; edgeSetMs = millis(); edgeSrc = 2; }
+    }
     char out[640];
     gkTelemetryToJson(out, sizeof out, fleet[h->src], "tele", rssi, snr, millis());
     Serial.println(out);
@@ -198,19 +228,32 @@ static void transmitCommand(const GkCommandMsg& m) {
   Serial.printf("{\"t\":\"sent\",\"seq\":%u,\"cmd\":%u,\"kart\":%u,\"arg\":%u,\"ok\":%s}\n", m.h.seq, m.cmd, m.h.dst, m.arg, gkBool(st == RADIOLIB_ERR_NONE));
 }
 
+static void transmitBeacon(uint8_t src) {
+  if (!radioOk) return;
+  GkBaseInfo b; memset(&b, 0, sizeof b);
+  gkFillHeader(b.h, GK_MSG_BASE_INFO, GK_ADDR_BASE, GK_ADDR_ALL, beaconSeq++);
+  bool fix = lastFixMs && (millis() - lastFixMs) < 3000;
+  if (fix) { b.lat_e7 = (int32_t)llround(fixLat * 1e7); b.lon_e7 = (int32_t)llround(fixLon * 1e7); }
+  b.utc_s = gpsUnix(); b.sync_src = src; b.karts_online = (uint8_t)kartsOnline();
+  b.phase_ms = (uint16_t)(basePhaseUs(nullptr) / 1000UL);
+  int st = radio.transmit((const uint8_t*)&b, sizeof b);
+  loraIrq = false; radio.startReceive();
+  if (st == RADIOLIB_ERR_NONE) { loraTx++; beaconTx++; } else logf("beacon tx error %d", st);
+}
+
 static void serviceLoraTx() {
+  uint8_t src; uint32_t phase = basePhaseUs(&src);
+  // Once per second, in the tail after all kart slots: beacon first, then queued commands.
+  uint32_t idx = baseSecondIdx();
+  bool inWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
+  if (inWindow && idx != lastBeaconIdx) { lastBeaconIdx = idx; transmitBeacon(src); }
   if (cmdHead == cmdTail) return;
-  // With PPS, wait for the tail of the second (after the eight kart slots) so commands do not collide.
-  if (ppsFresh()) {
-    int32_t since = (int32_t)(micros() - ppsMicros);
-    int32_t winStart = GK_BASE_WINDOW_MS * 1000, winEnd = 985000;
-    if (since < winStart || since > winEnd) return;
-  }
+  if (src != 0 && !inWindow) return;          // synced: commands only in the tail window
   while (cmdHead != cmdTail) {
     transmitCommand(cmdQueue[cmdHead].msg);
     cmdQueue[cmdHead].used = false;
     cmdHead = (cmdHead + 1) % CMD_QUEUE_LEN;
-    if (ppsFresh() && (int32_t)(micros() - ppsMicros) > 985000) break;
+    if (src != 0 && basePhaseUs(nullptr) > 985000UL) break;
   }
 }
 
@@ -279,10 +322,10 @@ static void serviceHost() {
     char wifi[24] = "null";
     if (WiFi.status() == WL_CONNECTED) snprintf(wifi, sizeof wifi, "\"%s\"", WiFi.localIP().toString().c_str());
     char benchAge[12] = "null"; if (benchMs) snprintf(benchAge, sizeof benchAge, "%lu", (unsigned long)((millis() - benchMs) / 1000));
-    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s}\n",
+    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s,\"beacon_tx\":%lu,\"sync\":\"%s\"}\n",
                   FW_VERSION, radioOk ? "sx1262" : "none", (unsigned long)loraRx, (unsigned long)loraTx, (unsigned long)loraRxBad,
                   (unsigned long)(millis() / 1000), (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, wifi, kartsOnline(),
-                  (unsigned long)benchRx, benchAge);
+                  (unsigned long)benchRx, benchAge, (unsigned long)beaconTx, ppsFreshB() ? "pps" : (edgeSetMs && millis() - edgeSetMs < 5000 ? "karts" : "free"));
   }
 }
 

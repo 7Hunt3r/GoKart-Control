@@ -12,7 +12,9 @@
   about 0.34 m/px. Checkerboard comparison against the ortho shows alignment within
   roughly one ortho pixel (under a metre). `map.json` v2 points at it; swap `image`
   back to `course.jpg` if the file is missing. Next time, order the GeoTIFF.
-- `course_shop.jpg` (NOT in git, same license): the same SkyFi image cut around the shop
+- `course_shop_cteco.jpg` (in git, CC0): the state 2023 ortho exported for the shop box; the
+  bench preset uses it because the SkyFi shop cut below proved to be 25-40 m off there.
+- `course_shop.jpg` (NOT in git, same license, currently NOT used): the same SkyFi image cut around the shop
   at 50 Day St (box centred near 165 Water St; it covers both) for bench testing, using the island registration extrapolated about
   2 km north; expect a few metres of error there.
 

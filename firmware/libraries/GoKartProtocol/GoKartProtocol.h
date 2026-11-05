@@ -41,6 +41,16 @@
 #define GK_SLOT_MS             100
 #define GK_SLOT_GUARD_MS       8      // early offset so the preamble starts inside the slot
 #define GK_BASE_WINDOW_MS      (GK_MAX_KARTS * GK_SLOT_MS + 20)
+// Pit beacon: sent at this phase of the base's second, in the tail after all kart slots
+// (also clear of the second 2 Hz round, which ends at 900 ms with 50 ms slots).
+#define GK_BEACON_PHASE_MS     905
+// Airtime of a 22-byte beacon at SF7/BW500 (preamble 8, explicit header, CRC), rounded up.
+#define GK_BEACON_AIRTIME_MS   12
+// A kart that hears the beacon but has no GPS PPS aligns its slots to it (sync source 2).
+#define GK_SYNC_MAX_AGE_MS     3000
+// Optional 2 Hz reporting: two rounds per second with half-width slots. Per-kart runtime
+// setting ("rate 1|2" on the kart console); the base does not care.
+#define GK_SLOT_MS_2HZ         50
 
 // ---- Message types ---------------------------------------------------------
 enum GkMsgType : uint8_t {
@@ -130,18 +140,21 @@ struct GkCommandMsg {
   uint32_t issued_utc_s;  // unix seconds at issue (0 = unknown)
 };
 
-struct GkBaseInfo {
+struct GkBaseInfo {       // pit beacon, once per second at GK_BEACON_PHASE_MS into the base's second
   GkHeader h;
   int32_t  lat_e7;
   int32_t  lon_e7;
-  uint32_t utc_s;         // unix seconds (for display sync), 0 if unknown
+  uint32_t utc_s;         // unix seconds at the top of this second (0 if the base has no GPS time)
+  uint16_t phase_ms;      // ms into the base's second when this packet started transmitting
+  uint8_t  sync_src;      // 0 free-running, 1 GPS PPS, 2 derived from kart slot timing
+  uint8_t  karts_online;  // how many karts the pit heard in the last 5 s
 };
 #pragma pack(pop)
 
 static_assert(sizeof(GkHeader) == 6, "header size");
 static_assert(sizeof(GkTelemetry) == 46, "telemetry size changed; update airtime budget and host decoder");
 static_assert(sizeof(GkCommandMsg) == 14, "command size");
-static_assert(sizeof(GkBaseInfo) == 18, "base info size");
+static_assert(sizeof(GkBaseInfo) == 22, "base info size");
 
 // ---- Helpers ---------------------------------------------------------------
 static inline void gkFillHeader(GkHeader& h, uint8_t type, uint8_t src, uint8_t dst, uint8_t seq) {

@@ -146,6 +146,13 @@ void VescLink::handlePacket(const uint8_t* p, uint16_t len) {
       fwMajor = p[1]; fwMinor = p[2];
       size_t n = 0; while (3 + n < len && p[3 + n] && n < sizeof(hwName) - 1) { hwName[n] = p[3 + n]; n++; }
       hwName[n] = 0;
+      size_t end = 3; while (end < len && p[end]) end++;          // end of the hw name string
+      if (end + 1 + 12 <= len) {
+        static const char* hx = "0123456789abcdef";
+        for (int i = 0; i < 12; i++) { uuidHex[2 * i] = hx[p[end + 1 + i] >> 4]; uuidHex[2 * i + 1] = hx[p[end + 1 + i] & 15]; }
+        uuidHex[24] = 0;
+      }
+      fwSeenMs = millis();
       break;
     }
     case VESC_COMM_GET_VALUES: {

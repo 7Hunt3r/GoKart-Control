@@ -1,7 +1,7 @@
 {
   "_comment": "Bench preset around the shop at 50 Day St, Norwalk (box cut around nearby 165 Water St; covers both). course_shop.jpg is local-only (license).",
-  "version": 4,
-  "image": "course_shop.jpg",
+  "version": 6,
+  "image": "course_shop_cteco.jpg",
   "bounds": {
     "north": 41.0989218,
     "south": 41.085921799999994,
@@ -9,14 +9,14 @@
     "west": -73.42416109999999
   },
   "origin": {
-    "lat": 41.0940196,
-    "lon": -73.4166893
+    "lat": 41.09399,
+    "lon": -73.41637
   },
   "course": [],
   "pit": {
-    "lat": 41.0940196,
-    "lon": -73.4166893
+    "lat": 41.09399,
+    "lon": -73.41637
   },
-  "source": "SkyFi order 26378IFJ-3, Vantor satellite image 2026-10-12 15:32Z (SUPER_HIGH), delivered as a non-georeferenced PNG; georeferenced by affine registration (ECC) against the CT ECO 2023 ortho on 2026-11-05 (rotation -10.81 deg, ~0.367 m/px), warped north-up onto a box around 165 Water St / 50 Day St (extrapolated ~2 km from the registration area; expect a few metres of error) at 0.34 m/px. Licensed to Eamon Doherty; NOT redistributable, file kept out of git. Fallback: course.jpg (CT ECO 2023, CC0).",
-  "attribution": "Vantor via SkyFi, Oct 2026"
+  "source": "CT ECO / CT State GIS Office, CT 2023 Spring Aerial Imagery (4-band, 3 inch), exported from the Ortho_2023_tiled ImageServer for the shop box on 2026-11-05 (georeferenced by the state; bounds = export extent), CC0. course_shop.jpg (SkyFi Oct 2026) is being re-registered against it.",
+  "attribution": "CT ECO 2023 aerial"
 }

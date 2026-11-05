@@ -170,7 +170,9 @@ function updateCards() {
     c.f.fault.className = fi.cls;
     c.f.gps.textContent = (g.fix_now === true ? `${fmt(g.sats_now)} sats` : (g.fix_now === false ? "NO FIX" : "fix --"))
       + (g.last_fix && !g.fix_fresh ? ` (last ${ageText(g.fix_age_s)})` : "");
-    c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}`;
+    c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}`
+      + (k.loss_pct_1m === null || k.loss_pct_1m === undefined ? "" : ` · loss ${k.loss_pct_1m}%`)
+      + (st.base_rssi ? ` · pit↑${fmt(st.base_rssi, 0, "")}` : "");
     c.f.out.innerHTML = outcomeText(k.id);
     const b = [];
     if (st.stopped === true) b.push('<span class="badge stopped">STOPPED</span>');
@@ -288,6 +290,28 @@ function refreshLog() {
 
 /* -------------------------------------------------------------------- map */
 const view = { fit: true, scale: 1, cx: 0, cy: 0 };
+// Dead reckoning between 1 Hz fixes: advance along the reported heading at the reported
+// speed for up to DR_MAX_S after the last fix, and ease the drawn point toward each new fix.
+const DR_MAX_S = 2.0;
+const dr = new Map();   // kart id -> { fixLat, fixLon, atMs, kph, heading, dispE, dispN }
+function drPosition(k, now, en) {
+  const f = k.gps && k.gps.last_fix; if (!f) return null;
+  let d = dr.get(k.id);
+  if (!d || d.fixLat !== f.lat || d.fixLon !== f.lon) {
+    const e = en(f.lat, f.lon);
+    d = { fixLat: f.lat, fixLon: f.lon, atMs: now, kph: f.gps_kph || 0, heading: f.heading, dispE: d ? d.dispE : e[0], dispN: d ? d.dispN : e[1] };
+    dr.set(k.id, d);
+  }
+  const base = en(f.lat, f.lon);
+  const fresh = k.link === "online" && k.gps.fix_fresh;
+  let target = base;
+  if (fresh && d.kph > 2 && d.heading !== null && d.heading !== undefined) {
+    const dt = Math.min(DR_MAX_S, (now - d.atMs) / 1000), v = d.kph / 3.6, r = d.heading * Math.PI / 180;
+    target = [base[0] + Math.sin(r) * v * dt, base[1] + Math.cos(r) * v * dt];
+  }
+  d.dispE += (target[0] - d.dispE) * 0.3; d.dispN += (target[1] - d.dispN) * 0.3;
+  return [d.dispE, d.dispN];
+}
 let mapImg = null, mapImgSrc = null;
 const R_EARTH = 6371000;
 function niceStep(m) { const steps = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000]; return steps.find((s) => s >= m) || 5000; }
@@ -359,7 +383,7 @@ function drawMap() {
       k.trail.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
       ctx.stroke(); ctx.globalAlpha = 1;
     }
-    const f = k.gps.last_fix, p = px(en(f.lat, f.lon));
+    const f = k.gps.last_fix, p = px(drPosition(k, performance.now(), en) || en(f.lat, f.lon));
     if (fresh && !nul(f.heading)) {
       const r = f.heading * Math.PI / 180;
       ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath();
@@ -567,5 +591,10 @@ if (KIOSK) {
 }
 window.addEventListener("resize", () => { if (S) drawMap(); });
 setInterval(watchdog, 1000);
+setInterval(() => {
+  if (!S) return;
+  const moving = S.fleet.karts.some((k) => k.link === "online" && k.gps && k.gps.fix_fresh && k.gps.last_fix && (k.gps.last_fix.gps_kph || 0) > 2);
+  if (moving) drawMap();
+}, 50);
 setInterval(refreshLog, 2000);
 connect();
