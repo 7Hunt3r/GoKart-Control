@@ -189,7 +189,7 @@
     "required_write_identity": "commissioned BLE MAC plus VESC UUID and firmware 6.00",
     "temporary_limits": "fresh runtime copy, only currentMaxScale changed, complete subset verified",
     "radio_contract": "GoKartProtocol v1, 2 Hz target, fixed 50 ms ID slots; recovery image unslotted",
-    "eamon_source_commit": "d7ade6f",
+    "eamon_source_commit": "815cbe8",
     "colin_source_commit": "544b498"
   }
 }

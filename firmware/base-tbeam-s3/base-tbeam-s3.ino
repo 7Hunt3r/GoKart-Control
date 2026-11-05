@@ -67,7 +67,7 @@ GkBenchFrame benchLast; uint32_t benchRx = 0, benchMs = 0; float benchRssi = 0; 
 // Second-boundary estimate for the beacon and the command window: GPS PPS when available,
 // else derived from kart slot timing (kart k uses its shared 50 ms slot after the edge), else free-running.
 uint32_t edgeMicros = 0, edgeSetMs = 0; uint8_t edgeSrc = 0;
-uint32_t beaconTx = 0, lastBeaconIdx = 0xFFFFFFFF; uint8_t beaconSeq = 0;
+uint32_t beaconTx = 0, lastBeaconMicros = 0; uint8_t beaconSeq = 0;
 struct QueuedCmd { GkCommandMsg msg; bool used; };
 QueuedCmd cmdQueue[CMD_QUEUE_LEN];
 int cmdHead = 0, cmdTail = 0;
@@ -102,11 +102,6 @@ static uint32_t basePhaseUs(uint8_t* src) {
   if (ppsFreshB()) { if (src) *src = 1; return (uint32_t)(micros() - ppsMicros) % 1000000UL; }
   if (edgeSetMs && millis() - edgeSetMs < 5000) { if (src) *src = 2; return (uint32_t)(micros() - edgeMicros) % 1000000UL; }
   if (src) *src = 0; return (micros() % 1000000UL);
-}
-static uint32_t baseSecondIdx() {
-  if (ppsFreshB()) return ppsCount;
-  if (edgeSetMs && millis() - edgeSetMs < 5000) return 0x40000000UL + (uint32_t)(micros() - edgeMicros) / 1000000UL;
-  return 0x80000000UL + micros() / 1000000UL;
 }
 
 static int kartsOnline() {
@@ -245,9 +240,10 @@ static void transmitBeacon(uint8_t src) {
 static void serviceLoraTx() {
   uint8_t src; uint32_t phase = basePhaseUs(&src);
   // Once per second, in the tail after all kart slots: beacon first, then queued commands.
-  uint32_t idx = baseSecondIdx();
   bool inWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
-  if (inWindow && idx != lastBeaconIdx && phase+GK_BEACON_AIRTIME_US+1000UL <= 985000UL) { lastBeaconIdx = idx; transmitBeacon(src); }
+  // One beacon per second: the edge estimate moves with every kart packet, so key on elapsed
+  // time since the last beacon rather than on a second index derived from the edge.
+  if (inWindow && phase+GK_BEACON_AIRTIME_US+1000UL <= 985000UL && (uint32_t)(micros() - lastBeaconMicros) > 600000UL) { lastBeaconMicros = micros(); transmitBeacon(src); }
   if (cmdHead == cmdTail) return;
   if (!inWindow) return; // Beacon clients also use the free-running base clock.
   while (cmdHead != cmdTail) {

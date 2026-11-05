@@ -1,6 +1,6 @@
 # Shared kart / base / pit integration
 
-This branch combines Eamon's `eamon/firmware-lora-starter` through `d7ade6f` and
+This branch combines Eamon's `eamon/firmware-lora-starter` through `815cbe8` and
 Colin's `diagnostics/removable-bench-control` through `544b498`. It keeps one
 shared radio library and base serial contract. It does not imply that the
 integrated command build is already installed or hardware-validated.

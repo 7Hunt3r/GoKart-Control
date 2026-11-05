@@ -570,12 +570,14 @@ static void usbReport() {
 
 static void usbStatus() {
   const VescActiveLimits& L = vesc.limits();
+  char hdopStr[12] = "null"; if (gps.hdop.isValid()) snprintf(hdopStr, sizeof hdopStr, "%.2f", gps.hdop.hdop());
   Serial.printf("{\"t\":\"status\",\"kart\":%u,\"fw\":\"%s\",\"writes\":%s,\"transport\":\"%s\",\"radio\":%s,\"radio_status\":%d,"
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
                 "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
-                "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,\"heap\":%lu}\n",
+                "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
+                "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"heap\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
                 (unsigned long)loraTx, (unsigned long)loraRx, (unsigned long)loraRxBad, gkBool(gpsLocked),
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
@@ -584,6 +586,8 @@ static void usbStatus() {
                 L.motorPoles, L.gearRatio, L.wheelDiameter,
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", wifiSsid.c_str(), vescMac.c_str(),
                 vesc.uuidHex(), vescUuid.c_str(), gkBool(vesc.identityVerified()), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
+                gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
+                hdopStr, (unsigned long)gps.location.age(), gps.location.isValid() ? gps.location.lat() : 0.0, gps.location.isValid() ? gps.location.lng() : 0.0,
                 (unsigned long)ESP.getFreeHeap());
 }
 
@@ -699,7 +703,7 @@ void setup() {
   vescMac  = prefs.getString("vescmac", "");
   vescUuid = prefs.getString("vescuuid", "");
   vesc.setExpectedUuid(vescUuid.c_str());
-  reportRate = prefs.getUChar("rate", GK_DEFAULT_REPORT_RATE); if (reportRate != 2) reportRate = 1;
+  reportRate = prefs.getUChar("rate", GK_DEFAULT_REPORT_RATE); if (reportRate != 1) reportRate = GK_DEFAULT_REPORT_RATE;
   if (kartId < 1 || kartId > GK_MAX_KARTS) kartId = DEFAULT_KART_ID;
 
   // OLED (Vext powers it, active low)

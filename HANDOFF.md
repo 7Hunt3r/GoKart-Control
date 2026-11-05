@@ -1,6 +1,6 @@
 # Collaborator handoff
 
-Updated November 5, 2026. This integration combines Eamon's `d7ade6f` with
+Updated November 5, 2026. This integration combines Eamon's `815cbe8` with
 Colin's telemetry/diagnostic `544b498`, plus guarded configuration transactions.
 Use [docs/integration.md](docs/integration.md) for exact build/commissioning steps.
 
@@ -117,8 +117,10 @@ STOP/START path, which modifies temporary allowances instead.
 Use focused branches/PRs, fetch before work and before pushing, and never force
 push over Eamon's work. Changes are integrated here, not written onto his branch.
 The owner authorized ongoing coherent commits/pushes. No messages were sent to
-collaborators. Credentials, device binaries and licensed local imagery stay out
-of Git. See [CONTRIBUTING](CONTRIBUTING.md).
+collaborators. Credentials, locally built device binaries and licensed local imagery stay out
+of Git. Eamon's existing prebuilt image is preserved in `firmware/releases`,
+clearly marked as predating the integration safeguards; build current source
+for the integrated node. See [CONTRIBUTING](CONTRIBUTING.md).
 
 [Requirements](docs/requirements.md), [architecture](docs/architecture.md),
 [hardware](docs/hardware.md), [baseline](hardware/vesc/baseline-kart/2026-11-05/README.md),

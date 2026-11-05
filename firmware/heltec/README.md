@@ -108,7 +108,7 @@ update and power-failure recovery need separate controlled tests before field us
 
 This adapter uses Eamon’s canonical
 [`GoKartProtocol.h`](../libraries/GoKartProtocol/GoKartProtocol.h). The integration
-includes his branch through `d7ade6f`; the transmitter keeps the shared 46-byte
+includes his branch through `815cbe8`; the transmitter keeps the shared 46-byte
 packet and **BW500**. Version `0.2.2-bench` raises VESC polling/local USB output
 to 5 Hz and unslotted radio reports to 2 Hz. The base also accepts legacy 47-byte
 frames. Version 0.2.1-bench used the same RF settings at 1 Hz. The earlier 0.2.0-bench BW250 image

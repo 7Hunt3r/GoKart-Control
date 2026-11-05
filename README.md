@@ -29,7 +29,7 @@ accessory/link failures must not change its active settings or replay commands.
 | `firmware/bench-control` | Separate removable motor-test experiments. Half-second 5 A forward probe succeeded over laptop BLE; longer attempts aborted. Not vehicle firmware. |
 | Kart Pi display | Serial/map contracts exist; dedicated on-kart display integration remains open. |
 
-The integration branch combines Eamon's work through `d7ade6f` and Colin's saved
+The integration branch combines Eamon's work through `815cbe8` and Colin's saved
 telemetry/diagnostic work through `544b498`. Published imagery includes CT ECO
 2023 Manresa and shop images; licensed SkyFi images stay local. See [map setup](pit/server/map/README.md).
 
