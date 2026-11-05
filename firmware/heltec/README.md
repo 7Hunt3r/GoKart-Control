@@ -199,3 +199,24 @@ exercises fragmented packets, malformed lengths and CRC rejection.
 disconnect recovered without a reboot. Output uses bounded 64-byte writes
 with a 1 ms timeout; the display reader does not gate BLE polling or radio TX.
 Pit receipt and full-fleet scheduling are not established by this check.
+
+## Onboard OLED (0.2.3)
+
+The recovery image now powers and initializes the 128×64 SSD1306 OLED instead
+of leaving it black. It shows kart ID, fresh VESC voltage/motor current/fault,
+electrical RPM, ESC temperature, GPS fix/satellites, LoRa TX state/count and
+read-only/maintenance mode. Display refresh is 2 Hz; it does not change the
+5 Hz telemetry poll or 2 Hz radio target. Stale VESC values are labeled unavailable.
+
+The V4.3 mapping is Vext 36 (active low), reset 21, SDA 17, SCL 18, address 0x3c.
+U8g2 is pinned to PlatformIO's 2.36.18. Release `Wire` with `Wire.end()` after
+the presence probe and before `oled.begin()`: U8g2 configures GPIOs before its
+I²C initialization. Reusing the already-initialized probe bus stalled startup
+on this board/core; releasing it lets the driver reattach the pins. The failed
+initial attempts and successful follow-up are recorded in the
+[OLED evidence](../../hardware/heltec/2026-11-05-oled-enable/README.md).
+
+USB `status` includes `oled_present` and `oled_refreshes`. The address probe
+acknowledges the controller; it is not a camera check of the visible pixels.
+A missing/nonresponding display is skipped, and BLE remains on its separate
+worker. No new VESC command or configuration-write API was added.

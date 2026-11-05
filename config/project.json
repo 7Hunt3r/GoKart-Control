@@ -188,13 +188,14 @@
     "live_update_verified": true
   },
   "integration": {
-    "installed_kart1_firmware": "0.2.2-bench telemetry-only",
+    "installed_kart1_firmware": "0.2.3-bench telemetry-only with OLED",
     "command_firmware_hardware_validated": false,
     "required_write_identity": "commissioned BLE MAC plus VESC UUID and firmware 6.00",
     "temporary_limits": "fresh runtime copy, only currentMaxScale changed, complete subset verified",
     "radio_contract": "GoKartProtocol v1, 2 Hz target, fixed 50 ms ID slots; recovery image unslotted",
     "eamon_source_commit": "d98c41d",
     "colin_source_commit": "544b498",
-    "rate_evidence": "hardware/heltec/2026-11-05-rate-update"
+    "rate_evidence": "hardware/heltec/2026-11-05-rate-update",
+    "oled_evidence": "hardware/heltec/2026-11-05-oled-enable"
   }
 }

@@ -9,7 +9,7 @@ integrated command build is already installed or hardware-validated.
 
 | Component | Build / role | Hardware status |
 | --- | --- | --- |
-| `firmware/heltec` | PlatformIO, telemetry-only recovery image | Installed/tested on Colin's kart 1, 0.2.2-bench |
+| `firmware/heltec` | PlatformIO, telemetry-only recovery image | Installed/tested on Colin's kart 1, 0.2.3-bench with OLED |
 | `firmware/kart-heltec-v4` | Arduino CLI `kart` (BLE), optional `kart-uart` | Eamon tested earlier kart 2 radio/ping/OTA without VESC; new guards compiled/offline-tested only |
 | `firmware/base-tbeam-s3` | Arduino CLI `base` | Eamon reports T-Beam reception/command transmission |
 | `pit/` | Pi 4 server/kiosk and laptop simulator | Local unit/e2e tests; Eamon reports real Pi kiosk running |
@@ -160,7 +160,7 @@ RF settings still match, but packet compatibility is not schedule compatibility.
 New integrated nodes default to 2 Hz; a stored 1 Hz preference is preserved until
 `rate 2` is explicitly issued. `rate 1` remains available for coverage/load tests.
 Firmware identifiers: `kart-0.1.2-config-guard-2hz`, `base-0.1.1-beacon-2hz`,
-and telemetry recovery `0.2.2-bench`.
+and telemetry recovery `0.2.3-bench` (OLED follow-up to `0.2.2-bench`).
 
 The read-only recovery image sends at 500 ms ±50 ms without receiving beacons or
 other karts. It remains suitable for the single-kart bench test, not a claim of
@@ -175,7 +175,7 @@ again. A later 10 Hz local benchmark is not included in this change.
 
 ## Measured kart-1 rate update
 
-The installed recovery image was measured over 24.834 seconds: 121 new VESC
+The 0.2.2 recovery image was measured over 24.834 seconds: 121 new VESC
 samples (4.872 Hz), 125 USB status records (4.993 Hz), and 49 completed radio
 transmissions (1.973 Hz). All samples were identity-verified/fresh, stationary
 and fault-free, with zero BLE receive drops or radio TX errors. USB reader
@@ -186,3 +186,7 @@ RF performance. [Raw trace and hashes](../hardware/heltec/2026-11-05-rate-update
 
 Validation: 52 automated tests pass (15 root, 11 diagnostics, 24 pit core,
 2 pit end-to-end); BLE kart, UART kart, base and recovery images compile.
+
+The subsequent `0.2.3-bench` image enables the onboard OLED. See the
+[screen follow-up](../hardware/heltec/2026-11-05-oled-enable/README.md) for its
+new measurement; do not treat the earlier image's trace as this build's test.

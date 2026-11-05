@@ -22,7 +22,7 @@ accessory/link failures must not change its active settings or replay commands.
 
 | Component | State |
 | --- | --- |
-| `firmware/heltec` | Tested telemetry-only adapter, authenticated maintenance OTA. **Installed on Colin's kart 1**, version 0.2.2-bench; BLE/GPS/LoRa TX verified. |
+| `firmware/heltec` | Tested telemetry-only adapter, authenticated maintenance OTA. **Installed on Colin's kart 1**, version 0.2.3-bench; live OLED status, BLE/GPS/LoRa TX verified. |
 | `firmware/kart-heltec-v4` | Eamon's integrated kart node with LoRa receive/commands, fleet data and display serial output. BLE is default. Configuration/identity/OTA safeguards added here; compiled and offline-tested, **not installed on Colin's kart**. |
 | `firmware/base-tbeam-s3` | Eamon's base modem; same shared GoKartProtocol. |
 | `pit/` | Pit server, touchscreen kiosk, simulator, deployment/SD-card tools, course-map presets. Eamon reports Pi 4 + kart 2 radio/ping/OTA working. |
@@ -38,9 +38,10 @@ data, 2 Hz LoRa per kart**. The integrated node uses PPS or pit-beacon timing;
 its `rate 1|2` setting is persistent. Existing nodes saved at 1 Hz need `rate 2`.
 Update base and kart firmware together for the new fixed 50 ms slots. The
 telemetry recovery image uses unslotted 500 ms ±50 ms broadcasts for bench tests;
-eight-kart RF performance is still unverified. The installed read-only image
+eight-kart RF performance is still unverified. The earlier 0.2.2 rate-update image
 measured 4.87 Hz VESC / 4.99 Hz USB / 1.97 Hz radio TX with zero errors;
-[rate evidence](hardware/heltec/2026-11-05-rate-update/README.md).
+[rate evidence](hardware/heltec/2026-11-05-rate-update/README.md). The OLED follow-up
+is recorded [separately](hardware/heltec/2026-11-05-oled-enable/README.md).
 
 The installed telemetry image cannot accept STOP/START/mode requests. The
 integrated node implements those as temporary VESC configuration writes, gated

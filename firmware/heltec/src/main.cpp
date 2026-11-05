@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
+#include <Wire.h>
+#include <U8g2lib.h>
 #include <GoKartProtocol.h>
 #include <atomic>
 #include "vesc_protocol.h"
@@ -15,11 +17,12 @@
 // Exact HTIT-WB32LAF V4.3 schematic, not the V4.2 GC1109 mapping.
 static constexpr int RADIO_CS=8,RADIO_DIO1=14,RADIO_RST=12,RADIO_BUSY=13,RADIO_SCK=9,RADIO_MISO=11,RADIO_MOSI=10;
 static constexpr int FEM_POWER=7,FEM_CSD=2,FEM_CTX=5;
+static constexpr int OLED_SDA=17,OLED_SCL=18,OLED_RST=21,OLED_VEXT=36;
 static constexpr uint8_t EXPECTED_UUID[12]={0x2c,0,0x4c,0,9,0x51,0x34,0x30,0x37,0x35,0x37,0x39};
 static const char* SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_RX="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_TX="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-static const char* VERSION="0.2.2-bench";
+static const char* VERSION="0.2.3-bench";
 static constexpr uint32_t STALE_MS=1000;
 static constexpr uint32_t LOCAL_TELEMETRY_MS=200; // 5 Hz polling and USB display feed
 static constexpr uint32_t OTA_WINDOW_MS=600000;
@@ -28,6 +31,10 @@ SPIClass radioSPI(FSPI);
 SX1262 radio=new Module(RADIO_CS,RADIO_DIO1,RADIO_RST,RADIO_BUSY,radioSPI);
 TinyGPSPlus gps;
 Preferences prefs;
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0,OLED_RST,OLED_SCL,OLED_SDA);
+bool oledPresent=false;
+uint32_t oledRefreshes=0,oledLastMs=0;
+
 struct Chunk {uint16_t len;uint8_t data[256];};
 struct Snapshot {vesc::Values values;uint32_t sampled=0;uint32_t samples=0;uint32_t responseMs=0;bool verified=false;};
 struct Event {char text[180];};
@@ -188,6 +195,45 @@ void transmit(){
     radioDone=false;int state=radio.startTransmit((const uint8_t*)&packet,sizeof(packet));
     if(state==RADIOLIB_ERR_NONE){radioActive=true;txStarted=millis();}else txErrors++;
 }
+bool oledResponds(){Wire.beginTransmission(0x3c);return Wire.endTransmission()==0;}
+void initOled(){
+    // Same V4.3 power/reset/I2C mapping as Eamon's integrated kart image.
+    pinMode(OLED_VEXT,OUTPUT);digitalWrite(OLED_VEXT,LOW);delay(50);
+    pinMode(OLED_RST,OUTPUT);digitalWrite(OLED_RST,LOW);delay(10);digitalWrite(OLED_RST,HIGH);delay(10);
+    Wire.begin(OLED_SDA,OLED_SCL,400000);Wire.setTimeOut(5);
+    oledPresent=oledResponds();
+    // U8g2 reconfigures the I2C pins before Wire.begin(). Release the probe bus
+    // so the driver actually reattaches those pins instead of reusing a stale bus.
+    Wire.end();
+    if(!oledPresent){event("oled_not_detected");return;}
+    oled.setBusClock(400000);oled.begin();Wire.setTimeOut(5);
+    oled.setContrast(160);oled.setPowerSave(0);
+    oled.clearBuffer();oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0,12,"GoKart Control");oled.drawStr(0,28,VERSION);
+    oled.drawStr(0,44,"Starting telemetry...");oled.sendBuffer();oledRefreshes++;
+    event("oled_initialized");
+}
+void serviceOled(){
+    if(!oledPresent || radioActive || millis()-oledLastMs<500)return;
+    oledLastMs=millis();
+    // Stop touching a failed display; BLE and radio do not depend on its presence.
+    if(!oledResponds()){oledPresent=false;event("oled_disconnected");return;}
+    auto s=snapshot();bool fresh=s.verified && s.samples && millis()-s.sampled<STALE_MS;
+    char line[24];oled.clearBuffer();oled.setFont(u8g2_font_6x10_tf);
+    snprintf(line,sizeof(line),"Kart %u  TELEMETRY",kartId);oled.drawStr(0,9,line);
+    if(fresh)snprintf(line,sizeof(line),"%.1fV %.1fA F%u",s.values.voltage,s.values.motorA,s.values.fault);
+    else snprintf(line,sizeof(line),"VESC %s",bleConnected.load()?"waiting / stale":"connecting...");
+    oled.drawStr(0,20,line);
+    if(fresh)snprintf(line,sizeof(line),"ERPM %ld ESC %.0fC",(long)s.values.erpm,s.values.escC);
+    else snprintf(line,sizeof(line),"No fresh motor data");
+    oled.drawStr(0,31,line);
+    bool fix=gps.location.isValid() && gps.location.age()<3000;
+    unsigned sats=gps.satellites.isValid() && gps.satellites.age()<3000?gps.satellites.value():0;
+    snprintf(line,sizeof(line),"GPS %s %u sat",fix?"FIX":"NO FIX",sats);oled.drawStr(0,42,line);
+    snprintf(line,sizeof(line),"LoRa %s TX %lu",radioReady?(txEnabled?"ON":"OFF"):"ERROR",(unsigned long)txCount);oled.drawStr(0,53,line);
+    oled.drawStr(0,64,maintenance.load()?"MAINTENANCE / OTA":"READ ONLY 5Hz / 2Hz");
+    oled.sendBuffer();oledRefreshes++;
+}
 void status(){
     auto s=snapshot();bool fresh=s.verified && s.samples && millis()-s.sampled<STALE_MS;
     JsonDocument d;d["type"]="status";d["firmware"]=VERSION;d["boot_id"]=bootId;d["uptime_ms"]=millis();d["kart_id"]=kartId;
@@ -203,6 +249,7 @@ void status(){
     d["vesc_poll_interval_ms"]=LOCAL_TELEMETRY_MS;d["usb_report_interval_ms"]=LOCAL_TELEMETRY_MS;d["radio_interval_ms"]=GK_REPORT_PERIOD_MS;
     d["radio_payload_bytes"]=sizeof(GkTelemetry);d["radio_bandwidth_khz"]=GK_LORA_BW_KHZ;d["radio_sequence_next"]=uint8_t(sequence);d["pps_aligned"]=false;d["vesc_writes_enabled"]=false;
     d["radio_init"]=radioInit;d["tx_enabled"]=txEnabled;d["tx_completed"]=txCount;d["tx_errors"]=txErrors;
+    d["oled_present"]=oledPresent;d["oled_refreshes"]=oledRefreshes;
     d["maintenance"]=maintenance.load();d["ota_active"]=otaActive;d["free_heap"]=ESP.getFreeHeap();
     if(otaActive){d["ota_hostname"]=hostName;d["ota_ip"]=WiFi.localIP().toString();}
     String line;serializeJson(d,line);emitLine(line);
@@ -255,6 +302,7 @@ void setup(){
     pinMode(40,OUTPUT);digitalWrite(40,HIGH); // GPS awake
     pinMode(38,INPUT);pinMode(39,INPUT);
     Serial1.begin(9600,SERIAL_8N1,39,-1); // Listen only: GPS TX net is GPIO39; do not drive either UART wire.
+    initOled();
     initRadio();
     xTaskCreatePinnedToCore(bleWorker,"vesc-read-only",10000,nullptr,2,nullptr,0);
     event("boot_read_only_tx_off_ota_off");
@@ -271,7 +319,7 @@ void loop(){
     static uint32_t held=0;static bool buttonHandled=false;
     if(digitalRead(0)==LOW){if(!held)held=millis();if(!buttonHandled && millis()-held>=3000){maintenance=true;buttonHandled=true;event("physical_maintenance_requested_parked_only");}}
     else {held=0;buttonHandled=false;}
-    serviceMaintenance();transmit();
+    serviceMaintenance();transmit();serviceOled();
     Event e;if(serialOffset>=serialLength && xQueueReceive(events,&e,0)==pdTRUE){JsonDocument d;d["event"]=e.text;d["uptime_ms"]=millis();String line;serializeJson(d,line);emitLine(line);}
     static uint32_t last=0;if(millis()-last>=LOCAL_TELEMETRY_MS){last=millis();status();}
     pumpOutput();delay(2);

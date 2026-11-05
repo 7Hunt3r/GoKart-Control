@@ -1,0 +1,16 @@
+{
+  "captured_utc": "2026-11-05T22:19:09.687521+00:00",
+  "firmware": "0.2.3-bench",
+  "duration_s": 19.919,
+  "vesc_hz": 4.82,
+  "usb_hz": 4.97,
+  "radio_tx_hz": 1.958,
+  "oled_refreshes": 39,
+  "oled_present_throughout": true,
+  "identity_verified_throughout": true,
+  "stationary_fault_free": true,
+  "rx_drops": 0,
+  "tx_errors": 0,
+  "tx_enabled": true,
+  "maintenance": false
+}

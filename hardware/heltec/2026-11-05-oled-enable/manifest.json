@@ -1,0 +1,9 @@
+{
+  "sha256": {
+    "firmware/heltec/src/main.cpp": "108f29185df6b00b2ab4468ab49460b4da07404b59385e396eb273c4d02e017b",
+    "firmware/heltec/platformio.ini": "867661ce2c7a63813b7bbbd7eb2921e27bc92323e723f16cafb92c06f59d1ea2",
+    "firmware/heltec/.pio/build/heltec_v43/firmware.bin": "101b2651b8e1444d1b925e98fb981eb84ad46afd2932fbb8a578ab579f7d37ef"
+  },
+  "status_sha256": "47583ce3fadd5d912dcd8f96fb2041049dbc3c0edd1610a6a465e4481736cbcb",
+  "binary_in_git": false
+}

@@ -6,12 +6,15 @@ Use [docs/integration.md](docs/integration.md) for exact build/commissioning ste
 
 ## What is physically running
 
-**Colin, kart 1:** Heltec `firmware/heltec` 0.2.2-bench, telemetry only. BLE identity
+**Colin, kart 1:** Heltec `firmware/heltec` 0.2.3-bench, telemetry only. BLE identity
 verified; fresh values showed 0 A, 0 ERPM, fault 0 after all motor tests. Radio TX
 is enabled, maintenance off, 46-byte GoKartProtocol at 915 MHz/BW500/SF7/CR4/5.
-Measured after this USB rate update: 4.872 Hz VESC, 4.993 Hz USB and 1.973 Hz
+Measured on the earlier 0.2.2 rate update: 4.872 Hz VESC, 4.993 Hz USB and 1.973 Hz
 radio TX over 24.834 seconds, zero drops/errors. USB reader disconnect/reconnect
 passed without reboot. [Evidence](hardware/heltec/2026-11-05-rate-update/README.md).
+The current 0.2.3 image powers the small OLED and shows live VESC/GPS/radio
+status at 2 Hz. Its startup and telemetry checks are recorded in the
+[OLED follow-up](hardware/heltec/2026-11-05-oled-enable/README.md).
 GPS NMEA is received but no outdoor fix is verified. Actual receipt of kart 1 at
 Eamon's base remains unconfirmed. No VESC configuration/firmware was written.
 
