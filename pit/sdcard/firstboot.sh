@@ -40,4 +40,13 @@ sed -i -E 's/tskey-auth-[A-Za-z0-9_-]+/REDACTED/g' /boot/firmware/user-data 2>/d
 sed -i -E '\#path: /opt/gokart-pit/server/config.json#,+3 s#^(    content: ).*#\1"REDACTED"#' /boot/firmware/user-data 2>/dev/null || true
 rm -f /opt/gokart-pit-payload.tar.gz
 
+# --- display: the LESOWN L7 panel sends no EDID, so KMS falls back to 1024x768.
+# Pin the native 1024x600 mode on both micro-HDMI ports (kernel CVT mode; the
+# panel's own scaler is bypassed). Verified on the pit Pi 4 on 2026-11-05.
+echo "--- display mode: 1024x600 on HDMI-A-1/2"
+CMDLINE=/boot/firmware/cmdline.txt
+if [ -f "$CMDLINE" ] && ! grep -q "video=HDMI-A-2:1024x600" "$CMDLINE"; then
+  sed -i 's/[[:space:]]*$//; s/$/ video=HDMI-A-1:1024x600M@60 video=HDMI-A-2:1024x600M@60/' "$CMDLINE"
+fi
+
 echo "=== firstboot done $(date)"
