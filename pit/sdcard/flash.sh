@@ -70,7 +70,9 @@ diskutil unmountDisk "$DISK"
 BOOT=""
 for i in $(seq 1 40); do
   diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
-  BOOT="$(diskutil info "${DISK}s1" | grep -E '^\s*Mount Point:' | sed -E 's/.*Mount Point:\s+//')"
+  BOOT="$(diskutil info "${DISK}s1" | { grep -E '^\s*Mount Point:' || true; } | sed -E 's/.*Mount Point:\s+//')"
+  # macOS often auto-mounts the card itself while we poll; accept that too.
+  [ -z "$BOOT" ] && [ -f /Volumes/bootfs/config.txt ] && BOOT=/Volumes/bootfs
   [ -n "$BOOT" ] && [ -d "$BOOT" ] && break
   sleep 2
 done
