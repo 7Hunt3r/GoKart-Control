@@ -105,9 +105,30 @@ Verified on hardware today, all on branch `eamon/firmware-lora-starter`:
   and never connects. With Colin's bench image holding its VESC's connection, the
   scan sees no VESC at all, as expected (a connected BLE peripheral stops advertising).
 
-Not yet: a GPS fix (indoors), a kart on the map, a stop against a real VESC, reception
-of Colin's bench frame (its transmit is off after every boot and has not been enabled
-within range of the T-Beam).
+Later the same evening (17:00-17:30):
+- Kart 2 got a GPS fix outside (5-11 satellites) and appeared on the shop map; the
+  SkyFi cut proved 25-40 m off at the shop (registration extrapolated from the island),
+  so the bench preset uses the state ortho there. The dot still looked off to Eamon;
+  the kart's reading is 27 m east of the geocoded "50 Day St" point and both fall on
+  the Harborside block, so the address point itself may be the wrong building. A phone
+  reading at the Heltec's spot would settle it.
+- Pit beacon (1 Hz), beacon-sync for karts without PPS, 2 Hz reporting with 50 ms
+  slots, VESC UUID pin, loss counter and dead reckoning on the kiosk, and a phone page
+  at `/m` are in and deployed. A base build that queued commands for the tail window
+  delayed them by up to 20 s; commands now go out immediately unless the base has PPS.
+  One base build (queue dedupe + a different window expression) stopped receiving
+  entirely and was reverted; cause not yet understood.
+- Full command loop verified on kart 2 with the fixed base: ping applied in 2 s, stop
+  -> no_vesc in 1 s, start -> rejected (no VESC attached). Kart 2 also receives kart 1's
+  packets directly (kart-to-kart positions will work).
+- **Colin flashed his Heltec with the kart build:** kart 1 transmits at 2 Hz with the
+  VESC link up over BLE (78.4 V, ESC 24 C, fault 0) and is received by both the pit and
+  kart 2, but it receives nothing itself: no beacon, no commands. Same firmware as kart 2,
+  so suspect the board (antenna, front-end variant V4.2 vs V4.3, or an older build).
+  Needs its console `status` (lora_rx, lora_rx_bad, built) or a bench swap of boards.
+
+Not yet: a stop against a real VESC (blocked on kart 1's receive problem), a range
+test, PPS at the base (indoors), alignment field check.
 
 **For Colin, to run the command-capable build on his kart (his decision):** a prebuilt
 image and the console steps are in [firmware/releases/README.md](firmware/releases/README.md); or build it:
