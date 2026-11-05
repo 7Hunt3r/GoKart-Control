@@ -47,7 +47,7 @@ inline bool matchesIdentity(const uint8_t* p,size_t n,const uint8_t* uuid) {
     return end<n && end+13<=n && memcmp(p+end+1,uuid,12)==0;
 }
 struct Values {
-    float voltage=0,batteryA=0,motorA=0,escC=0,duty=0;
+    float voltage=0,batteryA=0,motorA=0,escC=0,duty=0,ampHours=0;
     int32_t erpm=0; uint8_t fault=0,controller=0;
 };
 inline bool decode(const uint8_t* p,size_t n,Values& v){
@@ -55,6 +55,6 @@ inline bool decode(const uint8_t* p,size_t n,Values& v){
     v.escC=i16(p+1)/10.0f; v.motorA=i32(p+5)/100.0f;
     v.batteryA=i32(p+9)/100.0f; v.duty=i16(p+21)/1000.0f;
     v.erpm=i32(p+23);v.voltage=i16(p+27)/10.0f;
-    v.fault=p[53];v.controller=p[58];return true;
+    v.ampHours=i32(p+29)/10000.0f;v.fault=p[53];v.controller=p[58];return true;
 }
 }

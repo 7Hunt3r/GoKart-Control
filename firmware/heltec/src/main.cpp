@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
+#include <GoKartProtocol.h>
 #include <atomic>
 #include "vesc_protocol.h"
 #include "secrets.h"
@@ -18,8 +19,8 @@ static constexpr uint8_t EXPECTED_UUID[12]={0x2c,0,0x4c,0,9,0x51,0x34,0x30,0x37,
 static const char* SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_RX="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* NUS_TX="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-static const char* VERSION="0.1.3-bench";
-static constexpr uint32_t STALE_MS=2000;
+static const char* VERSION="0.2.0-bench";
+static constexpr uint32_t STALE_MS=1000;
 static constexpr uint32_t OTA_WINDOW_MS=600000;
 
 SPIClass radioSPI(FSPI);
@@ -144,35 +145,45 @@ void initRadio(){
     pinMode(FEM_CTX,OUTPUT);digitalWrite(FEM_CTX,HIGH);
     radioSPI.begin(RADIO_SCK,RADIO_MISO,RADIO_MOSI,RADIO_CS);
     // Conservative bench setting. SX1262 output is NOT final antenna power (external FEM).
-    radioInit=radio.begin(915.0,500.0,7,5,0x12,0,8,1.8,false);
+    radioInit=radio.begin(GK_LORA_FREQ_MHZ,GK_LORA_BW_KHZ,GK_LORA_SF,GK_LORA_CR,GK_LORA_SYNC_WORD,0,GK_LORA_PREAMBLE,1.8,false);
     radioReady=radioInit==RADIOLIB_ERR_NONE;
     if(radioReady){radio.setDio2AsRfSwitch(true);radio.setDio1Action([](){radioDone=true;});}
 }
-void put16(uint8_t* b,uint16_t v){b[0]=v;b[1]=v>>8;}
-void put32(uint8_t* b,uint32_t v){for(int i=0;i<4;i++)b[i]=v>>(8*i);}
-uint16_t age16(uint32_t sample,bool exists){return exists?min(uint32_t(65534),uint32_t(millis()-sample)):65535;}
 void transmit(){
-    if(!txEnabled || maintenance || !radioReady) return;
+    if(!txEnabled || maintenance || !radioReady || kartId<1 || kartId>GK_MAX_KARTS)return;
     if(radioActive){
         if(radioDone.exchange(false)){radio.finishTransmit();radioActive=false;txCount++;}
         else if(millis()-txStarted>1000){radio.standby();radioActive=false;txErrors++;}
         return;
     }
-    if(millis()-lastTx<2000)return;
-    lastTx=millis();auto s=snapshot();
-    bool v=s.verified && s.samples && millis()-s.sampled<STALE_MS;
-    bool g=gps.location.isValid() && gps.location.age()<STALE_MS;
-    uint8_t b[47]{};b[0]='G';b[1]='K';b[2]=1;b[3]=kartId;
-    put32(b+4,bootId);put32(b+8,sequence++);put32(b+12,millis());put16(b+16,age16(s.sampled,s.samples));
-    b[18]=(v?1:0)|(g?2:0);b[19]=v?s.values.fault:255;
-    if(v){put16(b+20,uint16_t(s.values.voltage*10));put16(b+22,int16_t(constrain(s.values.batteryA*10,-32768.f,32767.f)));put16(b+24,int16_t(constrain(s.values.motorA*10,-32768.f,32767.f)));put32(b+26,s.values.erpm);put16(b+30,int16_t(s.values.escC*10));}
-    if(g){put32(b+32,int32_t(gps.location.lat()*1e7));put32(b+36,int32_t(gps.location.lng()*1e7));}
-    put16(b+40,gps.speed.isValid() && gps.speed.age()<STALE_MS?uint16_t(min(65534.0,gps.speed.mps()*100)):65535);
-    b[42]=gps.satellites.isValid() && gps.satellites.age()<STALE_MS?min(uint32_t(254),gps.satellites.value()):255;
-    put16(b+43,gps.hdop.isValid() && gps.hdop.age()<STALE_MS?min(uint32_t(65534),uint32_t(gps.hdop.value())):65535);
-    put16(b+45,gps.location.isValid()?min(uint32_t(65534),uint32_t(gps.location.age())):65535);
-    radioDone=false;int state=radio.startTransmit(b,sizeof(b));
-    if(state==RADIOLIB_ERR_NONE){radioActive=true;txStarted=millis();}else{txErrors++;}
+    static uint32_t interval=GK_REPORT_PERIOD_MS;
+    if(millis()-lastTx<interval)return;
+    lastTx=millis();interval=GK_REPORT_PERIOD_MS+int32_t(esp_random()%101)-50;
+    auto s=snapshot();bool v=s.verified && s.samples && millis()-s.sampled<STALE_MS;
+    bool g=gps.location.isValid() && gps.location.age()<3000;
+    GkTelemetry packet{};
+    gkFillHeader(packet.h,GK_MSG_TELEMETRY,kartId,GK_ADDR_ALL,uint8_t(sequence++));
+    packet.mode_req=GK_MODE_UNKNOWN;packet.mode_actual=GK_MODE_UNKNOWN;
+    packet.scale_x1000=65535;packet.gps_age_s=gps.location.isValid()?min(uint32_t(254),uint32_t(gps.location.age()/1000)):255;
+    packet.uptime_s=uint16_t(millis()/1000);
+    // No command reception, mode assertions, stop state, PPS claim or write-enabled flag.
+    if(v){
+        packet.flags|=GK_FLAG_VESC_LINK;if(s.values.fault)packet.flags|=GK_FLAG_FAULT;
+        packet.volts_x10=uint16_t(s.values.voltage*10);
+        packet.motor_a_x10=int16_t(constrain(s.values.motorA*10,-32768.f,32767.f));
+        packet.batt_a_x10=int16_t(constrain(s.values.batteryA*10,-32768.f,32767.f));
+        packet.erpm=s.values.erpm;packet.duty_pct=int8_t(constrain(s.values.duty*100,-100.f,100.f));
+        packet.esc_temp_x10=int16_t(s.values.escC*10);packet.fault=s.values.fault;
+        packet.ah_x100=uint16_t(constrain(s.values.ampHours*100,0.f,65535.f));
+    }
+    if(g){
+        packet.flags|=GK_FLAG_GPS_FIX;packet.lat_e7=int32_t(gps.location.lat()*1e7);packet.lon_e7=int32_t(gps.location.lng()*1e7);
+        if(gps.speed.isValid() && gps.speed.age()<3000)packet.gps_kph_x10=uint16_t(min(65535.0,gps.speed.kmph()*10));
+        if(gps.course.isValid() && gps.course.age()<3000)packet.heading_x10=uint16_t(gps.course.deg()*10);
+    }
+    packet.sats=gps.satellites.isValid() && gps.satellites.age()<3000?min(uint32_t(255),gps.satellites.value()):0;
+    radioDone=false;int state=radio.startTransmit((const uint8_t*)&packet,sizeof(packet));
+    if(state==RADIOLIB_ERR_NONE){radioActive=true;txStarted=millis();}else txErrors++;
 }
 void status(){
     auto s=snapshot();bool fresh=s.verified && s.samples && millis()-s.sampled<STALE_MS;
@@ -183,9 +194,10 @@ void status(){
     if(fresh){d["battery_voltage_v"]=s.values.voltage;d["battery_current_a"]=s.values.batteryA;d["motor_current_a"]=s.values.motorA;d["erpm"]=s.values.erpm;d["duty"]=s.values.duty;d["esc_temperature_c"]=s.values.escC;d["fault_code"]=s.values.fault;d["controller_id"]=s.values.controller;}
     else{for(const char* key:{"battery_voltage_v","battery_current_a","motor_current_a","erpm","duty","esc_temperature_c","fault_code","controller_id"})d[key]=nullptr;}
     d["motor_temperature_c"]=nullptr;d["motor_temperature_reason"]="sensor_not_wired";
-    d["gps_chars"]=gps.charsProcessed();d["gps_checksum_pass"]=gps.passedChecksum();d["gps_fix"]=gps.location.isValid() && gps.location.age()<STALE_MS;
+    d["gps_chars"]=gps.charsProcessed();d["gps_checksum_pass"]=gps.passedChecksum();d["gps_fix"]=gps.location.isValid() && gps.location.age()<3000;
     if(d["gps_fix"].as<bool>()){d["latitude_deg"]=gps.location.lat();d["longitude_deg"]=gps.location.lng();}else{d["latitude_deg"]=nullptr;d["longitude_deg"]=nullptr;}
-    d["satellites"]=gps.satellites.isValid() && gps.satellites.age()<STALE_MS?int(gps.satellites.value()):-1;
+    d["satellites"]=gps.satellites.isValid() && gps.satellites.age()<3000?int(gps.satellites.value()):-1;
+    d["radio_payload_bytes"]=sizeof(GkTelemetry);d["radio_bandwidth_khz"]=GK_LORA_BW_KHZ;d["radio_sequence_next"]=uint8_t(sequence);d["pps_aligned"]=false;d["vesc_writes_enabled"]=false;
     d["radio_init"]=radioInit;d["tx_enabled"]=txEnabled;d["tx_completed"]=txCount;d["tx_errors"]=txErrors;
     d["maintenance"]=maintenance.load();d["ota_active"]=otaActive;d["free_heap"]=ESP.getFreeHeap();
     if(otaActive){d["ota_hostname"]=hostName;d["ota_ip"]=WiFi.localIP().toString();}
@@ -219,7 +231,7 @@ void serviceMaintenance(){
 }
 void command(const String& line){
     if(line=="status")status();
-    else if(line=="tx on antenna-confirmed" && !maintenance){txEnabled=radioReady;event(txEnabled?"tx_enabled":"tx_failed_radio_unavailable");}
+    else if(line=="tx on antenna-confirmed" && !maintenance){txEnabled=radioReady && kartId>=1 && kartId<=GK_MAX_KARTS;event(txEnabled?"tx_enabled":"tx_denied_need_radio_and_kart_id_1_to_8");}
     else if(line=="tx off"){txEnabled=false;event("tx_disabled");}
     else if(line=="maintenance on")enterMaintenance();
     else if(line=="maintenance off")stopMaintenance();

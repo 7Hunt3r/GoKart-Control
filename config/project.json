@@ -83,16 +83,21 @@
     "position_interval_ms": null,
     "bench_profile": {
       "frequency_hz": 915000000,
-      "bandwidth_hz": 500000,
+      "bandwidth_hz": 250000,
       "spreading_factor": 7,
       "coding_rate_denominator": 5,
       "sync_word_hex": "12",
       "preamble_symbols": 8,
       "sx1262_requested_power_dbm": 0,
       "external_fem_output_not_measured": true,
-      "interval_ms": 2000,
-      "payload_bytes": 47,
-      "receiver_verified": false
+      "interval_ms": 1000,
+      "payload_bytes": 46,
+      "receiver_verified": false,
+      "interval_jitter_ms": 50,
+      "protocol": "GoKartProtocol v1",
+      "shared_header": "firmware/libraries/GoKartProtocol/GoKartProtocol.h",
+      "pps_aligned": false,
+      "development_kart_id": 1
     }
   },
   "profiles": {

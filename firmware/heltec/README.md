@@ -71,7 +71,8 @@ line; ignore it and parse subsequent complete JSON lines.
 
 TX and OTA are **off after every boot**, even if previously enabled. No numeric
 motor/configuration commands are accepted. The USB interface is local bench
-access, not a network command API. ID 0 does not claim this baseline kart is kart 1.
+access, not a network command API. ID 0 blocks transmission until commissioned.
+The owner assigned this development kart **ID 1**; reserve another ID for Eamon’s kart.
 
 ## OTA on existing Wi-Fi
 
@@ -105,64 +106,54 @@ update and power-failure recovery need separate controlled tests before field us
 
 ## Radio receiver agreement for Eamon
 
-**Integration pending:** Eamon's PR #1 currently uses BW250 and a different
-46-byte frame; it will not decode this bench transmitter unchanged. See the
-[handoff integration note](../../HANDOFF.md#parallel-firmware-integration-note).
-Agree one format before receiver testing. The following describes this installed
-bench image, not an already shared fleet protocol.
+This adapter now uses Eamon’s canonical
+[`GoKartProtocol.h`](../libraries/GoKartProtocol/GoKartProtocol.h), copied unchanged
+from PR #1 (`21f3741`, still unchanged at `dfe83d8`). The earlier 47-byte/BW500
+bench format is retired. His T-Beam S3 receiver drives this contract; we retain
+the physically tested BLE/GPS/maintenance implementation on this kart.
 
 Custom raw LoRa, not LoRaWAN/Meshtastic:
 
 | Setting | Bench value |
 | --- | --- |
 | Carrier | 915.0 MHz |
-| Bandwidth | 500 kHz |
+| Bandwidth | 250 kHz |
 | Spreading factor | SF7 |
 | Coding rate | 4/5 |
 | Sync word | 0x12 |
 | Preamble | 8 symbols |
 | Header / CRC / IQ | Explicit / enabled / normal |
 | SX1262 requested output | 0 dBm; external FEM means this is not antenna EIRP |
-| Interval | 2 seconds, 47-byte payload |
+| Interval | 1 second ±50 ms jitter; 46-byte payload |
+| Identity | Protocol 1, fleet 0x4B, telemetry type 1, kart 1, destination 255 |
 
-These are single-transmitter bench settings, not a finalized eight-kart airtime,
-RF compliance or range configuration. Do not use the V4.2 PA GPIO46 code on V4.3.
-Radio initialization or TX-done is not proof of reception; a matching receiver
-must confirm payload CRC/content and sequence numbers.
+The packed shared struct is the source of truth for offsets and units. All
+multibyte values are little-endian. Tests compile a C++ fixture from that header
+and decode it with the Python helper. No second competing packet definition is
+maintained in this document.
 
-All multibyte integers below are little-endian. Signed fields use two's complement.
+- `GK_FLAG_VESC_LINK` means a verified sample less than one second old.
+- `GK_FLAG_GPS_FIX` means a position less than three seconds old. Never plot
+  `(0,0)` when this flag is clear. Speed/heading have no independent validity
+  bits in this version; zero can also mean unavailable. Do not use them for
+  geofence/control decisions without extending the shared contract.
+- Motor temperature is absent/unavailable. Modes are unknown (255), scale is
+  unknown (65535), command result is none, and write/PPS/stop flags are clear.
+- This adapter has no radio command receiver; pit mode/stop controls cannot
+  actuate it. It also does not yet receive other karts for the driver map.
+- PPS slotting is not implemented here. Free-running single-kart testing is
+  supported; eight-kart collision/load testing remains open.
+- Sequence wraps at 256; uptime wraps after 65,536 seconds. There is no boot ID
+  or precise sample age on this wire version. Receivers must age packets locally;
+  duplicates must not indefinitely refresh data. Session/replay handling needs
+  improvement before control deployment.
+- Eamon’s current JSON helper emits numeric VESC fields even when `vesc_link`
+  is false. Consumers must mask them; our offline decoder already does so.
 
-| Offset | Bytes | Field |
-| --- | --- | --- |
-| 0 | 2 | ASCII `GK` |
-| 2 | 1 | Version 1 |
-| 3 | 1 | Kart ID; 0 bench, 1–8 commissioned |
-| 4 | 4 | Random boot/session ID |
-| 8 | 4 | Sequence number |
-| 12 | 4 | Sender uptime ms (not UTC) |
-| 16 | 2 | VESC sample age ms; 65535 unknown, 65534 saturated |
-| 18 | 1 | Flags: bit 0 VESC fresh/verified, bit 1 GPS position fresh |
-| 19 | 1 | VESC fault; 255 unavailable |
-| 20 | 2 | Battery voltage ×10 |
-| 22 | 2 | Signed battery amps ×10 |
-| 24 | 2 | Signed motor amps ×10 |
-| 26 | 4 | Signed electrical RPM |
-| 30 | 2 | Signed ESC temperature C ×10 |
-| 32 | 4 | Signed latitude degrees ×10^7 |
-| 36 | 4 | Signed longitude degrees ×10^7 |
-| 40 | 2 | GPS speed cm/s; 65535 unavailable |
-| 42 | 1 | Satellites; 255 unavailable |
-| 43 | 2 | HDOP ×100; 65535 unavailable |
-| 45 | 2 | GPS position age ms; 65535 unknown, 65534 saturated |
-
-Invalid measurements may occupy zero bytes; validity flags govern interpretation.
-Never plot `(0,0)` for no fix. Sample freshness is <2 seconds at the sender for
-this bench build. The receiver must add its own elapsed time and not preserve
-freshness indefinitely. Track session ID with sequence; duplicates do not make
-samples newer. Motor temperature is absent/unavailable. GPS speed has its own
-unavailable sentinel and is not wheel-derived speed. No commands are received
-or executed over LoRa, and packets are not authenticated in this telemetry-only
-bench version. Fleet control authentication is future work.
+Radio initialization or TX-done is not proof of reception. Confirm actual
+received sequences and values on Eamon’s base. RF power/range and fleet capacity
+are not validated. Radio command authentication remains future work. Do not
+use the V4.2 PA GPIO46 mapping on this V4.3 board.
 
 Decode a receiver's payload hex with:
 

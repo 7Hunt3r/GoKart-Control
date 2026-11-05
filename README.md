@@ -35,9 +35,11 @@ As of November 5, 2026:
 - Captured a stationary telemetry sample: 76.4 V, 22.3 C ESC temperature, no active fault.
 - Prepared offline decode tools and protocol tests using the real captured data.
 - [Heltec bench firmware](firmware/heltec/README.md) now reads the baseline VESC
-  over BLE, receives GPS NMEA and transmits custom LoRa telemetry. Authenticated
+  over BLE, receives GPS NMEA and transmits Eamon’s shared 46-byte LoRa telemetry (kart ID 1, BW250). Authenticated
   Wi-Fi OTA has been exercised on the physical board. See [bench results](docs/heltec-bench-test.md).
-- **The dashboard, pit server and profile-writing/control features are not implemented.**
+- This branch has no dashboard/pit app or VESC control. Eamon has a pit-server,
+  kiosk and simulator prototype on [PR #1](https://github.com/colinfost3r/GoKart-Control/pull/1);
+  its integration with this physical kart remains pending.
 - No course image/route is packaged. Outdoor GPS fix, receiver confirmation,
   field coverage, display integration and driving fault-isolation tests remain open.
 
@@ -102,6 +104,7 @@ config/project.json       Planning configuration; not a runtime app config
 docs/                     Requirements, architecture, hardware and history
 hardware/vesc/            Baseline evidence and decoded settings
 firmware/heltec/          Bench BLE/GPS/LoRa firmware and maintenance OTA
+firmware/libraries/       Shared GoKartProtocol from Eamon’s receiver
 tools/heltec/             Local provisioning, OTA upload and radio decoder
 tools/vesc/               Allowlisted read-only capture and offline decoder
 tests/                    Protocol and baseline regression checks
@@ -110,7 +113,7 @@ third_party/vesc_tool/     Pinned 6.00 schemas, license and provenance
 ```
 
 The bench firmware uses pinned PlatformIO/Arduino ESP32 dependencies. The
-dashboard and pit application stacks remain unselected. Avoid creating empty service skeletons
+pit prototype lives on Eamon’s branch; kart display implementation remains open. Avoid creating empty service skeletons
 until the first runnable milestone has a clear interface and acceptance checks.
 
 ## Sources and licensing

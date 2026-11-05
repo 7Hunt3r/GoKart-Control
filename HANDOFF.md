@@ -40,7 +40,8 @@ CAN enumeration, terminal command or motor actuation was performed. Telemetry
 queries can reset the controller's averaging accumulators as part of ordinary
 GET_VALUES behavior, but do not change drive settings.
 
-The dashboard and pit application have not been built. Heltec BLE telemetry,
+No dashboard/pit app is implemented on this branch. Eamon has added a pit server,
+kiosk and simulator on PR #1; see the integration note below. Heltec BLE telemetry,
 GPS serial reception and OTA reboot/reconnection now work on the bench. Outdoor
 GPS fix, receipt on Eamon's radio, LoRa coverage, touchscreen behavior and
 physical driving response under link/accessory failures remain untested.
@@ -56,7 +57,7 @@ See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.
 | Absolute-current threshold 240 A | This is a different setting, not the battery-current limit. |
 | Motor braking current 0 A; battery regen allowance -100 A | Preserve present behavior; do not enable regen while porting profiles. |
 | Field-weakening current max 95 A | Existing behavior to investigate, not evidence it should be increased. |
-| ADC and UART; Current Reverse Button | Consistent with hardwired throttle/reverse and a UART BLE module. BLE UUID/device identity still needs verification. |
+| ADC and UART; Current Reverse Button | Consistent with hardwired throttle/reverse and a UART BLE module. BLE UUID/device identity verified during Heltec bench testing. |
 | Motor-temperature sensor disabled; owner confirms no sensors wired | Show unavailable; do not interpret 0 C as a cool motor. ESC sensing is separate. |
 | CAN multi-ESC enabled; controller ID 69 | Configuration does not prove a second controller is physically present. |
 | 14 poles, ratio ~2.76923, wheel diameter 0.406 m | Configured values only; physically verify before using for MPH limits. |
@@ -107,10 +108,10 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
    passed, but independent power and broader failure testing remain open.
 4. Build an explicitly labeled eight-kart simulator and responsive kart/pit views.
    Test filtering, stale/no-fix states, shared browser state and command outcomes.
-5. Eamon is preparing the second board. Match the published raw LoRa bench
-   settings and 47-byte frame, confirm reception/decoding, then load-test fleet
-   traffic. Current bench TX is opt-in and uncommissioned kart ID 0; these are
-   not final eight-kart radio settings. Obtain an outdoor GPS fix.
+5. Confirm actual reception on Eamon’s T-Beam S3 base using the shared 46-byte
+   GoKartProtocol/BW250 contract. This development kart is assigned ID 1. TX is
+   opt-in; PPS slotting and eight-kart load testing remain open. Obtain an
+   outdoor GPS fix. See the bench report for installed-image verification.
 6. Bench-verify brief/sustained accessory and link failures plus reconnect:
    no state-changing commands, unchanged active settings and uninterrupted
    hardwired input response with normal protections. Validate this before
@@ -137,21 +138,32 @@ an event log and verified component ratings.
 
 ## Parallel firmware integration note
 
-Eamon published `eamon/firmware-lora-starter` at `21f3741` (PR #1) while the
-physical bench adapter was being tested. It contains a T-Beam S3 base and a
-separate kart starter. The bench code here remains on `firmware/heltec-bench-ota`.
+Eamon’s `eamon/firmware-lora-starter` is at `dfe83d8` (PR #1) as last fetched.
+It contains the T-Beam S3 base, another kart starter, a Pi 4 pit server/kiosk,
+simulator and SD-card setup. His notes report base boot, radio initialization
+and GNSS serial reception verified; no received LoRa packet or outdoor fix yet.
+Those are collaborator-reported results, not tests performed on this computer.
 
-The radio profiles are currently **incompatible**: this bench uses BW500 and a
-47-byte `GK` frame; Eamon's starter uses BW250 and a 46-byte GoKartProtocol frame.
-Do not expect reception/decoding until both ends deliberately use one format.
-Neither format is declared the final fleet protocol. Reconcile the shared
-contract in an integration PR before expanding either implementation.
+The owner chose his receiver contract to drive integration. Our adapter now
+includes his **unchanged canonical GoKartProtocol library** and uses its 46-byte
+frame, BW250 and 1 Hz reporting. The old 47-byte/BW500 format is retired. This
+kart is **ID 1** by owner decision; do not assign that ID to another powered kart.
+Shared bytes/settings match; successful over-air reception remains unverified.
+The detailed [receiver agreement](firmware/heltec/README.md#radio-receiver-agreement-for-eamon)
+records remaining validity, session and slot-timing limitations.
 
-The starter's current defaults also enable VESC writes and select wired UART,
-whereas this tested adapter uses BLE and only identity/telemetry requests. Its
-STOP/START command definitions are not authorization to enable deferred remote
-stop on this kart. Do not replace the tested image with the starter by accident.
-No changes have been made to Eamon's branch.
+Keep the tested BLE adapter in `firmware/heltec`. Eamon’s other kart starter
+currently defaults to wired UART and enabled writes. Its mode/STOP/START logic
+has not been validated on this kart and is not imported by adopting the packet
+format. Our adapter transmits telemetry only, with unknown modes/scale and
+writes disabled. Retain authenticated maintenance-only OTA. No changes have
+been made to Eamon’s branch and no remote commands are handled here.
+
+The owner also requested a removable, separate bench-control diagnostic for a
+wheels-up ten-second forward pulse. It has not been implemented or run yet.
+Do not add a general motor-write API to the normal telemetry build. Validate
+bounded stopping and physical direction before the requested sustained test;
+this diagnostic is separate from deferred fleet remote stop/profile control.
 
 ## Collaboration and delivery state
 
