@@ -13,10 +13,10 @@
   roughly one ortho pixel (under a metre). `map.json` v2 points at it; swap `image`
   back to `course.jpg` if the file is missing. Next time, order the GeoTIFF.
 - `course_shop.jpg` (NOT in git, same license): the same SkyFi image cut around the shop
-  at 165 Water St for bench testing, using the island registration extrapolated about
+  at 50 Day St (box centred near 165 Water St; it covers both) for bench testing, using the island registration extrapolated about
   2 km north; expect a few metres of error there.
 
-Site presets: `map.manresa.json` (track) and `map.shop.json` (bench). Copy one over
+Site presets: `map.manresa.json` (track) and `map.shop.json` (bench, 50 Day St). Copy one over
 `map.json` and restart `gokart-pit` so its fallback origin updates:
 
 ```sh
