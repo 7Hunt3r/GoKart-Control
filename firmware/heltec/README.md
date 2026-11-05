@@ -106,18 +106,20 @@ update and power-failure recovery need separate controlled tests before field us
 
 ## Radio receiver agreement for Eamon
 
-This adapter now uses Eamon’s canonical
+This adapter uses Eamon’s canonical
 [`GoKartProtocol.h`](../libraries/GoKartProtocol/GoKartProtocol.h), copied unchanged
-from PR #1 (`21f3741`, still unchanged at `dfe83d8`). The earlier 47-byte/BW500
-bench format is retired. His T-Beam S3 receiver drives this contract; we retain
-the physically tested BLE/GPS/maintenance implementation on this kart.
+from his branch at `ab9404a`. The transmitter keeps the shared 46-byte packet.
+Eamon’s latest receiver moved to **BW500** and also accepts legacy 47-byte frames;
+version 0.2.1-bench follows that radio setting. The earlier 0.2.0-bench BW250 image
+must be updated to receive on his latest base. No one should independently move
+the bandwidth again; change the canonical shared header and update both ends.
 
 Custom raw LoRa, not LoRaWAN/Meshtastic:
 
 | Setting | Bench value |
 | --- | --- |
 | Carrier | 915.0 MHz |
-| Bandwidth | 250 kHz |
+| Bandwidth | 500 kHz |
 | Spreading factor | SF7 |
 | Coding rate | 4/5 |
 | Sync word | 0x12 |

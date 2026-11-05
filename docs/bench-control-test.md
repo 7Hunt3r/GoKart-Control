@@ -8,9 +8,10 @@ local control and its release behavior are validated.
 
 ## Physical board at handoff
 
-Restored `firmware/heltec` version `0.2.0-bench`, kart ID 1. Fresh VESC identity and
+Restored `firmware/heltec` version `0.2.1-bench`, kart ID 1, shared 46-byte
+telemetry at BW500 to match Eamon’s latest receiver. Fresh VESC identity and
 telemetry resumed without resetting the kart: zero ERPM, zero motor current,
-fault 0; LoRa had 18 TX completions, zero errors in the recovery window. Radio TX
+fault 0; LoRa had 15 TX completions, zero errors in the recovery window. Radio TX
 was left on, maintenance off, VESC writes disabled. This recovery shows the
 normal BLE telemetry path still works; it does not prove the diagnostic reliable.
 

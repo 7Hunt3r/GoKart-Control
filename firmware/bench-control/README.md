@@ -12,7 +12,7 @@ probe was run, and no five-second spin was completed. The requested “mid speed
 has not been translated into a verified RPM target; this prototype's low-current,
 150-ERPM target must not be described as that requested test.
 
-The physical Heltec has been restored to the tested `0.2.0-bench` telemetry image,
+The physical Heltec has been restored to the tested `0.2.1-bench` telemetry image (shared 46-byte frame, BW500),
 ID 1, TX enabled, fresh VESC values, zero current/RPM/fault. No kart reset was
 needed for that recovery. The diagnostic is isolated on a draft branch/PR.
 See [hardware test findings](../../../docs/bench-control-test.md).

@@ -83,7 +83,7 @@
     "position_interval_ms": null,
     "bench_profile": {
       "frequency_hz": 915000000,
-      "bandwidth_hz": 250000,
+      "bandwidth_hz": 500000,
       "spreading_factor": 7,
       "coding_rate_denominator": 5,
       "sync_word_hex": "12",

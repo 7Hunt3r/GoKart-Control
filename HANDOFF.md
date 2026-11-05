@@ -112,7 +112,7 @@ is 1.0, but that alone does not prove there are no temporary overrides elsewhere
 4. Build an explicitly labeled eight-kart simulator and responsive kart/pit views.
    Test filtering, stale/no-fix states, shared browser state and command outcomes.
 5. Confirm actual reception on Eamon’s T-Beam S3 base using the shared 46-byte
-   GoKartProtocol/BW250 contract. This development kart is assigned ID 1. TX is
+   GoKartProtocol/BW500 contract. This development kart is assigned ID 1. TX is
    opt-in; PPS slotting and eight-kart load testing remain open. Obtain an
    outdoor GPS fix. See the bench report for installed-image verification.
 6. Bench-verify brief/sustained accessory and link failures plus reconnect:
@@ -141,11 +141,8 @@ an event log and verified component ratings.
 
 ## Parallel firmware integration note
 
-Eamon’s `eamon/firmware-lora-starter` is at `ab9404a` (PR #1) as last fetched.
-Recent changes add pit SD-card/display setup and Manresa orthoimagery; the
-46-byte telemetry structure remains unchanged, but Eamon has now moved the
-radio to BW500 and added legacy 47-byte reception. The restored 0.2.0 image uses
-BW250; reconcile the current radio settings before claiming receiver compatibility.
+Eamon’s `eamon/firmware-lora-starter` is at `ab9404a` (PR #1) as last fetched. Recent work also adds pit
+SD-card/display setup and a Manresa imagery package.
 It contains the T-Beam S3 base, another kart starter, a Pi 4 pit server/kiosk,
 simulator and SD-card setup. His notes report base boot, radio initialization
 and GNSS serial reception verified; no received LoRa packet or outdoor fix yet.
@@ -153,7 +150,9 @@ Those are collaborator-reported results, not tests performed on this computer.
 
 The owner chose his receiver contract to drive integration. Our adapter now
 includes his **unchanged canonical GoKartProtocol library** and uses its 46-byte
-frame, BW250 and 1 Hz reporting. The old 47-byte/BW500 format is retired. This
+frame and 1 Hz reporting. Eamon’s latest base moved to BW500 and supports the
+legacy 47-byte packet too. Our 0.2.1-bench image now follows BW500 while retaining
+the shared 46-byte packet; 0.2.0-bench was BW250 and must be updated. This
 kart is **ID 1** by owner decision; do not assign that ID to another powered kart.
 Shared bytes/settings match; successful over-air reception remains unverified.
 The detailed [receiver agreement](firmware/heltec/README.md#radio-receiver-agreement-for-eamon)
