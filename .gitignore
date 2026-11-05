@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+vendor/
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+
+# Build output
+dist/
+build/
+out/
+target/
+*.log
+
+# Secrets & local config
+.env
+.env.local
+*.local
+
+# OS / editor noise is handled by the global gitignore
