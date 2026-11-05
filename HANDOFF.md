@@ -135,6 +135,24 @@ propulsion during a drift even at modest ground speed. Do not conclude that
 higher battery current, motor current or fault thresholds are the fix without
 an event log and verified component ratings.
 
+## Parallel firmware integration note
+
+Eamon published `eamon/firmware-lora-starter` at `21f3741` (PR #1) while the
+physical bench adapter was being tested. It contains a T-Beam S3 base and a
+separate kart starter. The bench code here remains on `firmware/heltec-bench-ota`.
+
+The radio profiles are currently **incompatible**: this bench uses BW500 and a
+47-byte `GK` frame; Eamon's starter uses BW250 and a 46-byte GoKartProtocol frame.
+Do not expect reception/decoding until both ends deliberately use one format.
+Neither format is declared the final fleet protocol. Reconcile the shared
+contract in an integration PR before expanding either implementation.
+
+The starter's current defaults also enable VESC writes and select wired UART,
+whereas this tested adapter uses BLE and only identity/telemetry requests. Its
+STOP/START command definitions are not authorization to enable deferred remote
+stop on this kart. Do not replace the tested image with the starter by accident.
+No changes have been made to Eamon's branch.
+
 ## Collaboration and delivery state
 
 The documentation, inspection tools, baseline capture and hardware photos are

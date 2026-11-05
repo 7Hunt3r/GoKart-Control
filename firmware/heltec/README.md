@@ -105,6 +105,12 @@ update and power-failure recovery need separate controlled tests before field us
 
 ## Radio receiver agreement for Eamon
 
+**Integration pending:** Eamon's PR #1 currently uses BW250 and a different
+46-byte frame; it will not decode this bench transmitter unchanged. See the
+[handoff integration note](../../HANDOFF.md#parallel-firmware-integration-note).
+Agree one format before receiver testing. The following describes this installed
+bench image, not an already shared fleet protocol.
+
 Custom raw LoRa, not LoRaWAN/Meshtastic:
 
 | Setting | Bench value |
