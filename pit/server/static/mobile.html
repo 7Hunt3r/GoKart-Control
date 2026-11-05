@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GoKart Pit">
+<meta name="theme-color" content="#111111">
+<meta name="format-detection" content="telephone=no">
+<title>GoKart Pit</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="mobile" data-page="mobile">
+<header class="mhead">
+  <div id="simBanner" class="banner sim hidden">SIMULATION &mdash; not real karts</div>
+  <div class="mstrip">
+    <span class="title">PIT</span>
+    <span id="linkChip" class="chip">T-Beam ?</span>
+    <span id="radioChip" class="chip">radio ?</span>
+    <span id="kartsChip" class="chip">karts ?</span>
+    <span id="raceChip" class="chip">race off</span>
+    <span id="clock" class="sm"></span>
+  </div>
+  <div id="connBanner" class="banner bad hidden"></div>
+  <div class="mfleet">
+    <button id="stopAll" class="hold stopall">STOP ALL<small>hold 1 s</small></button>
+    <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button>
+  </div>
+</header>
+<main class="mmain">
+  <section id="tab-karts" class="tabpane">
+    <div class="mfilters">
+      <button id="fOnline" class="toggle">Online only</button>
+      <button id="fEntered" class="toggle">Entered only</button>
+      <span id="hiddenNote" class="sm"></span>
+    </div>
+    <div id="cards" class="cards"></div>
+    <p class="note mpad">Tap a kart to show its ECO / NORMAL / SPORT / STOP / START buttons. Filters hide cards only; hidden karts still get fleet commands.</p>
+    <div class="panel mpanel"><h3>Race</h3><div id="race"></div></div>
+  </section>
+  <section id="tab-map" class="tabpane hidden">
+    <div class="mapwrap">
+      <canvas id="map" class="map"></canvas>
+      <div class="mapctl"><button data-zoom="in">+</button><button data-zoom="out">&minus;</button><button data-zoom="fit">Fit</button></div>
+    </div>
+    <div class="note mpad" id="mapNote"></div>
+  </section>
+  <section id="tab-log" class="tabpane hidden">
+    <div class="panel mpanel"><h3>Command outcomes</h3><div id="outcomes"></div></div>
+    <div class="panel mpanel"><h3>Session log <span class="note">operator actions and events</span></h3><div id="log" class="log"></div></div>
+    <div class="mlinks"><a href="/api/log/download">Download log</a><a href="/">Full operator page</a><a href="/logout?next=/m">Log out</a></div>
+  </section>
+</main>
+<nav class="mtabs">
+  <button data-tab="karts" class="sel">KARTS</button>
+  <button data-tab="map">MAP</button>
+  <button data-tab="log">LOG</button>
+</nav>
+<script src="/static/app.js"></script>
+</body>
+</html>

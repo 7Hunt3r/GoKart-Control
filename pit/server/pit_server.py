@@ -6,7 +6,7 @@
     python3 pit_server.py --tcp 127.0.0.1:7878 # simulator over TCP
 
 Standard library + pyserial only. Serves the operator UI (/), the touch kiosk
-(/kiosk), a 4 Hz Server-Sent Events state stream (/events) and the JSON API.
+(/kiosk), the phone page (/m, also /mobile), a 4 Hz Server-Sent Events state stream (/events) and the JSON API.
 Contract with the T-Beam: firmware/base-tbeam-s3/SERIAL_PROTOCOL.md.
 """
 from __future__ import annotations
@@ -49,7 +49,11 @@ DEFAULTS = {
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+        ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+        ".webmanifest": "application/manifest+json"}
+# Pages a login may return to (?next=...); anything else goes to "/".
+PAGES = {"/": "index.html", "/index.html": "index.html", "/kiosk": "kiosk.html",
+         "/m": "mobile.html", "/mobile": "mobile.html"}
 COOKIE = "gkpit"
 SSE_PERIOD_S = 0.25
 
@@ -355,7 +359,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith(("/api/", "/events", "/cmd")):
             self._json(401, {"ok": False, "error": "login required"})
         else:
-            self._send(303, "", headers={"Location": "/login"})
+            p = urlparse(self.path).path
+            nxt = f"?next={p}" if p in PAGES and p not in ("/", "/index.html") else ""
+            self._send(303, "", headers={"Location": "/login" + nxt})
 
     # -- routes ------------------------------------------------------------------
     def do_HEAD(self):
@@ -377,16 +383,16 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/map/"):
             return self._file(app.map_dir, p[len("/map/"):])
         if p == "/logout":
-            return self._send(303, "", headers={"Location": "/login",
+            nxt = (parse_qs(url.query).get("next") or [""])[0]
+            loc = f"/login?next={nxt}" if nxt in PAGES and nxt != "/" else "/login"
+            return self._send(303, "", headers={"Location": loc,
                                                 "Set-Cookie": f"{COOKIE}=; Path=/; Max-Age=0"})
 
         who = self._who()
         if who is None:
             return self._need_auth()
-        if p in ("/", "/index.html"):
-            return self._file(STATIC_DIR, "index.html")
-        if p == "/kiosk":
-            return self._file(STATIC_DIR, "kiosk.html")
+        if p in PAGES:
+            return self._file(STATIC_DIR, PAGES[p])
         if p == "/api/state":
             return self._send(200, app.state_json(), "application/json")
         if p == "/api/log/recent":
@@ -434,17 +440,20 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_qs(raw.decode("utf-8", "replace"))
             pw = (form.get("password") or [""])[0]
             name = ((form.get("name") or ["operator"])[0].strip() or "operator")[:24]
+            nxt = (form.get("next") or [""])[0]
+            nxt = nxt if nxt in PAGES else "/"
             want = app.cfg.get("password") or ""
             if want and hmac.compare_digest(pw.encode(), want.encode()):
                 tok = secrets.token_urlsafe(24)
                 app.sessions[tok] = name
                 app.log.write("op", who=f"{name}@{self.client_address[0]}", action="login")
                 return self._send(303, "", headers={
-                    "Location": "/",
+                    "Location": nxt,
                     "Set-Cookie": f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"})
             app.log.write("event", what="login_failed", ip=self.client_address[0])
             time.sleep(1.0)
-            return self._send(303, "", headers={"Location": "/login?bad=1"})
+            bad = "/login?bad=1" + (f"&next={nxt}" if nxt != "/" else "")
+            return self._send(303, "", headers={"Location": bad})
 
         who = self._who()
         if who is None:

@@ -1,9 +1,13 @@
-/* GoKart pit UI: shared by the operator page (/) and the touch kiosk (/kiosk).
+/* GoKart pit UI: shared by the operator page (/), the touch kiosk (/kiosk) and the
+   phone page (/m, portrait, tap a kart card to expand its commands).
    Vanilla JS, no external assets. State arrives over Server-Sent Events (/events)
    about 4 times a second; every browser shows the same server-side state. */
 "use strict";
 
 const KIOSK = document.body.dataset.page === "kiosk";
+const MOBILE = document.body.dataset.page === "mobile";
+const COMPACT = KIOSK || MOBILE;                    // short chip/volt texts
+const LOGIN_URL = MOBILE ? "/login?next=/m" : "/login";
 const MODES = ["ECO", "NORMAL", "SPORT"];
 const LINK_TEXT = { online: "ONLINE", stale: "STALE", offline: "OFFLINE", never: "NEVER HEARD" };
 const LINK_CLASS = { online: "ok", stale: "warn", offline: "stale", never: "stale" };
@@ -43,7 +47,7 @@ function toast(msg, err) {
 async function post(url, body) {
   try {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    if (r.status === 401) { location.href = "/login"; return null; }
+    if (r.status === 401) { location.href = LOGIN_URL; return null; }
     const j = await r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
     if (!j.ok) toast(j.error || "refused", true);
     return j;
@@ -82,6 +86,7 @@ function holdButton(btn, ms, fire) {
 
 /* ------------------------------------------------------------------ cards */
 const cards = {};
+const expanded = new Set();   // mobile: kart ids whose card is expanded (per viewer)
 function kartButtons(k) {
   return `<div class="kbtns">
     <button data-c="mode" data-k="${k}" data-a="0">ECO</button>
@@ -90,12 +95,41 @@ function kartButtons(k) {
     <button class="b-stop" data-c="stop" data-k="${k}">STOP</button>
     <button class="b-start" data-c="start" data-k="${k}">START</button></div>`;
 }
+function mobileCardHtml(k) {
+  return `
+      <div class="hdr"><div class="swatch" data-f="sw">${k}</div><span class="chip" data-f="link">--</span>
+        <span class="sm" data-f="age"></span><div class="badges" data-f="badges"></div><span class="chev" aria-hidden="true"></span></div>
+      <div class="row mrow">
+        <span><span class="big val" data-f="batt">--</span> <span class="val mvolts" data-f="volts"></span></span>
+        <span class="mmode" data-f="mode"></span></div>
+      <div class="row sm"><span class="faultline" data-f="fault"></span><span class="val" data-f="esc"></span><span class="val" data-f="gps"></span></div>
+      <div class="row sm"><span class="val" data-f="rssi"></span></div>
+      <div class="kexp">
+        <div class="row sm"><span class="val" data-f="gpsmph"></span></div>
+        <div class="row sm"><span><span class="val" data-f="wheel">--</span><span class="lbl"> mph wheel (uncalibrated)</span></span></div>
+        ${kartButtons(k)}
+        <div class="lastcmd"><span class="lbl">Last command</span> <span class="outcome" data-f="out"></span></div>
+      </div>`;
+}
 function buildCards() {
   const box = $("cards");
   box.innerHTML = "";
   for (let k = 1; k <= 8; k++) {
     const el = document.createElement("div");
     el.className = "card never";
+    if (MOBILE) {
+      el.innerHTML = mobileCardHtml(k);
+      el.addEventListener("click", (e) => {
+        if (e.target.closest("button")) return;      // command buttons are handled globally
+        if (expanded.has(k)) expanded.delete(k); else expanded.add(k);
+        el.classList.toggle("open", expanded.has(k));
+      });
+      box.appendChild(el);
+      const f = {};
+      el.querySelectorAll("[data-f]").forEach((n) => { f[n.dataset.f] = n; });
+      cards[k] = { el, f };
+      continue;
+    }
     el.innerHTML = `
       <div class="hdr"><div class="swatch" data-f="sw">${k}</div><span class="chip" data-f="link">--</span>
         <span class="sm" data-f="age"></span><div class="badges" data-f="badges"></div></div>
@@ -151,14 +185,14 @@ function updateCards() {
     const st = k.status || {}, v = k.vesc || {}, d = k.derived || {}, g = k.gps || {};
     const show = visible(k);
     if (!show) hidden++;
-    c.el.className = "card " + k.link + (show ? "" : " hidden");
+    c.el.className = "card " + k.link + (show ? "" : " hidden") + (expanded.has(k.id) ? " open" : "");
     c.f.sw.style.background = k.color;
     c.f.link.textContent = LINK_TEXT[k.link];
     c.f.link.className = "chip " + LINK_CLASS[k.link];
     c.f.age.textContent = nul(k.age_s) ? "" : ageText(k.age_s) + " ago";
     const old = !k.vesc_fresh && !nul(k.vesc_age_s) ? ` (${ageText(k.vesc_age_s)} old)` : "";
     c.f.batt.textContent = nul(d.battery_pct) ? "--" : Math.round(d.battery_pct) + "%";
-    c.f.volts.textContent = fmt(v.volts, 1, "V") + (d.under_load ? (KIOSK ? " load" : " under load") : "") + old;
+    c.f.volts.textContent = fmt(v.volts, 1, "V") + (d.under_load ? (COMPACT ? " load" : " under load") : "") + old;
     c.f.wheel.textContent = nul(d.wheel_mph) ? "--" : Math.abs(d.wheel_mph).toFixed(0);
     c.f.batt.classList.toggle("old", !k.vesc_fresh);
     c.f.wheel.classList.toggle("old", !k.vesc_fresh);
@@ -170,10 +204,15 @@ function updateCards() {
     c.f.fault.className = fi.cls;
     c.f.gps.textContent = (g.fix_now === true ? `${fmt(g.sats_now)} sats` : (g.fix_now === false ? "NO FIX" : "fix --"))
       + (g.last_fix && !g.fix_fresh ? ` (last ${ageText(g.fix_age_s)})` : "");
-    c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}`
-      + (k.loss_pct_1m === null || k.loss_pct_1m === undefined ? "" : ` · loss ${k.loss_pct_1m}%`)
-      + (st.base_rssi ? ` · pit↑${fmt(st.base_rssi, 0, "")}` : "");
-    c.f.out.innerHTML = outcomeText(k.id);
+    const loss = k.loss_pct_1m === null || k.loss_pct_1m === undefined ? "" : ` · loss ${k.loss_pct_1m}%`;
+    if (MOBILE) {   // rssi/snr = how the pit hears the kart; base_rssi = how the kart hears the pit
+      c.f.rssi.textContent = `pit hears ${fmt(st.rssi, 0)}/${fmt(st.snr, 1, " dB")}${loss}`
+        + (nul(st.base_rssi) ? "" : ` · kart hears ${fmt(st.base_rssi, 0)}`);
+    } else {
+      c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}` + loss
+        + (st.base_rssi ? ` · pit↑${fmt(st.base_rssi, 0, "")}` : "");
+    }
+    c.f.out.innerHTML = outcomeText(k.id) || (MOBILE ? '<span class="note">none this session</span>' : "");
     const b = [];
     if (st.stopped === true) b.push('<span class="badge stopped">STOPPED</span>');
     if (fi.bad) b.push('<span class="badge fault">FAULT</span>');
@@ -194,13 +233,17 @@ function chip(id, text, cls) { const e = $(id); if (e) { e.textContent = text; e
 function updateTop() {
   const L = S.server.link, st = S.fleet.stat, base = S.fleet.base, race = S.fleet.race;
   $("simBanner").classList.toggle("hidden", !S.fleet.simulation);
-  chip("linkChip", L.connected ? (KIOSK ? "T-Beam OK" : "T-Beam " + L.desc) : "T-BEAM DOWN", L.connected ? "ok" : "bad");
+  chip("linkChip", L.connected ? (COMPACT ? "T-Beam OK" : "T-Beam " + L.desc) : "T-BEAM DOWN", L.connected ? "ok" : "bad");
   if (st) {
     const staleStat = (st.age_s || 0) > 5;
-    chip("radioChip", `radio ${st.radio} rx ${st.rx} tx ${st.tx}` + (st.rx_bad ? ` bad ${st.rx_bad}` : ""),
+    chip("radioChip", (MOBILE ? `radio ${st.radio}` : `radio ${st.radio} rx ${st.rx} tx ${st.tx}` + (st.rx_bad ? ` bad ${st.rx_bad}` : "")),
       st.radio === "none" ? "bad" : (staleStat ? "stale" : "ok"));
   } else chip("radioChip", "radio: no stat", "stale");
   if (base) chip("baseChip", base.fix ? `base GPS ${fmt(base.sats)} sats` : "base GPS no fix", base.fix ? "ok" : "warn");
+  if ($("kartsChip")) {
+    const on = S.fleet.karts.filter((k) => k.link === "online").length;
+    chip("kartsChip", `karts ${on}/${S.fleet.karts.length}`, on ? (on === S.fleet.karts.length ? "ok" : "warn") : "bad");
+  }
   chip("raceChip", race.active ? `RACE ${MODES[race.mode]} (${race.entered.length})` : "race off", race.active ? "info" : "");
   $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
   const cb = $("connBanner");
@@ -235,7 +278,7 @@ function updateOutcomes() {
     }).join("") + "</div>";
   } else h += '<div class="sm">No fleet command yet this session.</div>';
   h += `<table class="cmds"><tr><th>#</th><th>seq</th><th>command</th><th>by</th><th>outcome</th></tr>` +
-    C.recent.slice(0, KIOSK ? 8 : 12).map((c) => `<tr><td>${c.id}</td><td>${c.seq ?? "-"}</td>
+    C.recent.slice(0, KIOSK ? 8 : (MOBILE ? 20 : 12)).map((c) => `<tr><td>${c.id}</td><td>${c.seq ?? "-"}</td>
       <td>${esc(cmdLabel(c.cmd, c.kart, c.arg))}</td><td>${esc(c.source)}<br>${hhmmss(c.created_wall)}</td><td>${summarize(c)}</td></tr>`).join("") +
     "</table>";
   h += `<p class="note">offline = kart not online when sent; no_ack = no echo after retries (outcome unknown);
@@ -540,8 +583,8 @@ document.addEventListener("click", (e) => {
     if (S) drawMap();
   } else if (ds.tab) {
     document.querySelectorAll("[data-tab]").forEach((t) => t.classList.toggle("sel", t === b));
-    ["map", "cmds", "race", "log"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== ds.tab));
-    store.set("gk_tab", ds.tab);
+    document.querySelectorAll(".tabpane").forEach((p) => p.classList.toggle("hidden", p.id !== "tab-" + ds.tab));
+    store.set(TAB_KEY, ds.tab);
     if (S) render();
     refreshLog();
   } else if (ds.enter) {
@@ -568,7 +611,7 @@ function connect() {
     render();
   };
   es.onerror = () => {
-    fetch("/api/whoami").then((r) => { if (r.status === 401) location.href = "/login"; }).catch(() => {});
+    fetch("/api/whoami").then((r) => { if (r.status === 401) location.href = LOGIN_URL; }).catch(() => {});
   };
 }
 
@@ -584,10 +627,12 @@ buildCards();
 setupMapInput();
 holdButton($("stopAll"), 1000, () => sendCmd("stop", 255));
 holdButton($("startAll"), 1000, () => sendCmd("start", 255));
-if (KIOSK) {
-  const tab = store.get("gk_tab", "map");
+const TAB_KEY = MOBILE ? "gk_mtab" : "gk_tab";
+if (KIOSK || MOBILE) {
+  const first = KIOSK ? "map" : "karts";
+  const tab = store.get(TAB_KEY, first);
   const btn = document.querySelector(`[data-tab="${tab}"]`);
-  if (btn && tab !== "map") btn.click();
+  if (btn && tab !== first) btn.click();
 }
 window.addEventListener("resize", () => { if (S) drawMap(); });
 setInterval(watchdog, 1000);

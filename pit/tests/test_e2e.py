@@ -109,6 +109,16 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertIn(b"STOP ALL", body)
             self.assertEqual(st.request("GET", "/")[0], 200)
+            for path in ("/m", "/mobile"):                  # phone page
+                code, body, _ = st.request("GET", path)
+                self.assertEqual(code, 200, path)
+                for marker in (b'data-page="mobile"', b'id="stopAll"', b'id="cards"', b'id="map"',
+                               b'data-tab="log"', b'apple-mobile-web-app-capable', b"manifest.webmanifest"):
+                    self.assertIn(marker, body, (path, marker))
+            code, body, h = st.request("GET", "/static/manifest.webmanifest")
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body)["start_url"], "/m")
+            self.assertEqual(st.request("GET", "/static/icon-180.png")[0], 200)
             s = st.wait(lambda s: online_count(s) == 8)
             self.assertTrue(s["fleet"]["simulation"], "SIMULATION marker not detected")
             self.assertTrue(s["server"]["link"]["connected"])
@@ -144,6 +154,17 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(st.request("GET", "/api/state")[0], 401)
             self.assertEqual(st.request("GET", "/")[2].get("Location"), "/login")
             self.assertEqual(st.request("GET", "/map/package.json")[0], 200)   # kart displays: public
+            self.assertEqual(st.request("GET", "/m")[2].get("Location"), "/login?next=/m")
+            self.assertEqual(st.request("GET", "/static/manifest.webmanifest")[0], 200)  # iOS fetches it cookie-less
+            code, _, h = st.request("POST", "/login", "password=nope&name=x&next=/m",
+                                    ctype="application/x-www-form-urlencoded")
+            self.assertEqual(h.get("Location"), "/login?bad=1&next=/m")
+            code, _, h = st.request("POST", "/login", "password=letmein&name=phone&next=/m",
+                                    ctype="application/x-www-form-urlencoded")
+            self.assertEqual(h.get("Location"), "/m")
+            code, _, h = st.request("POST", "/login", "password=letmein&name=x&next=http://evil.example/",
+                                    ctype="application/x-www-form-urlencoded")
+            self.assertEqual(h.get("Location"), "/")                         # open redirect refused
             code, _, h = st.request("POST", "/login", "password=nope&name=x",
                                     ctype="application/x-www-form-urlencoded")
             self.assertEqual(h.get("Location"), "/login?bad=1")
