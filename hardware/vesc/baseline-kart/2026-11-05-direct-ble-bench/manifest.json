@@ -1,0 +1,43 @@
+{
+  "captured_on": "2026-11-05",
+  "transport": "macOS CoreBluetooth / Bleak 0.22.3 / VESC Nordic UART",
+  "scope": "Read commands 0/4/14/17/32, motor-current command 6, finite application-output timer command 63. No VESC configuration, flash, firmware, reset, detection or CAN-forwarding commands.",
+  "files": [
+    {
+      "file": "direct-ble-readonly.jsonl",
+      "sha256": "b61ab60bd47f7e8523dda0b7d458ee86c6ad853119a2cf3e371232d28e9bc28a",
+      "source_mtime_utc": "2026-11-05T21:07:39.625300+00:00"
+    },
+    {
+      "file": "direct-ble-zero.jsonl",
+      "sha256": "a1c39d2b413a22b426871f195d62f6bcdc50eb1348d13a21e147793acba9d87b",
+      "source_mtime_utc": "2026-11-05T21:08:29.094209+00:00"
+    },
+    {
+      "file": "direct-ble-probe.jsonl",
+      "sha256": "92cecdda716951a38319c4bb2c168223a3c72f4d7aa2aa9d0b114055d99f3845",
+      "source_mtime_utc": "2026-11-05T21:11:03.835700+00:00"
+    },
+    {
+      "file": "direct-ble-probe-5a.jsonl",
+      "sha256": "22eb092b23672a289666c28961c17a59a9b163da44130a4f06287814f4ea2caf",
+      "source_mtime_utc": "2026-11-05T21:14:35.576306+00:00"
+    },
+    {
+      "file": "direct-ble-five-seconds-5a.jsonl",
+      "sha256": "9c1cadf20c95043fad67e7cc4276b8e1a607c1745033e0951574d4cbad67b7ba",
+      "source_mtime_utc": "2026-11-05T21:15:22.256179+00:00"
+    },
+    {
+      "file": "direct-ble-thirty-seconds-10a.jsonl",
+      "sha256": "c416005995e958bd4448e4cd37859f17c11fd6c596330b0808c2c35f53f01a40",
+      "source_mtime_utc": "2026-11-05T21:17:30.927492+00:00"
+    }
+  ],
+  "notes": [
+    "Source modification timestamps identify the local trace files, not precise motor actuation times.",
+    "Scripts evolved between trials. Early result=completed means the loop finished, not that all acceptance criteria passed. See README for the first 1 A probe guard defect.",
+    "Latest script includes tapered current; the earlier 5 A trials used on/off current below 150 ERPM.",
+    "An initial 30-second connection attempt found no BLE peripheral and sent no commands; it has no telemetry trace. The included 10 A trace is the subsequent actual attempt."
+  ]
+}

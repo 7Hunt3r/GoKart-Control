@@ -1,114 +1,98 @@
 # GoKart Control
 
-A dashboard and shared pit system for eight electric karts at Manresa Island,
-Connecticut. Each kart uses a Raspberry Pi 3 Model B, a 7-inch LESOWN L7-family touchscreen (1024×600 per supplied manual), a
-Heltec V4.3 that owns VESC communication over Bluetooth, GPS and LoRa.
-The kart Pi is the display/interface computer; it does not own the VESC link. A Pi 4 hosts
-the password-protected pit web interface for multiple simultaneous operators.
+An eight-kart dashboard and shared pit system for Manresa Island, Connecticut.
+Each Heltec V4.3 owns the kart's VESC Bluetooth connection, L76K GPS and LoRa.
+A Raspberry Pi 3 B runs the 7-inch LESOWN display; a Pi 4 serves the shared,
+password-protected pit interface through a T-Beam S3 base radio.
 
-**The connected development kart is the primary hardware baseline.** The older
-M5Stack repository is historical reference, not the specification for this rebuild.
+**The connected development kart is the hardware baseline.** The old M5Stack
+app is historical reference. Driver inputs remain wired directly to the ESC;
+accessory/link failures must not change its active settings or replay commands.
 
 ## Start here
 
-1. [Handoff](HANDOFF.md): current status, findings, next tasks and open questions.
-2. [Measured VESC baseline](hardware/vesc/baseline-kart/2026-11-05/README.md):
-   actual settings, evidence and interpretation.
-3. [Requirements](docs/requirements.md): confirmed product behavior and deferred work.
-4. [Architecture](docs/architecture.md): components, interfaces and failure boundaries.
-5. [Hardware inventory](docs/hardware.md): verified vs reported vs unknown details.
-6. [Contributing](CONTRIBUTING.md): repeatable setup and collaboration conventions
-   for Colin and Eamon, including ongoing push/sync expectations.
-7. [Telemetry agreement](docs/requirements.md#agreed-telemetry-fields): fields, units
-   and proposed validity conventions shared across the components.
+- [Handoff and next hardware test](HANDOFF.md)
+- [Integration/build/commissioning guide](docs/integration.md)
+- [Requirements](docs/requirements.md), [architecture](docs/architecture.md),
+  [hardware](docs/hardware.md), [collaboration workflow](CONTRIBUTING.md)
+- [Measured VESC configuration](hardware/vesc/baseline-kart/2026-11-05/README.md)
+- [Pit server, kiosk and simulator](pit/README.md)
 
-## Current status
+## What is available
 
-As of November 5, 2026:
-
-- Read the connected VESC over USB without configuration writes or motor commands.
-- Verified firmware 6.00, hardware identity `75_100_V2`, controller ID 69.
-- Decoded 189 motor fields and 187 application fields with both schema signatures
-  verified and every payload byte accounted for.
-- Archived [eight hardware photos and connector notes](hardware/photos/2026-11-05/README.md),
-  identifying the L7 display, Heltec V4.3 and Quectel L76K GPS module.
-- Captured a stationary telemetry sample: 76.4 V, 22.3 C ESC temperature, no active fault.
-- Prepared offline decode tools and protocol tests using the real captured data.
-- **The dashboard, pit server, BLE adapter and LoRa firmware are not implemented.**
-- No course image/route is packaged, and no radio/GPS/display integration is tested.
-
-The captured configuration is the current **runtime** configuration. It is not
-proof of the saved flash baseline, a tuning recommendation, or a flashable image.
-Do not copy this kart's settings to other karts without inspecting their hardware.
-
-## Product scope
-
-| First implementation | Deferred |
+| Component | State |
 | --- | --- |
-| VESC telemetry over BLE; MPH dashboard | Driver messaging |
-| ECO/NORMAL/SPORT retained pending inspection | Gradual remote stop |
-| Offline course map with all eight kart positions | Geofence enforcement |
-| Online/race-entry filters | Current-limit increases pending diagnosis |
-| Beginner display hides driver-facing fault alerts | Automatic fault-based tuning |
-| Pi 4 password-protected shared pit control | |
-| Logs and addressed/fleet profile requests | |
+| `firmware/heltec` | Tested telemetry-only adapter, authenticated maintenance OTA. **Installed on Colin's kart 1**, version 0.2.1-bench; BLE/GPS/LoRa TX verified. |
+| `firmware/kart-heltec-v4` | Eamon's integrated kart node with LoRa receive/commands, fleet data and display serial output. BLE is default. Configuration/identity/OTA safeguards added here; compiled and offline-tested, **not installed on Colin's kart**. |
+| `firmware/base-tbeam-s3` | Eamon's base modem; same shared GoKartProtocol. |
+| `pit/` | Pit server, touchscreen kiosk, simulator, deployment/SD-card tools, course-map presets. Eamon reports Pi 4 + kart 2 radio/ping/OTA working. |
+| `firmware/bench-control` | Separate removable motor-test experiments. Half-second 5 A forward probe succeeded over laptop BLE; longer attempts aborted. Not vehicle firmware. |
+| Kart Pi display | Serial/map contracts exist; dedicated on-kart display integration remains open. |
 
-The Heltec handles supervisory telemetry/profile requests; the VESC continues
-to run motor control. The display exchanges data and UI requests with the Heltec
-over a proposed USB serial interface. Profile writes remain disabled.
+The integration branch combines Eamon's work through `d91422b` and Colin's saved
+telemetry/diagnostic work through `544b498`. Published imagery includes CT ECO
+2023 Manresa imagery; licensed SkyFi/shop images stay local. See [map setup](pit/server/map/README.md).
 
-**Vehicle reliability comes first.** Display, Heltec or communication failures
-must leave the ESC running with its current active settings and hardwired
-controls. No automatic restore, profile switch, stop or reset on disconnect or
-reconnect. This requirement still needs bench validation; existing ESC protections
-remain active. See [reliability requirements](docs/requirements.md#reliability-and-link-loss-behavior).
+The installed telemetry image cannot accept STOP/START/mode requests. The
+integrated node implements those as temporary VESC configuration writes, gated
+by a pinned controller UUID, firmware 6.00 and a fresh live-limits read. STOP
+never increases the observed current allowance; only current-max scale changes.
+Readback verifies every transmitted limit. **START restores an allowance; it
+does not command the wheels to spin.** Full hardware validation remains pending.
 
-Throttle and reverse remain wired to the ESC. Pedal braking is mechanical.
-Motor braking is currently configured to 0 A. Motors have no temperature
-sensors wired; motor temperature must display as unavailable, not 0 C.
+No VESC firmware or saved configuration was changed. Motor sensors are not wired;
+motor temperature is unavailable. Pedal braking is mechanical, with the existing
+zero motor-braking current preserved. Top-speed profiles, drift-cutoff tuning,
+geofence enforcement and driver messaging remain separate future work.
 
-## Local setup
+## Run and check
 
-Canonical location: `~/Projects/50 Day/GoKart Control/`.
+Canonical clone: `~/Projects/50 Day/GoKart Control/`. Reuse the existing clone.
+Git remote: `git@github.com:colinfost3r/GoKart-Control.git`.
 
 ```sh
-git clone git@github.com:colinfost3r/GoKart-Control.git "$HOME/Projects/50 Day/GoKart Control"
-cd "$HOME/Projects/50 Day/GoKart Control"
 python3 -B -m unittest discover -s tests -v
+python3 -I pit/tests/test_core.py
+python3 -I pit/tests/test_e2e.py
 ```
 
-If already cloned, reuse the existing project. Offline tools use Python 3.9+
-standard library; no pip dependencies or connected hardware are needed for tests.
-Serial capture supports macOS/Linux and requires device permissions. It is not
-a Windows serial implementation.
+Root tests use Python and a C++ compiler, including sanitizer checks against the
+actual VESC capture. Pit tests need pyserial and localhost sockets. No test
+actuates a controller. See [integration guide](docs/integration.md) for firmware
+builds and the separate diagnostic tests.
 
-For read-only hardware inspection, follow [tools/vesc/README.md](tools/vesc/README.md).
-There is no app launch or deployment command yet.
+For a simulated pit:
+
+```sh
+# Separate terminals; the simulator supplies fake karts, clearly marked in the UI.
+python3 pit/sim/sim_tbeam.py --tcp 7878
+python3 pit/server/pit_server.py --tcp 127.0.0.1:7878
+```
+
+Open `http://127.0.0.1:8080/` or `/kiosk`. Remote browsers need the configured
+password; deployment credentials and local imagery are not committed.
 
 ## Repository layout
 
 ```text
-README.md                 Project entry point and current status
-HANDOFF.md                Next collaborator's starting point
-CONTRIBUTING.md            Workflow and verification
-AGENTS.md                 Project-specific agent conventions
-config/project.json       Planning configuration; not a runtime app config
-docs/                     Requirements, architecture, hardware and history
-hardware/vesc/            Baseline evidence and decoded settings
-tools/vesc/               Allowlisted read-only capture and offline decoder
-tests/                    Protocol and baseline regression checks
-third_party/vesc_tool/     Pinned 6.00 schemas, license and provenance
-.github/                  Pull request template
+config/                     Planning metadata; not live controller settings
+docs/                       Decisions, integration, test reports
+hardware/                   Immutable photos, settings and test traces
+firmware/heltec/             Tested telemetry-only recovery image (PlatformIO)
+firmware/kart-heltec-v4/      Integrated command-capable kart node (Arduino CLI)
+firmware/base-tbeam-s3/      Pit modem (Arduino CLI)
+firmware/libraries/         Shared radio protocol and guarded VESC transport
+firmware/bench-control/      Removable motor-test experiments
+pit/                        Server, kiosk, simulator, maps and deployment
+tools/                      Read-only VESC capture and Heltec provisioning/OTA
+tests/                      Protocol and controller regression tests
 ```
 
-No new application stack is selected. Avoid creating empty service skeletons
-until the first runnable milestone has a clear interface and acceptance checks.
+Read the [actual motor-test results](docs/bench-control-test.md): five-second
+and thirty-second sustained tests did not complete. Local radio TX is also not
+proof of receipt at the pit. Do not confuse simulated, compiled, collaborator-
+reported and locally verified results.
 
-## Sources and licensing
-
-- Current baseline: this repository's [controller capture](hardware/vesc/baseline-kart/2026-11-05/README.md).
-- Historical app: [vesc-ble-dashboard](https://github.com/eamondoherty618-prog/vesc-ble-dashboard).
-- [Upstream schema provenance and license](third_party/vesc_tool/README.md).
-
-The repository is public. No overall redistribution license has been chosen.
-Vendored VESC Tool files retain their own GPL-3.0-or-later terms.
+The repository is public. No overall redistribution license has been selected.
+[Vendored VESC schemas](third_party/vesc_tool/README.md) retain GPL-3.0-or-later;
+map provenance is documented separately.

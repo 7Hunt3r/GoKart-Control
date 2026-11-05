@@ -11,7 +11,9 @@
   automatically saved-flash backups. Motor-temperature sensors are not wired.
 - The Heltec owns the VESC connection, GPS, LoRa and supervisory profile logic.
   The kart Pi is display/interface only. BLE remains the preferred VESC transport.
-  Driver inputs and motor control remain with the ESC; profile writes are disabled.
+  Driver inputs and motor control remain with the ESC. The installed telemetry
+  image has no profile writes. The integrated command build is for separately
+  validated bench work; merging source does not deploy or validate hardware.
 - Reliability first: no driving-state changes on display/Heltec/link loss or
   reconnect. Keep current active VESC settings; no saved-profile restore,
   heartbeat-dependent driving lease, stop/reset or cached-command replay.

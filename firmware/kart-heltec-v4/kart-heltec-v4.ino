@@ -40,6 +40,8 @@
 Preferences prefs;
 uint8_t kartId = DEFAULT_KART_ID;
 String  wifiSsid, wifiPass, otaPass, vescMac, vescUuid;
+bool maintenance = false;
+uint32_t maintenanceAt = 0;
 
 // ---------------------------------------------------------------- radio
 SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
@@ -146,7 +148,7 @@ static void logf(const char* fmt, ...) {
 
 static bool writesEnabled() {
 #if ENABLE_VESC_WRITES
-  return true;
+  return !maintenance;
 #else
   return false;
 #endif
@@ -171,6 +173,12 @@ static uint8_t modeActual(float* scaleOut) {
   for (uint8_t i = 0; i < GK_MODE_COUNT; i++)
     if (fabsf(L.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) return i;
   return GK_MODE_UNKNOWN;
+}
+
+static bool stopConfirmed() {
+  return stopActive && vescUp() && vesc.identityVerified() && vesc.limits().receivedMs &&
+    millis()-vesc.limits().receivedMs < VESC_MCCONF_REFRESH_MS+VESC_ACK_TIMEOUT_MS &&
+    vesc.limits().currentMaxScale <= .00011f;
 }
 
 // ---------------------------------------------------------------- telemetry
@@ -205,7 +213,7 @@ static void fillTelemetry(GkTelemetry& t) {
   t.uptime_s = (uint16_t)(now / 1000);
   t.base_rssi = (baseHeardMs && now - baseHeardMs < 30000) ? baseRssi : 0;
   t.flags = (fix ? GK_FLAG_GPS_FIX : 0) | (ppsFresh() ? GK_FLAG_PPS : 0) | (vup ? GK_FLAG_VESC_LINK : 0)
-          | (stopActive ? GK_FLAG_STOPPED : 0) | (modeConfirmed ? GK_FLAG_MODE_CONFIRMED : 0)
+          | (stopConfirmed() ? GK_FLAG_STOPPED : 0) | (modeConfirmed ? GK_FLAG_MODE_CONFIRMED : 0)
           | ((vup && v.faultCode) ? GK_FLAG_FAULT : 0) | (WiFi.status() == WL_CONNECTED ? GK_FLAG_WIFI : 0)
           | (writesEnabled() ? GK_FLAG_WRITES_ENABLED : 0);
 }
@@ -258,6 +266,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
   if (commandHistory.lookup(src,seq,issued,priorResult)) {
     uint8_t saved=cmdResult; cmdResult=priorResult; emitCmd(src,seq,cmd,arg); cmdResult=saved; return;
   }
+  if (cmd == GK_CMD_STOP && (writeGuard.busy() || rampIdx >= 0)) cancelWritesOnLinkLoss();
   if (writeGuard.busy() || rampIdx >= 0) {
     commandHistory.remember(src,seq,issued,GK_RES_REJECTED);
     uint8_t saved=cmdResult; cmdResult=GK_RES_REJECTED; emitCmd(src,seq,cmd,arg); cmdResult=saved; return;
@@ -375,6 +384,7 @@ static void bleService() {
 #endif
 
 static void serviceVesc() {
+  if (maintenance) return;
 #if !VESC_TRANSPORT_UART
   bleService();
   if (!bleConnected) { vesc.markLinkLost(); cancelWritesOnLinkLoss(); if (vescLinkWas) { vescLinkWas = false; logf("vesc link lost"); } return; }
@@ -420,7 +430,7 @@ static void emitFleet(uint8_t id, float rssi, float snr) {
 }
 
 static void serviceLoraRx() {
-  if (!radioOk || !loraIrq) return;
+  if (maintenance || !radioOk || !loraIrq) return;
   loraIrq = false;
   uint8_t buf[80];
   size_t len = radio.getPacketLength();
@@ -461,7 +471,7 @@ static bool slotDue() {
 }
 
 static void serviceLoraTx() {
-  if (!radioOk || !slotDue()) return;
+  if (maintenance || !radioOk || !slotDue()) return;
   GkTelemetry t; fillTelemetry(t);
   digitalWrite(PIN_LED, HIGH);
   int st = radio.transmit((uint8_t*)&t, sizeof t);
@@ -481,13 +491,39 @@ static void wifiStart() {
   wifiStarted = true;
 }
 
+static void closeMaintenance() {
+  if (otaStarted) ArduinoOTA.end();
+  otaStarted = false; maintenance = false;
+  loraIrq = false;
+  if (radioOk) radio.startReceive();
+  logf("maintenance closed; read-only VESC reconnect");
+}
+
+static void openMaintenance() {
+  if (!otaPass.length() || !vescUp() || !vesc.identityVerified() ||
+      vesc.values().erpm != 0 || fabsf(vesc.values().motorCurrent) > .2f ||
+      writeGuard.busy() || rampIdx >= 0) {
+    logf("maintenance denied: password, verified stationary VESC and idle commands required"); return;
+  }
+  maintenance = true; maintenanceAt = millis();
+  cancelWritesOnLinkLoss(); vesc.markLinkLost(); vescLinkWas = false;
+#if !VESC_TRANSPORT_UART
+  if (pClient && bleConnected) pClient->disconnect();
+  NimBLEDevice::getScan()->stop(); bleScanning = false;
+#endif
+  if (radioOk) radio.standby();
+  loraIrq = false;
+  logf("maintenance open for 10 minutes; BLE and LoRa paused");
+}
+
 static void serviceWifi() {
+  if (maintenance && !otaInProgress && millis() - maintenanceAt >= 600000) closeMaintenance();
   if (!wifiStarted) return;
   bool up = WiFi.status() == WL_CONNECTED;
-  if (up && !otaStarted) {
+  if (up && maintenance && otaPass.length() && !otaStarted) {
     char host[20]; snprintf(host, sizeof host, "gokart-%u", kartId);
     ArduinoOTA.setHostname(host);
-    if (otaPass.length()) ArduinoOTA.setPassword(otaPass.c_str());
+    ArduinoOTA.setPassword(otaPass.c_str());
     ArduinoOTA.onStart([]() { otaInProgress = true; esp_task_wdt_delete(NULL); logf("ota start"); });
     ArduinoOTA.onEnd([]() { logf("ota done"); });
     ArduinoOTA.onError([](ota_error_t e) { otaInProgress = false; esp_task_wdt_add(NULL); logf("ota error %u", (unsigned)e); });
@@ -495,7 +531,7 @@ static void serviceWifi() {
     otaStarted = true;
     logf("wifi %s ota host %s.local", WiFi.localIP().toString().c_str(), host);
   }
-  if (otaStarted) ArduinoOTA.handle();
+  if (otaStarted && maintenance) ArduinoOTA.handle();
   if (!up && millis() - wifiRetryMs > 30000) { wifiRetryMs = millis(); WiFi.reconnect(); }
 }
 
@@ -531,6 +567,11 @@ static void usbCommand(char* line) {
   if (!strcmp(line, "status")) {
     usbStatus();
     Serial.printf("{\"t\":\"identity\",\"uuid\":\"%s\",\"verified\":%s}\n", vesc.uuidHex(), gkBool(vesc.identityVerified()));
+    Serial.printf("{\"t\":\"maintenance\",\"active\":%s,\"ota_active\":%s}\n", gkBool(maintenance), gkBool(otaStarted));
+  }
+  else if (!strcmp(line, "maintenance") && arg) {
+    if (!strcmp(arg,"on")) openMaintenance();
+    else if (!strcmp(arg,"off") && !otaInProgress) closeMaintenance();
   }
   else if (!strcmp(line, "id") && arg) { int n = atoi(arg); if (n >= 1 && n <= GK_MAX_KARTS) { kartId = n; prefs.putUChar("id", kartId); logf("kart id %u stored; reboot to rename OTA host", kartId); } else logf("id must be 1..8"); }
   else if (!strcmp(line, "mode") && arg) handleCommand(0xFE, ++usbSeq, GK_CMD_SET_MODE, atoi(arg), 0, 0);
@@ -563,7 +604,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | vescuuid HEX24 | vescuuid clear | blescan | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | ping | wifi SSID PASS | otapw PASS | maintenance on/off | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | vescuuid HEX24 | vescuuid clear | blescan | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -587,7 +628,7 @@ static void serviceOled() {
   oled.setFont(u8g2_font_6x10_tf);
   snprintf(l, sizeof l, "K%u %s%s", kartId, ma != GK_MODE_UNKNOWN ? MODES[ma].name : (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].name : "----"), modeConfirmed ? "*" : "");
   oled.drawStr(0, 9, l);
-  if (stopActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
+  if (stopConfirmed()) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
   else if (!writesEnabled()) oled.drawStr(100, 9, "RO");
   const VescValues& v = vesc.values();
   if (vescUp()) snprintf(l, sizeof l, "VESC %.1fV %.0fA %.0fC%s", v.inputVoltage, v.inputCurrent, v.tempMosfet, v.faultCode ? " F" : "");

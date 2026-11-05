@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "status": "hardware_baseline_captured_application_not_implemented",
+  "status": "integrated_pit_and_kart_sources_command_guards_offline_tested_kart1_installed_telemetry_only",
   "project": "GoKart Control",
   "site": {
     "name": "Manresa Island",
     "state": "CT",
     "country": "US",
     "course_geometry": null,
-    "map_package": null
+    "map_package": "pit/server/map"
   },
   "fleet": {
     "kart_ids": [
@@ -59,7 +59,12 @@
     "vesc_connection_owner": "heltec",
     "kart_pi_role": "display_and_touch_interface",
     "pi_heltec_transport_proposed": "usb_serial",
-    "heltec_power_independent_of_display_required": true
+    "heltec_power_independent_of_display_required": true,
+    "heltec_bench_firmware": "firmware/heltec",
+    "gps_serial_verified": true,
+    "gps_position_fix_verified": false,
+    "integrated_kart_firmware": "firmware/kart-heltec-v4",
+    "pit_base_radio": "LilyGo T-Beam S3"
   },
   "features_in_scope": [
     "vesc_telemetry",
@@ -77,7 +82,25 @@
     "region_target": "US",
     "frequency_hz": null,
     "tx_power_dbm": null,
-    "position_interval_ms": null
+    "position_interval_ms": null,
+    "bench_profile": {
+      "frequency_hz": 915000000,
+      "bandwidth_hz": 500000,
+      "spreading_factor": 7,
+      "coding_rate_denominator": 5,
+      "sync_word_hex": "12",
+      "preamble_symbols": 8,
+      "sx1262_requested_power_dbm": 0,
+      "external_fem_output_not_measured": true,
+      "interval_ms": 1000,
+      "payload_bytes": 46,
+      "receiver_verified": false,
+      "interval_jitter_ms": 50,
+      "protocol": "GoKartProtocol v1",
+      "shared_header": "firmware/libraries/GoKartProtocol/GoKartProtocol.h",
+      "pps_aligned": false,
+      "development_kart_id": 1
+    }
   },
   "profiles": {
     "names": [
@@ -123,7 +146,9 @@
     "password_required": true,
     "multiple_browser_clients": true,
     "exclusive_control_client": false,
-    "network_scope": "local_by_default"
+    "network_scope": "local_by_default",
+    "implementation": "pit/server",
+    "hardware_status": "Eamon reports Pi 4 kiosk and T-Beam running; local simulator tests pass"
   },
   "baseline": {
     "source_priority": "connected_kart_over_historical_repository",
@@ -134,5 +159,23 @@
     "controller_id": 69,
     "firmware_name": "no_hw_limits",
     "motor_temp_sensors_wired": false
+  },
+  "ota": {
+    "transport": "provisioned_wifi",
+    "maintenance_only": true,
+    "authentication_required": true,
+    "credentials_in_git": false,
+    "dual_app_slots": true,
+    "automatic_health_rollback": false,
+    "live_update_verified": true
+  },
+  "integration": {
+    "installed_kart1_firmware": "0.2.1-bench telemetry-only",
+    "command_firmware_hardware_validated": false,
+    "required_write_identity": "commissioned BLE MAC plus VESC UUID and firmware 6.00",
+    "temporary_limits": "fresh runtime copy, only currentMaxScale changed, complete subset verified",
+    "radio_contract": "GoKartProtocol v1 unchanged at 1 Hz",
+    "eamon_source_commit": "d91422b",
+    "colin_source_commit": "544b498"
   }
 }

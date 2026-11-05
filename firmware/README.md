@@ -1,6 +1,8 @@
 # Firmware
 
-Two Arduino sketches plus two small shared libraries. **Status: compiles; not yet
+Two integrated Arduino sketches plus shared libraries. The tested PlatformIO
+telemetry recovery image remains in `heltec/`; removable experiments remain in
+`bench-control/`. See [integration guide](../docs/integration.md). **Status: compiles; not yet
 run on hardware** except where this file says otherwise. Everything here follows the
 owner's reliability rule in `docs/requirements.md`: a kart never writes to its VESC
 because a link dropped or returned; boot and reconnect are read-only.
@@ -60,13 +62,15 @@ Both boards store WiFi credentials in flash, never in source. Over USB:
 
 ```
 wifi <ssid> <password>
-otapw <password>        # optional ArduinoOTA password
+otapw <password>        # required for integrated kart OTA
 reboot
 ```
 
-They then appear as `gokart-N.local` (kart N) and `gokart-pit-radio.local` and accept
-`./build.sh kart ota gokart-N.local` from any machine on the same network. Pit WiFi
-is the intended place for this; it is not needed on the track.
+The integrated kart requires a non-empty `otapw` and local `maintenance on`
+with a verified, fresh, stationary VESC and idle commands. It pauses BLE/LoRa
+without writing the VESC and opens authenticated OTA for ten minutes. Use
+`maintenance off` to close it. OTA is off after reboot. The base's existing OTA
+workflow is unchanged. See [integration guide](../docs/integration.md#maintenance-ota).
 
 ## Kart wiring (Heltec V4.3)
 
@@ -102,21 +106,31 @@ result code in its next telemetry; the host retries until it sees the echo. See
 
 ## What the kart does with a command
 
-- `SET_MODE n`: sends the baseline limits with only `l_current_max_scale` changed
-  (ECO 80/140, NORMAL 100/140, SPORT 1.0, straight from the Core2 dashboard), asks the
-  VESC for an ack, then re-reads GET_MCCONF and reports `applied` only if the live
-  scale matches. Battery current limits are never sent.
-- `STOP`: ramps the scale 0.6, 0.3, 0.1, 0 over about 1.5 s and holds. Mechanical
-  brakes and hardwired throttle are untouched; the kart coasts.
-- `START`: re-applies the requested mode, or the scale observed before the stop.
-- Nothing is written at boot, on VESC reconnect, on WiFi/LoRa/GPS loss, or when a
-  retransmitted command arrives. `mode_actual` comes from a GET_MCCONF re-read
-  every 10 s, so the pit sees the truth, including after a VESC power cycle.
-- Build with `-DENABLE_VESC_WRITES=0` for a telemetry-only kart; every write command
-  is then answered `rejected`. The default build has writes enabled because the
-  pit start/stop and mode buttons are the point; this is the one place this branch
-  goes further than `docs/requirements.md` ("profile writes remain disabled until
-  validated") and it is flagged for the owner's review.
+First commission the BLE MAC (`vescmac`) and VESC UUID (`vescuuid HEX24`). Writes
+require firmware 6.00 and the pinned UUID; a matching advertisement alone is
+insufficient. `status` reports identity verification. See the per-kart setup in
+[the integration guide](../docs/integration.md#commission-the-integrated-node-before-command-testing).
+
+- Each step requests fresh GET_MCCONF, copies the live unrelated limits, sends
+  `COMM_SET_MCCONF_TEMP` with `store=0`, requests an ack, and verifies the complete
+  transmitted subset plus unchanged battery-current limits. Timeout/mismatch
+  ends the transaction with unknown; it is not automatically retried.
+- SET_MODE uses the historical ECO 80/140, NORMAL 100/140, SPORT 1.0 current scales.
+  These are prototype behavior, not the owner's final top-speed profiles.
+- STOP clamps each 0.6 / 0.3 / 0.1 / 0 step to the newly observed scale, so it
+  never increases the allowance. The ramp ends on any failed step. STOPPED is
+  reported only after the observed scale is zero. Mechanical brakes are unchanged.
+- START re-applies the requested mode or the scale freshly captured before STOP.
+  It does not request wheel movement. No configuration write occurs on boot,
+  reconnect or communication loss, and pending transactions do not resume.
+- STOP may supersede an active transaction, whose outcome becomes unknown. Other
+  overlaps are rejected; recent duplicate requests report their cached result.
+- `ENABLE_VESC_WRITES=1` is still this integrated command build's default, with
+  identity/freshness gates. A `0` build rejects writes. Colin's installed
+  `firmware/heltec` remains telemetry-only and has no command/write path.
+
+These safeguards are compiled/offline-tested and not yet validated against a
+real VESC through the pit. See [current handoff](../HANDOFF.md).
 
 ## GET_MCCONF field offsets
 
@@ -156,9 +170,15 @@ before anything is trusted:
   The board shipped running Meshtastic; the first flash needed a 1200-baud touch
   to reach the bootloader, after which it enumerates as "USB JTAG/serial debug
   unit" and normal uploads work.
-- Not verified: GPS fix and PPS (indoors so far), any LoRa packet over the air,
-  OLED on the T-Beam, OTA, and everything on the kart side (front-end control,
-  GPS pin order, PPS slotting, VESC UART wiring, OLED, power draw).
-  First bench steps: flash base, confirm `stat` lines and GPS fix on USB; flash
-  kart with no VESC attached, confirm it appears in the base's `tele` lines;
-  then attach the VESC over USB-powered bench and watch `status`.
+- Not verified: GPS fix/PPS, real VESC STOP/START with the new guards,
+  modified maintenance OTA, field coverage, UART wiring and power isolation.
+  Earlier kart-2 radio/ping/OTA results above are collaborator-reported. See the
+  shared handoff for the installed kart-1 state and next reception test.
+
+## Integration validation
+
+See [tested toolchain and native/simulator checks](../docs/integration.md#build-and-test).
+The native tests exercise the real VESC parser and write transaction against the
+captured identity/configuration, including lower-than-0.6 STOP, preservation of
+non-default limits, wrong identity, missing replies, disconnect, readback mismatch,
+transport failure and timer rollover. Compilation/tests do not deploy firmware.

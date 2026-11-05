@@ -1,0 +1,29 @@
+{
+  "motor": {
+    "foc_offsets_current__0": {
+      "original": 2039.4830322265625,
+      "current": 2039.76904296875
+    },
+    "foc_offsets_current__1": {
+      "original": 2041.508056640625,
+      "current": 2041.4930419921875
+    },
+    "foc_offsets_current__2": {
+      "original": 2048.761962890625,
+      "current": 2048.462890625
+    },
+    "foc_offsets_voltage__0": {
+      "original": -0.007,
+      "current": -0.0049
+    },
+    "foc_offsets_voltage__1": {
+      "original": 0.0042,
+      "current": 0.0051
+    },
+    "foc_offsets_voltage__2": {
+      "original": 0.0027,
+      "current": -0.0002
+    }
+  },
+  "app": {}
+}

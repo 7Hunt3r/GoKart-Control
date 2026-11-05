@@ -24,8 +24,10 @@ sudo cp /opt/gokart-pit/server/map/map.manresa.json /opt/gokart-pit/server/map/m
 ```
 
 
-Status: **no imagery, course line or pit location is bundled.** The pit map
-currently draws karts and the base on a blank local east/north grid in metres.
+The public Manresa image and preset geometry are bundled. The active shop
+preset references local-only licensed imagery; a fresh clone can show the map
+grid/pins but needs the appropriate local image or a different preset. Do not
+substitute Manresa imagery under shop bounds. Course geometry remains provisional.
 
 `map.json` in this folder drives both the pit map background and
 `GET /map/package.json` (the endpoint kart displays will fetch on the pit Wi-Fi,
@@ -62,7 +64,7 @@ The pit draws the image by placing its four bounds in local metres
 few hundred metres across; it is not a reprojection. The image must already
 be in (or warped to) plain WGS84 lat/lon (EPSG:4326) with north up.
 
-## Adding CT ECO imagery later (proposed procedure, not yet done)
+## Recreating or replacing CT ECO imagery
 
 1. Download the 2023 3-inch orthoimagery tile(s) covering Manresa Island from
    https://maps.cteco.uconn.edu/data/flight2023/ (GeoTIFF). Keep the original

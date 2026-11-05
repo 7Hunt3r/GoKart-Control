@@ -19,3 +19,12 @@ target/
 *.local
 
 # OS / editor noise is handled by the global gitignore
+
+# Heltec build products and device-local secrets/backups
+firmware/heltec/.pio/
+firmware/heltec/.local/
+firmware/heltec/include/secrets.h
+firmware/heltec/include/wifi.local.h
+
+# Isolated bench diagnostic build output
+firmware/bench-control/.pio/

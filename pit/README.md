@@ -10,6 +10,12 @@ Contract with the modem: [`firmware/base-tbeam-s3/SERIAL_PROTOCOL.md`](../firmwa
 
 ## Status: what is verified and what is not
 
+Eamon’s November 5 16:20 handoff reports the Pi 4 kiosk/T-Beam running and kart 2
+LoRa reception, ping and OTA verified without a VESC. Those later hardware
+reports supersede the original “untested” rows below for initial Pi/kiosk/radio
+bring-up; unplug recovery, first-boot provisioning and physical motor commands
+still need separate checks. See [shared handoff](../HANDOFF.md).
+
 | Item | Status |
 | --- | --- |
 | Server + simulator command loop (TCP and pty), outcome table, SSE stream, login, logs | **Tested on the Mac** (macOS, Python 3.13, pyserial 3.5) with `pit/tests/` and manual runs |
@@ -34,7 +40,7 @@ pit/
   server/pitcore.py        fleet state, staleness, derived values, command delivery (pure logic)
   server/link.py           T-Beam link: serial auto-find + reconnect, or TCP to the simulator
   server/static/           index.html (operator), kiosk.html (1024x600 touch), app.js, style.css, login.html
-  server/map/              map.json + README (how to add CT ECO imagery; none bundled)
+  server/map/              map presets + public CT ECO imagery; licensed assets local-only
   server/config.example.json   copy to config.json (gitignored): shared password etc.
   sim/sim_tbeam.py         simulated T-Beam (pty or TCP), eight karts, honours commands
   tests/                   test_core.py (unit), test_e2e.py (simulator + server)
@@ -88,7 +94,7 @@ python3 -I pit/tests/test_e2e.py
   contract formula and is labelled uncalibrated. GPS mph = gps_kph x 0.621371.
 - **Commands.** Seq 1-255 rolling, persisted in `logs/cmdseq.json` across
   restarts, and never a seq that any kart currently reports as `last_cmd_seq`
-  (a kart ignores a repeat of its last seq, so reuse would fake an ack).
+  (the kart caches recent request identities/results, so reuse needs care).
   Retransmit every 1.5 s, up to 5 retransmits (6 sends), until every addressed
   kart that is online echoes the seq; per-kart outcomes come from `cmd_result`.
   A fleet command has eight outcomes: `pending`, `received`, `accepted`,

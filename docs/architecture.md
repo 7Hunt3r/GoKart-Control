@@ -1,7 +1,11 @@
 # Architecture and interface plan
 
-This is the target design, not a deployed system. Framework and radio protocol
-choices remain open pending hardware checks.
+This is the target design, not a deployed fleet system. A
+[Heltec bench implementation](../firmware/heltec/README.md) now exercises BLE
+telemetry, GPS serial data, raw LoRa TX and authenticated maintenance OTA.
+The integrated branch also contains Eamon’s kart/base firmware and Python pit
+server/kiosk. The shared 46-byte GoKartProtocol runs at 1 Hz per kart; the
+on-kart Pi display and field validation remain open. See [integration](integration.md).
 
 ```mermaid
 flowchart LR
@@ -16,7 +20,9 @@ flowchart LR
 
 The diagram shows one kart; repeat it up to eight times. Kart-to-kart position
 sharing can use direct reception or a pit fleet summary; choose after airtime
-and coverage measurements. Neither path is currently implemented.
+and coverage measurements. The bench transmitter sends direct broadcasts;
+the integrated node also receives fleet packets. Eamon reports a kart-2/base
+bench link, while kart-1 receipt and full fleet operation remain unverified.
 
 ## Boundaries
 
@@ -24,7 +30,7 @@ and coverage measurements. Neither path is currently implemented.
 | --- | --- | --- |
 | VESC | Hardwired throttle/reverse, motor control, configured protection | A tested guarantee of accessory-failure isolation |
 | Kart Pi | Touchscreen rendering, map assets, presentation cache and UI requests | Ownership of the VESC link or control policy |
-| Heltec V4.3 + L76K | VESC BLE client, telemetry, GPS, LoRa, validation/serialization of supervisory requests | Verified timing, fault isolation or implemented profile writes |
+| Heltec V4.3 + L76K | VESC BLE client, telemetry, GPS, LoRa, validation/serialization of supervisory requests | Verified timing, fault isolation or hardware-validated profile writes |
 | Pit Pi 4 | Fleet/race state, authentication, command arbitration, radio session | An internet/cloud dependency |
 | Browser | Operator interaction and live state | Direct ownership of the radio or authoritative command success |
 
@@ -60,12 +66,23 @@ remains unselected. Power-source isolation is not yet tested.
 Hardware capability sources: [Heltec V4](https://heltec.org/project/wifi-lora-32-v4/),
 [Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3).
 Capability documentation does not establish this project's runtime performance.
+See the [bench report](heltec-bench-test.md) for measured observations.
+
+OTA is explicit parked maintenance: physical USER-button hold or local serial
+request with fresh zero-ERPM telemetry, authenticated on provisioned Wi-Fi.
+Maintenance pauses BLE and LoRa without writing the VESC; successful OTA reboots
+only the Heltec. Startup is read-only reconciliation. OTA defaults off after
+reboot in both kart images. The recovery image also defaults TX off; the
+integrated fleet node transmits automatically once commissioned. Its maintenance
+entry is local USB with a pinned/verified stationary VESC. Credentials and credential-bearing binaries are excluded from Git.
+This bench updater is not a signed fleet deployment or automatic rollback system.
 
 ## Proposed contracts
 
 The [agreed telemetry scope and proposed field conventions](requirements.md#agreed-telemetry-fields)
-are the starting point for the shared application model. Final wire encoding and
-update rates remain open; telemetry approval does not imply a deployed interface.
+are the starting point for the shared application model. The current shared
+radio/serial contracts are recorded in [integration](integration.md); further
+rate increases require coordinated radio scheduling and field measurements.
 
 Use versioned records with explicit units, timestamp/age and validity. VESC
 telemetry carries ERPM, currents, voltage, duty, temperatures and faults. GPS
