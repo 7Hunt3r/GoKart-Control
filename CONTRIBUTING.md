@@ -2,7 +2,7 @@
 
 ## Project boundaries
 
-Use this project's independent repository in `~/Projects/50 Day/gokart-dashboard/`.
+Use this project's independent repository in `~/Projects/50 Day/GoKart Control/`.
 Before Git operations, confirm `git rev-parse --show-toplevel` points here. Remotes
 use SSH. Do not initialize repositories in Projects or category folders.
 

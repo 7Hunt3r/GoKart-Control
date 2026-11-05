@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "hardware_baseline_captured_application_not_implemented",
-  "project": "gokart-dashboard",
+  "project": "GoKart Control",
   "site": {
     "name": "Manresa Island",
     "state": "CT",

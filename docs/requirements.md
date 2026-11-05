@@ -8,7 +8,7 @@ requirements from proposed implementation and unresolved details. See the
 
 ## Confirmed requirements
 
-- Category: 50 Day. Canonical project: ~/Projects/50 Day/gokart-dashboard/.
+- Category: 50 Day. Canonical project: ~/Projects/50 Day/GoKart Control/.
 - Fleet: eight karts; one to three development karts, including one each for
   the owner and Eamon. The exact number ready for testing is not yet known.
 - Site: Manresa Island, Connecticut, USA.

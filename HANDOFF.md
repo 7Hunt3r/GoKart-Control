@@ -113,7 +113,7 @@ an event log and verified component ratings.
 
 The documentation, inspection tools, baseline capture and hardware photos are
 versioned together in this repository. Collaborators should clone or update from
-`git@github.com:colinfost3r/gokart-dashboard.git` and start with README.md and this
+`git@github.com:colinfost3r/GoKart-Control.git` and start with README.md and this
 handoff. Use `git status` to distinguish subsequent local work from committed
 project state. Future commits and pushes still require the owner's request.
 

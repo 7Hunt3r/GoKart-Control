@@ -1,6 +1,6 @@
-# Gokart project conventions
+# GoKart Control project conventions
 
-- Canonical project: ~/Projects/50 Day/gokart-dashboard/. Reuse this repository.
+- Canonical project: ~/Projects/50 Day/GoKart Control/. Reuse this repository.
 - Read README.md and HANDOFF.md before implementation; inspect local git status.
 - The connected kart's measured baseline takes precedence over the old M5Stack
   repository for existing hardware/settings. User requirements govern desired behavior.

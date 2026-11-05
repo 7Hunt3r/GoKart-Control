@@ -1,4 +1,4 @@
-# Gokart dashboard
+# GoKart Control
 
 A dashboard and shared pit system for eight electric karts at Manresa Island,
 Connecticut. Each kart uses a Raspberry Pi 3 Model B, a 7-inch LESOWN L7-family touchscreen (1024×600 per supplied manual), a
@@ -55,11 +55,11 @@ sensors wired; motor temperature must display as unavailable, not 0 C.
 
 ## Local setup
 
-Canonical location: `~/Projects/50 Day/gokart-dashboard/`.
+Canonical location: `~/Projects/50 Day/GoKart Control/`.
 
 ```sh
-git clone git@github.com:colinfost3r/gokart-dashboard.git "$HOME/Projects/50 Day/gokart-dashboard"
-cd "$HOME/Projects/50 Day/gokart-dashboard"
+git clone git@github.com:colinfost3r/GoKart-Control.git "$HOME/Projects/50 Day/GoKart Control"
+cd "$HOME/Projects/50 Day/GoKart Control"
 python3 -B -m unittest discover -s tests -v
 ```
 
@@ -96,5 +96,5 @@ until the first runnable milestone has a clear interface and acceptance checks.
 - Historical app: [vesc-ble-dashboard](https://github.com/eamondoherty618-prog/vesc-ble-dashboard).
 - [Upstream schema provenance and license](third_party/vesc_tool/README.md).
 
-The project is private. No overall redistribution license has been chosen.
+The repository is public. No overall redistribution license has been chosen.
 Vendored VESC Tool files retain their own GPL-3.0-or-later terms.
