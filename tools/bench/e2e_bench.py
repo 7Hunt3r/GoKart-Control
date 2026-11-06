@@ -50,6 +50,16 @@ def main():
     a = ap.parse_args()
     pit, k = a.pit, a.kart
     kurl = a.kart_url or f"http://gokart-kart-{k}.local:8081"
+    if not a.kart_url:                      # .local can fail from the pit Pi; fall back to the last IP the pit saw for this kart
+        try:
+            urllib.request.urlopen(kurl + "/api/state", timeout=3)
+        except Exception:
+            import socket
+            for cand in (f"gokart-kart-{k}", f"192.168.150.{110 + k - 1}", "192.168.150.111"):
+                try:
+                    socket.gethostbyname(cand); urllib.request.urlopen(f"http://{cand}:8081/api/state", timeout=3); kurl = f"http://{cand}:8081"; break
+                except Exception:
+                    continue
 
     # ---- pit + radio
     try:

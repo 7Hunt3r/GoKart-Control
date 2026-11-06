@@ -65,11 +65,13 @@ String   vescUuid; bool vescIdentityBad = false; uint32_t vescIdCheckedMs = 0;
 TinyGPSPlus gps;
 HardwareSerial& gpsSerial = Serial1;
 struct GpsCfg { uint32_t baud; bool swap; };
-static const GpsCfg GPS_CFGS[] = { {9600,false}, {9600,true}, {115200,false}, {115200,true}, {38400,false}, {38400,true} };
+// Pins are never swapped: the V4.3 wiring (RX 39 / TX 38) is verified, and driving the module's TX line from a
+// swapped attempt left the UART dead until a power cycle (bench 2026-11-06). Only the baud is searched.
+static const GpsCfg GPS_CFGS[] = { {9600,false}, {115200,false}, {38400,false} };
 static const int GPS_CFG_N = sizeof(GPS_CFGS) / sizeof(GPS_CFGS[0]);
 int      gpsCfgIdx = 0;
 bool     gpsLocked = false, gpsConfigured = false; uint32_t gpsLockedMs = 0, gpsFixCount = 0, gpsLineMs = 0;
-uint32_t gpsDetectStartMs = 0, gpsResetMs = 0; int gpsResets = 0;   // detection watchdog: hard-reset the module when no baud locks
+uint32_t gpsDetectStartMs = 0, gpsResetMs = 0, gpsConfigMs = 0; int gpsResets = 0;   // detection watchdog: hard-reset the module when no baud locks
 bool     gpsLineOn = true;                 // {"t":"gps"} USB line on every new fix (up to 5 Hz) for the kart Pi
 double   baseLat = 0, baseLon = 0; uint32_t baseFixMs = 0;   // pit radio's own fix from the beacon (for position-domain correction)
 uint32_t gpsCfgStartMs = 0, gpsGoodAtStart = 0, gpsLastCharMs = 0;
@@ -364,8 +366,16 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
       if (!startWrite(s)) cmdResult = GK_RES_NO_VESC;
       break;
     }
-    case GK_CMD_RACE: {                                    // arg = seconds until GO
-      if (arg < 1 || arg > 30) { cmdResult = GK_RES_REJECTED; break; }
+    case GK_CMD_RACE: {                                    // arg = seconds until GO; 0 or 100+position = race finished
+      if (arg == 0 || (arg >= 100 && arg <= 100 + GK_MAX_KARTS)) {
+        bool wasHold = raceHold; raceHold = false;
+        Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"finish\",\"position\":%d}\n", kartId, arg ? (int)(arg - 100) : 0);
+        logf("race: finish%s", wasHold ? " (hold released)" : "");
+        cmdResult = GK_RES_APPLIED;
+        if (wasHold && !stopActive && vescUp() && origValid && writesEnabled()) { if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC; }
+        break;
+      }
+      if (arg > 30) { cmdResult = GK_RES_REJECTED; break; }
       uint32_t nowU = gpsUnix(); uint32_t goInMs;
       if (issued && nowU && issued + arg > nowU) goInMs = (issued + arg - nowU) * 1000UL;   // shared clock: same instant on every kart
       else if (issued && nowU) goInMs = 0;                                                 // arrived after GO: release now
@@ -513,10 +523,12 @@ static void serviceVesc() {
 }
 
 // ---------------------------------------------------------------- gps
+static bool gpsSerialUp = false;
 static void gpsApplyCfg(int idx) {
   const GpsCfg& c = GPS_CFGS[idx];
-  gpsSerial.end();
-  gpsSerial.begin(c.baud, SERIAL_8N1, c.swap ? PIN_GNSS_TX : PIN_GNSS_RX, c.swap ? PIN_GNSS_RX : PIN_GNSS_TX);
+  if (!gpsSerialUp) { gpsSerial.setRxBufferSize(2048); gpsSerial.begin(c.baud, SERIAL_8N1, PIN_GNSS_RX, PIN_GNSS_TX); gpsSerialUp = true; }
+  else gpsSerial.updateBaudRate(c.baud);              // never end()/begin() again: keeps the pin matrix and driver state intact
+  while (gpsSerial.available()) gpsSerial.read();
   gpsCfgIdx = idx; gpsCfgStartMs = millis(); gpsGoodAtStart = gps.passedChecksum();
 }
 
@@ -527,30 +539,42 @@ static void gpsSend(const char* body) {
 }
 // Once the module answers: all three constellations it can track, GGA+RMC only, 5 Hz, 115200 baud.
 // Config is re-sent after every (re)detection, so a module that lost power comes back the same way.
-static void gpsConfigure() {
-  gpsSend("PCAS04,7");                          // GPS + BDS + GLONASS (default is GPS + BDS)
-  gpsSend("PCAS03,1,0,0,0,1,0,0,0,0,0,,,0,0");  // GGA and RMC only (no GSV/GSA/VTG/GLL chatter)
-  gpsSend("PCAS02,200");                        // 5 Hz position updates
-  if (GPS_CFGS[gpsCfgIdx].baud != 115200) {
-    gpsSend("PCAS01,5");                        // 115200 baud; 5 Hz GGA+RMC does not fit in 9600
-    delay(50); gpsSerial.end();
-    gpsSerial.begin(115200, SERIAL_8N1, GPS_CFGS[gpsCfgIdx].swap ? PIN_GNSS_TX : PIN_GNSS_RX, GPS_CFGS[gpsCfgIdx].swap ? PIN_GNSS_RX : PIN_GNSS_TX);
-    for (int i = 0; i < GPS_CFG_N; i++) if (GPS_CFGS[i].baud == 115200 && GPS_CFGS[i].swap == GPS_CFGS[gpsCfgIdx].swap) gpsCfgIdx = i;
+// Blind recovery for a module whose NMEA output got switched off (seen 2026-11-06: output disabled, PPS still
+// ticking, and the setting survived a VCC cycle because the module has backup power). Re-enable the sentences and
+// 1 Hz at every baud we know, and put the module at 9600. Then the normal search finds it.
+static void gpsRecover(const char* why) {
+  logf("gps recover (%s)", why);
+  const uint32_t bauds[] = {115200, 38400, 9600};
+  for (uint32_t b : bauds) {
+    gpsSerial.updateBaudRate(b); delay(20);
+    gpsSend("PCAS03,1,1,1,1,1,1,0,0,0,0,,,0,0");      // GGA GLL GSA GSV RMC VTG on
+    gpsSend("PCAS02,1000");                           // 1 Hz
+    if (b != 9600) gpsSend("PCAS01,1");               // and come to 9600
+    delay(150);
   }
-  gpsConfigured = true; logf("gps configured: GPS+BDS+GLONASS, GGA+RMC, 5 Hz, 115200");
+  gpsLocked = false; gpsConfigured = false; gpsDetectStartMs = millis();
+  gpsApplyCfg(0);
+}
+
+static void gpsConfigure() {
+  gpsSend("PCAS03,1,0,0,0,1,0,0,0,0,0,,,0,0");  // GGA and RMC only (no GSV/GSA/VTG/GLL chatter)
+  gpsSend("PCAS02,200");                        // 5 Hz position updates: two sentences at 5 Hz is ~725 B/s, fits 9600
+  gpsSend("PCAS04,7");                          // GPS + BDS + GLONASS. LAST: the module restarts on a constellation
+  delay(600);                                   // change and drops whatever arrives during the restart.
+  // The baud is deliberately left alone: at 9600 every reboot finds the module on the first try.
+  gpsConfigured = true; gpsConfigMs = millis(); logf("gps configured: GGA+RMC, 5 Hz, GPS+BDS+GLONASS at %lu", (unsigned long)GPS_CFGS[gpsCfgIdx].baud);
 }
 
 // Power-cycle + reset the L76K (it comes back at its 9600/1 Hz defaults and gets configured again).
 static void gpsHardReset(const char* why) {
   gpsResets++; gpsResetMs = millis();
   logf("gps hard reset (%s), #%d", why, gpsResets);
-  gpsSerial.end();
   digitalWrite(PIN_GNSS_POWER, HIGH); delay(300);          // P-FET: HIGH = off
   digitalWrite(PIN_GNSS_RST, LOW);
   digitalWrite(PIN_GNSS_POWER, LOW);  delay(150);
   digitalWrite(PIN_GNSS_RST, HIGH);   delay(100);
   gpsLocked = false; gpsConfigured = false; gpsDetectStartMs = millis();
-  gpsApplyCfg(0);
+  gpsRecover("after hard reset");
 }
 
 static void serviceGps() {
@@ -564,7 +588,10 @@ static void serviceGps() {
     else if (now - gpsCfgStartMs > GPS_DETECT_STEP_MS) gpsApplyCfg((gpsCfgIdx + 1) % GPS_CFG_N);
     // nothing parses at any baud for two full sweeps: the module is wedged or at an odd setting -> reset it
     if (!gpsLocked && now - gpsDetectStartMs > 2UL * GPS_CFG_N * GPS_DETECT_STEP_MS && now - gpsResetMs > 120000UL && gpsResets < 20) gpsHardReset("no baud locked");
-  } else if (now - gpsLastCharMs > 15000) { gpsLocked = false; gpsDetectStartMs = now; logf("gps silent, re-detecting"); gpsApplyCfg(gpsCfgIdx); }
+  } else if (now - gpsLastCharMs > (gpsConfigured && now - gpsConfigMs < 10000 ? 3000UL : 15000UL)) {
+    gpsLocked = false; gpsDetectStartMs = now; logf("gps silent, re-detecting");
+    if (gpsConfigured && now - gpsConfigMs < 10000) gpsRecover("silent after configure"); else gpsApplyCfg(gpsCfgIdx);
+  }
   else if (!gpsConfigured && now - gpsLockedMs > 500) gpsConfigure();
   if (gps.location.isValid() && gps.location.isUpdated()) {
     fixLat = gps.location.lat(); fixLon = gps.location.lng(); lastFixMs = now; gpsFixCount++;
@@ -768,9 +795,42 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
   else if (!strcmp(line, "gpsreset")) gpsHardReset("console");
+  else if (!strcmp(line, "gpsrecover")) gpsRecover("console");
+  else if (!strcmp(line, "gpscold")) {                    // 5 s power-off (drain backup), WAKE pulse, then watch the TX line at 9600 for 4 s
+    digitalWrite(PIN_GNSS_POWER, HIGH); digitalWrite(PIN_GNSS_WAKE, LOW); delay(5000);
+    digitalWrite(PIN_GNSS_RST, LOW); digitalWrite(PIN_GNSS_POWER, LOW); delay(200); digitalWrite(PIN_GNSS_RST, HIGH); delay(50); digitalWrite(PIN_GNSS_WAKE, HIGH);
+    gpsSerial.updateBaudRate(9600); while (gpsSerial.available()) gpsSerial.read();
+    uint32_t t0 = millis(), edges = 0, bytes = 0; int last = digitalRead(PIN_GNSS_RX); char first[61] = ""; size_t n = 0;
+    while (millis() - t0 < 4000) { int a = digitalRead(PIN_GNSS_RX); if (a != last) { edges++; last = a; } while (gpsSerial.available()) { int c = gpsSerial.read(); bytes++; if (n < 60 && c >= 32 && c < 127 && c != '"' && c != '\\') first[n++] = (char)c; } }
+    first[n] = 0;
+    logf("gpscold: %lu rx edges, %lu bytes in 4 s after a 5 s power-off: %s", (unsigned long)edges, (unsigned long)bytes, first);
+    gpsLocked = false; gpsConfigured = false; gpsDetectStartMs = millis(); gpsApplyCfg(0);
+  }
+  else if (!strcmp(line, "gpspin")) {                     // hardware check: edges on the RX pad (39) and PPS (41) in 1 s
+    uint32_t t0 = millis(), e39 = 0, e41 = 0; int l39 = digitalRead(PIN_GNSS_RX), l41 = digitalRead(PIN_GNSS_PPS), h39 = 0, n = 0;
+    while (millis() - t0 < 1000) { int a = digitalRead(PIN_GNSS_RX), b = digitalRead(PIN_GNSS_PPS); if (a != l39) { e39++; l39 = a; } if (b != l41) { e41++; l41 = b; } h39 += a; n++; }
+    logf("gpspin: rx edges %lu (high %d%%), pps edges %lu, pwr pin %d, wake %d, rst %d, pps_count %lu", (unsigned long)e39, n ? 100 * h39 / n : 0, (unsigned long)e41, digitalRead(PIN_GNSS_POWER), digitalRead(PIN_GNSS_WAKE), digitalRead(PIN_GNSS_RST), (unsigned long)ppsCount);
+  }
+  else if (!strcmp(line, "gpsdump")) {                    // raw UART bytes for 2 s, escaped, so a silent/garbled module is obvious
+    char dump[321]; size_t n = 0; uint32_t t0 = millis(); uint32_t total = 0;
+    while (millis() - t0 < 2000) { while (gpsSerial.available()) { int c = gpsSerial.read(); total++; if (n < 300) { if (c >= 32 && c < 127 && c != '"' && c != '\\') dump[n++] = (char)c; else n += snprintf(dump + n, sizeof dump - n, "<%02X>", c & 0xFF); } } delay(1); }
+    dump[n < 320 ? n : 320] = 0;
+    logf("gpsdump %lu bytes at %lu baud locked=%d: %s", (unsigned long)total, (unsigned long)GPS_CFGS[gpsCfgIdx].baud, gpsLocked, dump);
+  }
+  else if (!strcmp(line, "gpstest") && arg) {             // gpstest 9600|115200|38400: listen 3 s at that baud and count good sentences
+    uint32_t b = (uint32_t)atol(arg); int idx = -1;
+    for (int i = 0; i < GPS_CFG_N; i++) if (GPS_CFGS[i].baud == b) idx = i;
+    if (idx < 0) logf("gpstest: baud must be one of 9600/115200/38400");
+    else {
+      gpsLocked = false; gpsApplyCfg(idx); uint32_t g0 = gps.passedChecksum(), f0 = gps.failedChecksum(), t0 = millis(), total = 0;
+      while (millis() - t0 < 3000) { while (gpsSerial.available()) { gps.encode(gpsSerial.read()); total++; } delay(1); }
+      logf("gpstest %lu: %lu bytes, %lu good, %lu bad sentences in 3 s", (unsigned long)b, (unsigned long)total, (unsigned long)(gps.passedChecksum() - g0), (unsigned long)(gps.failedChecksum() - f0));
+      gpsDetectStartMs = millis();
+    }
+  }
   else if (!strcmp(line, "gpsline") && arg) { gpsLineOn = !strcmp(arg, "on"); prefs.putBool("gpsline", gpsLineOn); logf("gps fix line %s", gpsLineOn ? "on" : "off"); }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | gpsreset | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | gpsreset | gpsrecover | gpsdump | gpstest BAUD | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
 }
 
