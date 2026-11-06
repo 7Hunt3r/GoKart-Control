@@ -1,0 +1,52 @@
+#cloud-config
+# GoKart kart display (Pi 3 B): first-boot configuration (cloud-init NoCloud).
+# Generated from this template by gen_cloudinit.py; do not edit build/user-data by hand.
+# Adapted from pit/sdcard/cloud-init/user-data.tmpl (booted the pit Pi 4 on 2026-11-05).
+hostname: {{HOSTNAME}}
+manage_etc_hosts: true
+timezone: {{TIMEZONE}}
+keyboard:
+  model: pc105
+  layout: us
+
+# Rename the image's default UID-1000 user (keeps its sudo/video/input/dialout groups),
+# and authorize the Mac's SSH key so kart/deploy.sh works with no password.
+user:
+  name: {{USER}}
+  shell: /bin/bash
+  lock_passwd: false
+  passwd: {{PASSWORD_HASH}}
+  sudo: "ALL=(ALL) NOPASSWD:ALL"
+  ssh_authorized_keys:
+    - {{SSH_PUBKEY}}
+ssh_pwauth: true
+
+package_update: true
+packages:
+  - rsync
+  - curl
+
+write_files:
+  - path: /opt/gokart-kart/server/config.json
+    permissions: "0644"
+    owner: root:root
+    content: {{KART_CONFIG_JSON}}
+  - path: /root/tailscale.key
+    permissions: "0600"
+    owner: root:root
+    content: {{TAILSCALE_AUTHKEY}}
+  - path: /opt/gokart-kart-payload.tar.gz
+    permissions: "0644"
+    owner: root:root
+    encoding: b64
+    content: {{PAYLOAD_B64}}
+
+runcmd:
+  - [systemctl, enable, --now, ssh]
+  - mkdir -p /opt/gokart-kart && tar xzf /opt/gokart-kart-payload.tar.gz -C /opt/gokart-kart --no-same-owner
+  - bash /opt/gokart-kart/sdcard/firstboot.sh {{USER}} {{HOSTNAME}} {{WIFI_SSID}} {{KART_ID}} 2>&1 | tee /var/log/gokart-kart-firstboot.log
+
+power_state:
+  mode: reboot
+  message: "GoKart kart display first boot complete, rebooting"
+  condition: true

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1024, height=600, initial-scale=1, user-scalable=no">
+<title>GoKart Kart Display</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="banners">
+  <div id="simBanner" class="banner sim hidden">SIMULATION: not a real kart</div>
+  <div id="connBanner" class="banner bad hidden"></div>
+  <div class="alerts">
+    <div id="stopBanner" class="banner stop hidden">STOPPED</div>
+    <div id="slowBanner" class="banner slow hidden">SLOW</div>
+  </div>
+</div>
+<div class="main">
+  <section class="dash">
+    <div class="chips">
+      <span id="kartChip" class="chip id">KART ?</span>
+      <span id="pitChip" class="chip">PIT ?</span>
+      <span id="vescChip" class="chip">VESC ?</span>
+      <span id="gpsChip" class="chip">GPS ?</span>
+    </div>
+    <div class="speed">
+      <div id="mph" class="big">--</div>
+      <div class="unit"><span>MPH</span><small id="mphSrc">GPS</small></div>
+    </div>
+    <div id="mphNote" class="note"></div>
+    <div class="batt">
+      <div class="battrow"><span id="battPct" class="mid">--</span><span id="battV" class="volts">-- V</span></div>
+      <div class="bar"><div id="battBar"></div></div>
+      <div id="battNote" class="note"></div>
+    </div>
+    <div class="mode">
+      <div class="modeline"><span class="lbl">MODE</span> <span id="modeNow" class="modenow">--</span></div>
+      <div id="modeNote" class="note"></div>
+    </div>
+    <div id="faultBox" class="fault hidden"></div>
+    <div class="modebtns">
+      <button class="mbtn" data-mode="0">ECO</button>
+      <button class="mbtn" data-mode="1">NORMAL</button>
+      <button class="mbtn" data-mode="2">SPORT</button>
+    </div>
+    <div id="cmdNote" class="note cmd"></div>
+  </section>
+  <section class="mapwrap">
+    <canvas id="map"></canvas>
+    <div id="mapMsg" class="mapmsg hidden"></div>
+    <div class="mapctl">
+      <button id="followBtn" class="sel">FOLLOW</button>
+      <button data-zoom="in">+</button>
+      <button data-zoom="out">&minus;</button>
+      <button data-zoom="all">ALL</button>
+    </div>
+    <div id="resumeNote" class="resume hidden"></div>
+    <div id="mapNote" class="mapnote"></div>
+  </section>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

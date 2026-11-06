@@ -1,0 +1,7 @@
+# Heltec WiFi LoRa 32 V4.3 running firmware/kart-heltec-v4 -> stable /dev/heltec
+# The ESP32-S3's built-in USB-Serial/JTAG enumerates as Espressif's generic
+# "USB JTAG/serial debug unit" (303a:1001), the same as the pit's T-Beam S3
+# (pit/udev/99-gokart-tbeam.rules, read from a real board 2026-11-05).
+# Only one ESP32-S3 is plugged into a kart Pi, so match VID/PID alone.
+# UNTESTED on a kart Pi.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="heltec", GROUP="dialout", MODE="0660"

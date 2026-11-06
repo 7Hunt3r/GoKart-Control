@@ -1,0 +1,84 @@
+/* GoKart kart driver display, 1024x600 touch, readable in sunlight:
+   black on white, heavy weights, no animation, no external assets. */
+:root {
+  --bg: #ffffff; --ink: #000; --muted: #444; --line: #000;
+  --ok: #007a1f; --warn: #ff9a00; --bad: #d00000; --stale: #8a8a8a; --info: #0b4fb3;
+  font-family: "DejaVu Sans", "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); }
+body { display: flex; flex-direction: column; -webkit-user-select: none; user-select: none; touch-action: none; }
+button { font: inherit; font-weight: 800; border: 3px solid var(--line); border-radius: 10px;
+  background: #fff; color: var(--ink); cursor: pointer; }
+.hidden { display: none !important; }
+
+/* banners: full width, above everything */
+.banner { text-align: center; font-weight: 900; letter-spacing: .05em; padding: 4px 8px; }
+.alerts { display: flex; }
+.alerts .banner { flex: 1; white-space: nowrap; overflow: hidden; }
+.banner.stop { background: var(--bad); color: #fff; font-size: 44px; line-height: 56px; }
+.banner.slow { background: var(--warn); color: #000; font-size: 32px; line-height: 56px; }
+/* with an alert banner showing, the dashboard gives up some height so the mode buttons stay on screen */
+body.alerting .big { font-size: 100px; }
+body.alerting .big.na { font-size: 54px; padding-bottom: 8px; }
+body.alerting .mid { font-size: 42px; }
+body.alerting .mbtn { height: 66px; }
+.banner.bad { background: #000; color: #fff; font-size: 22px; border-bottom: 4px solid var(--bad); }
+.banner.sim { background: repeating-linear-gradient(45deg, #ffd400 0 16px, #111 16px 32px); color: #fff;
+  text-shadow: 0 0 4px #000, 0 0 2px #000; font-size: 15px; padding: 1px; }
+
+.main { flex: 1; display: grid; grid-template-columns: 372px 1fr; min-height: 0; }
+
+/* left: driver dashboard */
+.dash { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-right: 4px solid var(--line); min-height: 0; overflow: hidden; }
+.chips { display: flex; gap: 5px; flex-wrap: nowrap; overflow: hidden; }
+.chip { display: inline-block; padding: 2px 7px; border-radius: 7px; font-weight: 900; font-size: 16px;
+  border: 3px solid var(--stale); color: #fff; background: var(--stale); white-space: nowrap; }
+.chip.ok { background: var(--ok); border-color: var(--ok); }
+.chip.warn { background: var(--warn); border-color: var(--warn); color: #000; }
+.chip.bad { background: var(--bad); border-color: var(--bad); }
+.chip.id { background: #000; border-color: #000; }
+.chip.id.bad { background: var(--bad); }
+
+.speed { display: flex; align-items: flex-end; gap: 8px; line-height: .9; }
+.big { font-size: 128px; font-weight: 900; letter-spacing: -.04em; min-width: 190px; text-align: right; font-variant-numeric: tabular-nums; }
+.big.na { font-size: 64px; color: var(--stale); letter-spacing: 0; padding-bottom: 14px; }
+.unit { display: flex; flex-direction: column; font-weight: 900; font-size: 30px; padding-bottom: 10px; }
+.unit small { font-size: 16px; color: var(--muted); }
+.note { font-size: 15px; font-weight: 700; color: var(--muted); min-height: 18px; }
+.note.cmd { font-size: 16px; color: #000; }
+
+.batt { border-top: 3px solid var(--line); padding-top: 4px; }
+.battrow { display: flex; align-items: baseline; gap: 12px; }
+.mid { font-size: 52px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.volts { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.bar { height: 14px; border: 3px solid var(--line); border-radius: 4px; margin-top: 2px; }
+.bar > div { height: 100%; width: 0; background: var(--ok); }
+.stale .mid, .stale .volts, .stale .modenow { color: var(--stale); }
+
+.mode { border-top: 3px solid var(--line); padding-top: 4px; }
+.modeline { display: flex; align-items: baseline; gap: 10px; }
+.lbl { font-size: 18px; font-weight: 900; color: var(--muted); }
+.modenow { font-size: 34px; font-weight: 900; }
+
+.fault { background: var(--bad); color: #fff; font-weight: 900; font-size: 18px; padding: 3px 8px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.modebtns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: auto; }
+.mbtn { height: 78px; font-size: 21px; padding: 0 2px; position: relative; overflow: hidden; --p: 0; }
+.mbtn::after { content: ""; position: absolute; left: 0; bottom: 0; height: 8px; width: calc(var(--p) * 100%); background: var(--info); }
+.mbtn.actual { background: #000; color: #fff; }
+.mbtn.req:not(.actual) { border-style: dashed; border-color: var(--info); color: var(--info); }
+.mbtn:disabled { opacity: .35; }
+
+/* right: map */
+.mapwrap { position: relative; min-width: 0; min-height: 0; background: #d9d9d4; }
+#map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+.mapctl { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; gap: 8px; }
+.mapctl button { min-width: 74px; height: 58px; font-size: 24px; background: rgba(255,255,255,.95); }
+.mapctl #followBtn { font-size: 16px; }
+.mapctl button.sel { background: #000; color: #fff; }
+.mapmsg { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(0,0,0,.85); color: #fff;
+  font-size: 28px; font-weight: 900; padding: 10px 18px; border-radius: 10px; text-align: center; pointer-events: none; }
+.resume { position: absolute; top: 8px; left: 8px; background: #000; color: #fff; font-weight: 800; font-size: 16px; padding: 4px 10px; border-radius: 6px; }
+.mapnote { position: absolute; left: 0; right: 0; bottom: 0; font-size: 12px; font-weight: 700; color: #000;
+  background: rgba(255,255,255,.8); padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }

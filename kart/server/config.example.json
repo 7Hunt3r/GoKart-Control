@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to config.json (gitignored; install.sh and the SD card kit create it). kart_id is a display label only: the Heltec's own id (from its self lines) wins and a mismatch is flagged. pit_urls are tried in order for the map package. beginner_mode hides driver-facing fault alerts only. map_orientation: north_up or heading_up (heading-up applies only while following the own kart). remote_cmd lets other machines POST /cmd (debug only).",
+  "kart_id": 2,
+  "pit_urls": [
+    "http://gokart-pit.local:8080",
+    "http://192.168.151.240:8080"
+  ],
+  "map_poll_s": 30,
+  "beginner_mode": false,
+  "map_orientation": "north_up",
+  "follow_span_m": 160,
+  "follow_resume_s": 10,
+  "mode_hold_ms": 500,
+  "map_fps": 10,
+  "bind": "0.0.0.0",
+  "http_port": 8081,
+  "remote_cmd": false,
+  "serial_port": null,
+  "tcp": null,
+  "status_poll_s": 60,
+  "log_dir": null,
+  "cache_dir": null,
+  "max_log_mb": 800
+}

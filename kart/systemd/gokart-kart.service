@@ -1,0 +1,19 @@
+# Installed by kart/install.sh (@KART_USER@ is substituted). Untested on a Pi 3 B.
+[Unit]
+Description=GoKart kart display server (Heltec USB link + driver page on :8081)
+After=network.target
+# No dependency on Wi-Fi: the kart display must run on track with no network.
+
+[Service]
+Type=simple
+User=@KART_USER@
+Group=@KART_USER@
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/gokart-kart/server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/gokart-kart/server/kart_server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

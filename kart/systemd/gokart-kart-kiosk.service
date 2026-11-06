@@ -1,0 +1,40 @@
+# Installed by kart/install.sh (@KART_USER@ is substituted).
+# Same recipe as pit/systemd/gokart-kiosk.service, which ran on the pit Pi 4 on
+# 2026-11-05; UNTESTED on a Pi 3 B.
+# cage (single-app Wayland compositor) runs Chromium full screen on tty1 as the
+# kart user. The PAM session (/etc/pam.d/gokart-kart-kiosk -> pam_systemd)
+# registers a logind session on seat0/tty1, which is what lets cage (libseat's
+# logind backend) open the DRM display and the touch input without root or seatd.
+[Unit]
+Description=GoKart kart driver display (cage + Chromium on HDMI, tty1)
+After=systemd-user-sessions.service plymouth-quit-wait.service dbus.socket systemd-logind.service
+After=gokart-kart.service getty@tty1.service
+Wants=gokart-kart.service dbus.socket systemd-logind.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=simple
+User=@KART_USER@
+PAMName=gokart-kart-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+# Optional: GOKART_CHROMIUM_FLAGS="--disable-gpu" etc. if the Pi 3 B GPU path misbehaves.
+EnvironmentFile=-/etc/default/gokart-kart-kiosk
+# The page is served by gokart-kart on localhost; wait (max 60 s) so Chromium
+# does not open on an error page. It never needs Wi-Fi.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:8081/healthz && exit 0; sleep 1; done; exit 0'
+ExecStart=/usr/bin/cage -d -s -- /opt/gokart-kart/kiosk/start-chromium.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

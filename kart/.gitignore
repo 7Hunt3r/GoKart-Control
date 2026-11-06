@@ -1,0 +1,9 @@
+# Kart display: secrets, runtime state and generated files never go in git.
+sdcard/secrets.env
+sdcard/build/
+server/config.json
+logs/
+cache/
+__pycache__/
+*.pyc
+.DS_Store
