@@ -211,6 +211,27 @@ blip with the wheels in the air under STOP (no torque expected) and after START.
 
 Going back: `pio run -d firmware/heltec -t upload` from your branch, as documented in your README.
 
+## 2026-11-06 afternoon (Eamon, 50 Day St): repeater, SLOW in telemetry, kart display kit
+
+- **LoRa repeater built and running** on the second T-Beam S3 Core (`firmware/repeater-tbeam-s3`,
+  see firmware/README.md "Repeater"). Bench: hears kart 2 and the pit beacon, relays 100 % with
+  zero drops. Pit counts the copies (`relay_dupes`) and drops them; loss stays 0 %; ping via the
+  pit applied in 0.3 s with the repeater on. Range and a real dead-zone test are still to do.
+  Protocol change: header version byte bit 0x80 marks a relayed packet; every receiver now
+  masks it (`gkValidate`). **Colin: rebuild kart 1 from this branch** or it will not understand
+  the 47-byte telemetry/relay bit (old 46-byte packets are still accepted by the pit).
+- **SLOW is now in telemetry** (`slow_mph`, 0 = off) so the pit shows a `SLOW n MPH` badge and the
+  kart display no longer has to infer it from command replies. Not exercised against a live VESC
+  today (Colin's VESC was off: `vesc_link false`).
+- **Kart Pi 3 B display kit** under `kart/` (server on :8081, driver page with map from the pit,
+  SD card kit, simulator, 29 tests). Nothing has run on a Pi 3 B yet; the card to flash was not
+  detected by the Mac (no external disk enumerated), so the first boot is still pending.
+  Open points from the build: Pi 3 B is 2.4 GHz only (does McLab offer 2.4 GHz?), Heltec power
+  from the Pi's USB vs separate, pre-loading a map before first pit contact.
+- Boards: base re-flashed from the Pi (`esptool --no-stub`, app only at 0x10000), kart 2 by
+  `espota.py -i 192.168.151.44 -p 3232` (arduino-cli's mDNS discovery of gokart-2.local fails;
+  espota by IP works).
+
 ## The connected kart: findings that matter
 
 See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.md).

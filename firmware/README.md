@@ -90,6 +90,35 @@ the map Meshtastic uses for this board (GNSS ALDO4, LoRa ALDO3, OLED/sensors ALD
 If your Supreme has an LR1121 radio instead of an SX1262 the radio init fails and the
 status line says so; that variant is not handled yet.
 
+## Repeater (any extra T-Beam S3 Core)
+
+`firmware/repeater-tbeam-s3` turns a spare T-Beam into a plug-anywhere LoRa repeater for dead
+zones. No configuration: power it from a USB brick and leave it. It listens on the fleet channel
+and re-sends every packet it hears exactly once, 25 ms after reception, which lands inside the
+same kart's 50 ms slot (22 ms packet + 25 ms + 22 ms copy), so no other kart's slot is touched.
+Copies carry `GK_HDR_RELAY_BIT` (0x80) in the header version byte: a repeater never relays a
+relayed packet (one hop), the pit drops a copy of a packet it already heard directly and shows
+"via repeater" on karts it only hears through the repeater, and a kart syncs its slot timing from
+a relayed beacon only when it has not heard the pit directly for 1.5 s.
+
+```
+./build.sh repeater upload /dev/cu.usbmodemXXXX
+```
+
+A T-Beam still running Meshtastic ignores the normal reset; open its port at 1200 baud and drop
+DTR (`python3 -c 'import serial,time; s=serial.Serial(PORT,1200); s.dtr=False; time.sleep(.3)'`),
+wait for the new ROM-bootloader port to appear and upload to that one. Boards already on our
+firmware upload normally.
+
+OLED: `heard n relayed n`, pit RSSI and age, and per-kart RSSI. USB prints one JSON `stat` line a
+second (`heard`, `relayed`, `dupes`, `dropped`, `rx_bad`, `pit_rssi`, `batt_v`, `karts`). Opening
+the USB port with a terminal resets the board (USB-CDC DTR), which is harmless.
+
+Placement: one repeater per dead zone, where it can hear the pit directly. Two repeaters in range
+of each other would both relay the same packet at the same instant and collide; use one, or place
+them so they cover different karts. Measured on the bench 2026-11-06: 100 % of kart 2's packets
+and every beacon relayed, zero drops; range not yet measured.
+
 ## Protocol in one paragraph
 
 Every kart transmits one 46-byte telemetry packet per second at 915 MHz, SF7, 500 kHz
