@@ -1,0 +1,59 @@
+{
+ "_comment": "SIMULATION course zones for kart/sim/sim_heltec.py --course (70 x 36 m loop centred on the shop preset origin 41.09399,-73.41637, clockwise). Boost pad on the east straight, mud on the south straight, start/finish across the north straight. Serve with kart/sim/fake_pit.py --zones kart/sim/zones.course.json. Not a real course.",
+ "version": 1,
+ "enabled": true,
+ "zones": [
+  {
+   "id": "b1",
+   "type": "boost",
+   "name": "Boost pad",
+   "shape": "circle",
+   "lat": 41.09399,
+   "lon": -73.4159523,
+   "r_m": 9,
+   "scale": 1.0,
+   "secs": 5,
+   "cooldown_s": 20
+  },
+  {
+   "id": "m1",
+   "type": "mud",
+   "name": "Mud",
+   "shape": "polygon",
+   "points": [
+    [
+     41.0939001,
+     -73.4165132
+    ],
+    [
+     41.0939001,
+     -73.4162268
+    ],
+    [
+     41.0937562,
+     -73.4162268
+    ],
+    [
+     41.0937562,
+     -73.4165132
+    ]
+   ],
+   "scale": 0.5
+  },
+  {
+   "id": "lap",
+   "type": "lapline",
+   "name": "Start / finish",
+   "shape": "line",
+   "a": [
+    41.0940799,
+    -73.41637
+   ],
+   "b": [
+    41.0942238,
+    -73.41637
+   ],
+   "min_lap_s": 20
+  }
+ ]
+}

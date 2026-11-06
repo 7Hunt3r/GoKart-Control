@@ -18,8 +18,15 @@ HTTP (default 0.0.0.0:8081; the kiosk uses 127.0.0.1):
                 (from 127.0.0.1 only unless config "remote_cmd": true)
   POST /api/map/refresh   poll the pit for a new map now
   /map/<file>   cached course imagery;  /map/package.json  the cached package
+  /map/zones.json  the cached game zones (pit/server/map/ZONES.md), 404 when none
   /healthz      "ok"
-Session logs: <kart>/logs/session-*.jsonl (every serial line both ways, every request).
+Session logs: <kart>/logs/session-*.jsonl (every serial line both ways, every request,
+every game event and every game command).
+
+Game layer (pit/server/map/ZONES.md): the zones file arrives with the map package;
+kartcore.GameEngine evaluates it against this kart's own fixes and the server sends
+the resulting `boost SECS SCALE` lines to the Heltec. Nothing else is ever sent by
+the game (no STOP/START/mode), and nothing above scale 1.0.
 """
 from __future__ import annotations
 
@@ -41,7 +48,7 @@ import kartcore  # noqa: E402
 from link import Link  # noqa: E402
 from mapsync import MapSync  # noqa: E402
 
-VERSION = "kart-display-0.1.0"
+VERSION = "kart-display-0.2.0"
 KART_ROOT = os.path.dirname(HERE)
 STATIC_DIR = os.path.join(HERE, "static")
 DEFAULTS = {
@@ -63,6 +70,8 @@ DEFAULTS = {
     "log_dir": None,                    # default <kart>/logs
     "cache_dir": None,                  # default <kart>/cache/map
     "max_log_mb": 800,                  # oldest session logs are deleted beyond this
+    "game": True,                       # false = this kart ignores the pit's game zones entirely
+    "sound": True,                      # driver page: synthesized boost/lap sounds (WebAudio)
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
@@ -70,7 +79,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".webp": "image/webp", ".svg": "image/svg+xml"}
 SSE_PERIOD_S = 0.2
 PUBLIC_CFG = ("kart_id", "beginner_mode", "map_orientation", "follow_span_m", "follow_resume_s",
-              "mode_hold_ms", "map_fps")
+              "mode_hold_ms", "map_fps", "game", "sound")
 
 
 def wall_iso(ts=None):
@@ -120,6 +129,7 @@ class App:
         cid = cfg.get("kart_id")
         self.disp = kartcore.KartDisplay(configured_id=int(cid) if cid else None)
         self.cmds = kartcore.CommandTracker()
+        self.game = kartcore.GameEngine(local_enabled=bool(cfg.get("game", True)))
         self.link = Link(self._on_line, self._on_link_state, port=cfg.get("serial_port"),
                          tcp=cfg.get("tcp"), log=self._console)
         self.maps = MapSync(cfg["pit_urls"], cfg.get("cache_dir") or os.path.join(KART_ROOT, "cache", "map"),
@@ -154,12 +164,19 @@ class App:
                 self.disp.rx_bad += 1        # boot chatter, partial lines: logged, not shown
                 return
             t = self.disp.ingest(msg, now, wall)
+            game = []
             if t == "cmd":
                 rec = self.cmds.on_cmd_line(msg, wall)
                 if rec:
                     self.log.write("cmd_echo", id=rec["id"], seq=rec["seq"], result=rec["result_name"])
+                res = self.game.on_cmd(msg, now)
+                if res:
+                    self.log.write("game", ev="cmd_echo", seq=msg.get("seq"), arg=msg.get("arg"),
+                                   result=res["result_name"])
             elif t == "self":
                 self.cmds.on_self(msg)
+                game = self.game.on_self(msg, now)
+        self._game_out(game)
 
     def _on_link_state(self, connected, desc):
         with self.lock:
@@ -178,6 +195,19 @@ class App:
         self.log.write("tx", line=text, ok=ok)
         return ok
 
+    def _game_out(self, recs):
+        """Log every game record; send the command lines (outside the app lock)."""
+        for r in recs:
+            if r["ev"] == "cmd":
+                sent = self.link.connected and self._send_text(r["line"])
+                self.log.write("game", **r, sent=bool(sent))
+            else:
+                self.log.write("game", **r)
+                if r["ev"] in ("game_on", "game_off", "lap", "boost", "zones_updated", "lap_reset"):
+                    print(f"{wall_iso()} game: {r}", flush=True)
+        if recs:
+            self._state_cache = (0.0, b"{}")
+
     # -- background ------------------------------------------------------------
     def start(self):
         self.link.start()
@@ -187,11 +217,14 @@ class App:
     def _ticker(self):
         while not self.stopping.wait(0.25):
             now = time.monotonic()
+            zones = self.maps.zones()
             with self.lock:
                 self.cmds.tick(now)
+                game = self.game.set_zones(zones, now) + self.game.tick(now)
                 due = self.link.connected and self._status_due and now >= self._status_due
                 if due:
                     self._status_due = now + float(self.cfg["status_poll_s"])
+            self._game_out(game)
             if due:
                 self._send_text("status")
 
@@ -201,6 +234,7 @@ class App:
         with self.lock:
             d = self.disp.snapshot(now)
             cmds = self.cmds.snapshot(now)
+            game = self.game.snapshot(now)
         d.update({
             "server": {"version": VERSION, "time": wall_iso(), "log_file": os.path.basename(self.log.path),
                        "link": {"connected": self.link.connected, "desc": self.link.description,
@@ -208,6 +242,7 @@ class App:
             "config": {k: self.cfg.get(k) for k in PUBLIC_CFG},
             "commands": cmds,
             "map": self.maps.snapshot(),
+            "game": game,
         })
         return d
 
@@ -283,6 +318,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(os.path.join(STATIC_DIR, os.path.basename(p)))
         if p == "/map/package.json":
             return self._json(200, app.maps.snapshot())
+        if p == "/map/zones.json":
+            z = app.maps.zones()
+            return self._json(200, z) if z is not None else self._send(404, "no zones cached")
         if p.startswith("/map/"):
             # imagery names change with each package version, so the browser may cache them
             return self._file(app.maps.file_path(p[len("/map/"):]), cache=True)

@@ -25,12 +25,13 @@
     <span id="repChip" class="chip">no repeater</span>
     <span id="kartsChip" class="chip">karts ?</span>
     <span id="raceChip" class="chip">race off</span>
+    <button id="gameChip" class="gamechip off">GAME OFF</button>
     <span id="clock" class="sm"></span>
   </div>
   <div id="connBanner" class="banner bad hidden"></div>
   <div class="mfleet">
     <button id="stopAll" class="hold stopall">STOP ALL<small>hold 1 s</small></button>
-    <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button><button id="slowAll" class="hold slowall">SLOW ALL<small>hold 1 s</small></button>
+    <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button><button id="slowAll" class="hold slowall">SLOW ALL<small>hold 1 s</small></button><button id="boostAll" class="hold boostall">BOOST ALL<small>hold 1 s</small></button>
   </div>
 </header>
 <main class="mmain">
@@ -41,7 +42,8 @@
       <span id="hiddenNote" class="sm"></span>
     </div>
     <div id="cards" class="cards"></div>
-    <p class="note mpad">Tap a kart to show its ECO / NORMAL / SPORT / STOP / START buttons. Filters hide cards only; hidden karts still get fleet commands.</p>
+    <p class="note mpad">Tap a kart to show its ECO / NORMAL / SPORT / SLOW / BOOST / STOP / START buttons. Filters hide cards only; hidden karts still get fleet commands.</p>
+    <div class="panel mpanel"><h3>Laps</h3><div id="laps"></div></div>
     <div class="panel mpanel"><h3>Race</h3><div id="race"></div></div>
   </section>
   <section id="tab-map" class="tabpane hidden">

@@ -13,12 +13,23 @@ What it prints (same shapes as the real firmware's USB output):
   log    occasional firmware-style log lines; ble every ~6 s; cmd for every command
   status in reply to "status"
 Text commands honoured like the firmware's usbCommand(): mode 0|1|2, stop, start,
-slow [mph], ping, status (src 254, own ++usbSeq). Mode changes are "accepted" at
-once and "applied" (mode_actual + mode_confirmed) about 0.6 s later.
+slow [mph], ping, status, boost SECS SCALE (src 254, own ++usbSeq). Mode changes are
+"accepted" at once and "applied" (mode_actual + mode_confirmed) about 0.6 s later.
+`boost SECS SCALE` (SECS 1-30, SCALE 0.10-1.00, else a usage log line and no cmd) is
+a timed current-scale override like the firmware's GK_CMD_BOOST: cmd line with cmd 6,
+arg = scale percent; rejected (4) while stopped, no_vesc (3) without a VESC; the
+`scale` field follows it and reverts to the mode scale after SECS ("boost over" log);
+STOP/START cancel it. Speed follows the live scale (17 mph at 1.0).
 Scenario flags: --kart 2 --nofix (own GPS never fixes) --novesc (VESC link down)
 --fault N (VESC fault code) --pitloss (pit link drops 20 s of every 60 s)
 --pit-stop-at S / --pit-start-at S (the pit sends STOP/START at those seconds)
 --pit-slow-at S (the pit sends SLOW 8 at that second).
+--course: the game-layer course: the loop is centred on the shop preset origin
+(pit/server/map/map.shop.json, 41.09399,-73.41637) so it runs through the boost pad,
+the mud and across the start/finish line of kart/sim/zones.course.json (serve that
+with fake_pit.py --zones kart/sim/zones.course.json); starts in NORMAL just before
+the line. --warp X moves the own kart X times faster along the loop (tests only;
+reported speeds stay real).
 """
 from __future__ import annotations
 
@@ -36,9 +47,10 @@ import tty
 
 FW = "sim-kart-0.1.0"
 ORIGIN = (41.0940, -73.4167)     # near the shop; not a surveyed course
+COURSE_ORIGIN = (41.09399, -73.41637)   # --course: shop preset origin (map.shop.json)
 R_EARTH = 6371000.0
-MODE_MPH = {0: 9.0, 1: 13.0, 2: 17.0}
-MODE_SCALE = {0: 0.5, 1: 0.75, 2: 1.0}
+FULL_SCALE_MPH = 17.0            # sim speed at scale 1.0 (SPORT)
+MODE_SCALE = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}   # firmware config.h MODES[]
 
 
 def en_to_latlon(e, n):
@@ -92,11 +104,19 @@ class SimKart:
         self.seq = 0
         self.last_cmd_seq, self.cmd_result = 0, 0
         self.pending = None             # (apply_at, mode)
+        self.ov = None                  # (scale, until_mono): boost / mud override
+
+    def eff_scale(self):
+        if self.stopped:
+            return 0.0
+        if self.ov:
+            return self.ov[0]
+        return MODE_SCALE.get(self.mode_actual, 0.75)
 
     def target_mph(self):
         if self.stopped or self.novesc:
             return 0.0
-        v = MODE_MPH.get(self.mode_actual, 10.0)
+        v = FULL_SCALE_MPH * self.eff_scale()
         return min(v, self.slow_mph) if self.slow_mph else v
 
     def step(self, dt, now):
@@ -118,7 +138,7 @@ class SimKart:
         vup = not self.novesc
         erpm = int(self.mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7)
         self.seq = (self.seq + 1) % 256
-        scale = 0.0 if self.stopped else MODE_SCALE.get(self.mode_actual)
+        scale = round(self.eff_scale(), 3)
         return {"t": t, "kart": self.k, "seq": self.seq,
                 "lat": round(lat, 7) if fix else None, "lon": round(lon, 7) if fix else None,
                 "fix": fix, "gps_age_s": 0 if fix else 255, "sats": 9 if fix else 3,
@@ -146,7 +166,10 @@ class Sim:
         self.out = []
         self.t0 = time.monotonic()
         self.usb_seq = 0
-        self.me = SimKart(args.kart, 0.0, nofix=args.nofix, novesc=args.novesc, fault=args.fault)
+        self.boost_secs = 0
+        self.me = SimKart(args.kart, 15.0 if args.course else 0.0, nofix=args.nofix, novesc=args.novesc, fault=args.fault)
+        if args.course:
+            self.me.mph = FULL_SCALE_MPH * MODE_SCALE[1]     # already rolling at the line
         others = [k for k in (3, 5) if k != args.kart] or [4, 6]
         self.fleet = [SimKart(others[0], 45.0, mode=2), SimKart(others[1], 120.0, mode=0)]
         self.pit_done = set()
@@ -188,15 +211,26 @@ class Sim:
                 elif not k.stopped:
                     self.log(f"vesc write scale {MODE_SCALE[arg]:.3f}")
                     k.pending = (time.monotonic() + 0.6, arg)
+        elif cmd == 6:
+            if arg < 10 or arg > 100 or k.stopped:
+                res = 4
+            elif k.novesc:
+                res = 3
+            else:
+                secs = self.boost_secs or 5
+                k.ov = (arg / 100.0, time.monotonic() + secs)
+                self.log(f"boost: scale {arg / 100.0:.2f} for {secs} s")
+                self.log(f"vesc write scale {arg / 100.0:.3f}")
+            self.boost_secs = 0
         elif cmd == 2:
             if k.novesc:
                 res = 3
             else:
-                k.stopped, k.confirmed = True, False
+                k.stopped, k.confirmed, k.ov = True, False, None
                 for sc in (0.5, 0.2, 0.0):
                     self.log(f"vesc write scale {sc:.3f}")
         elif cmd == 3:
-            k.stopped, k.slow_mph = False, None
+            k.stopped, k.slow_mph, k.ov = False, None, None
             if k.novesc:
                 res = 3
             else:
@@ -236,14 +270,26 @@ class Sim:
             arg = int(rest) if rest else 0
         except ValueError:
             arg = 0
-        if word == "status":
+        if word == "boost":
+            parts = rest.split()
+            try:
+                secs = int(parts[0]) if parts else 5
+                sc = float(parts[1]) if len(parts) > 1 else 1.0
+            except ValueError:
+                secs, sc = 0, 0.0
+            if secs < 1 or secs > 30 or sc < 0.1 or sc > 1.0:
+                self.log("usage: boost SECS(1-30) SCALE(0.10-1.00)")
+            else:
+                self.boost_secs = secs
+                self.command(254, 6, int(round(sc * 100)))
+        elif word == "status":
             self.status()
         elif word == "mode" and rest:
             self.command(254, 1, arg)
         elif word in ("stop", "start", "ping", "slow"):
             self.command(254, {"stop": 2, "start": 3, "ping": 4, "slow": 5}[word], arg)
         elif word == "help":
-            self.log("commands: status | mode 0..2 | stop | start | slow [mph] | ping (SIMULATION)")
+            self.log("commands: status | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | ping (SIMULATION)")
         else:
             self.log(f"unknown command: {line}")
 
@@ -269,7 +315,11 @@ class Sim:
                     if at is not None and el >= at and name not in self.pit_done:
                         self.pit_done.add(name)
                         self.command(0, *src_cmd)
-                self.me.step(dt, now)
+                if self.me.ov and now >= self.me.ov[1]:
+                    self.me.ov = None
+                    self.log(f"boost over, back to {self.me.eff_scale():.2f}")
+                    self.log(f"vesc write scale {self.me.eff_scale():.3f}")
+                self.me.step(dt * self.args.warp, now)
                 for f in self.fleet:
                     f.step(dt, now)
                 if now >= next_self:
@@ -290,7 +340,7 @@ class Sim:
                                "connected": not self.args.novesc, "candidates": []})
                 if now >= next_log:
                     next_log += 17.0
-                    self.log(random.choice(["gps found: 9600 baud", "vesc write verify ok (scale 0.750)",
+                    self.log(random.choice(["gps found: 9600 baud", "vesc write verify ok (scale 0.714)",
                                             "lora rx ok", "vesc fw 6.05 SIM uuid 00sim"]))
 
     # -- transports ----------------------------------------------------------------
@@ -373,7 +423,12 @@ def main():
     ap.add_argument("--pit-slow-at", type=float)
     ap.add_argument("--uptime0", type=int, default=5, help="Heltec uptime at sim start (s)")
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--course", action="store_true", help="drive the game course (kart/sim/zones.course.json)")
+    ap.add_argument("--warp", type=float, default=1.0, help="own kart moves this many times faster (tests)")
     args = ap.parse_args()
+    if args.course:
+        global ORIGIN
+        ORIGIN = COURSE_ORIGIN
     if args.seed is not None:
         random.seed(args.seed)
     sim = Sim(args)

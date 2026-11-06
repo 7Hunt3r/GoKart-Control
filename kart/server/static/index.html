@@ -23,31 +23,46 @@
       <span id="vescChip" class="chip">VESC ?</span>
       <span id="gpsChip" class="chip">GPS ?</span>
     </div>
-    <div class="speed">
-      <div id="mph" class="big">--</div>
-      <div class="unit"><span>MPH</span><small id="mphSrc">GPS</small></div>
+    <div id="speedo" class="speedo">
+      <svg id="speedoSvg" viewBox="0 0 360 196" preserveAspectRatio="xMidYMid meet" aria-label="speed">
+        <path id="arcBg" class="arcbg" d=""/>
+        <path id="arcFg" class="arcfg" d=""/>
+        <g id="ticks"></g>
+        <text id="mph" class="mphnum" x="180" y="138" text-anchor="middle">--</text>
+        <text id="mphUnit" class="mphunit" x="180" y="168" text-anchor="middle">MPH <tspan id="mphSrc">GPS</tspan></text>
+      </svg>
+      <div id="gear" class="gear"><b id="gearLetter">-</b><span id="modeNow">--</span></div>
     </div>
     <div id="mphNote" class="note"></div>
+    <div id="boostMeter" class="boost">
+      <div class="btrack"><div id="bBase"></div><div id="bFill"></div><div id="bMark"></div></div>
+      <span id="boostLabel" class="blabel">--</span>
+    </div>
     <div class="batt">
-      <div class="battrow"><span id="battPct" class="mid">--</span><span id="battV" class="volts">-- V</span></div>
+      <div class="battrow"><span class="lbl">BATT</span><span id="battPct" class="mid">--</span><span id="battV" class="volts">-- V</span></div>
       <div class="bar"><div id="battBar"></div></div>
       <div id="battNote" class="note"></div>
     </div>
-    <div class="mode">
-      <div class="modeline"><span class="lbl">MODE</span> <span id="modeNow" class="modenow">--</span></div>
-      <div id="modeNote" class="note"></div>
-    </div>
+    <div id="modeNote" class="note"></div>
     <div id="faultBox" class="fault hidden"></div>
     <div class="modebtns">
-      <button class="mbtn" data-mode="0">ECO</button>
-      <button class="mbtn" data-mode="1">NORMAL</button>
-      <button class="mbtn" data-mode="2">SPORT</button>
+      <button class="mbtn" data-mode="0"><small>E</small>ECO</button>
+      <button class="mbtn" data-mode="1"><small>N</small>NORMAL</button>
+      <button class="mbtn" data-mode="2"><small>S</small>SPORT</button>
     </div>
     <div id="cmdNote" class="note cmd"></div>
   </section>
   <section class="mapwrap">
     <canvas id="map"></canvas>
     <div id="mapMsg" class="mapmsg hidden"></div>
+    <div id="lapPanel" class="lappanel hidden">
+      <div class="lapflag"></div>
+      <div class="lapn">LAP <b id="lapNum">-</b></div>
+      <div id="lapCur" class="lapcur">--:--.-</div>
+      <div class="laprow"><span>LAST</span><b id="lapLast">--</b></div>
+      <div class="laprow"><span>BEST</span><b id="lapBest">--</b></div>
+    </div>
+    <span id="gameChip" class="chip gamechip hidden">GAME OFF</span>
     <div class="mapctl">
       <button id="followBtn" class="sel">FOLLOW</button>
       <button data-zoom="in">+</button>
@@ -58,6 +73,7 @@
     <div id="mapNote" class="mapnote"></div>
   </section>
 </div>
+<div id="flash" class="flash hidden"><span id="flashText"></span></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

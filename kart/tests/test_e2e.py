@@ -34,7 +34,7 @@ def free_port():
 
 
 class Stack:
-    def __init__(self, sim_args=(), pit=True):
+    def __init__(self, sim_args=(), pit=True, zones=None):
         self.tmp = tempfile.TemporaryDirectory()
         t = self.tmp.name
         self.procs = []
@@ -48,6 +48,9 @@ class Stack:
         with open(os.path.join(t, "pitmap", m["image"]), "wb") as f:
             f.write(JPEG)
         self.image = m["image"]
+        if zones is not None:                                   # fake_pit serves zones.json next to map.json
+            with open(os.path.join(t, "pitmap", "zones.json"), "w") as f:
+                json.dump(zones, f)
         pit_url = f"http://127.0.0.1:{free_port()}"           # nothing listening = unreachable pit
         if pit:
             fp = subprocess.Popen([sys.executable, "-I", FAKE_PIT, "--port", "0", "--map", self.map_json],
@@ -188,6 +191,55 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue({"rx", "tx", "op", "event"} <= kinds, kinds)
             self.assertIn("mode 2", [r["line"] for r in recs if r["kind"] == "tx"])
             self.assertTrue(any('"t":"self"' in r["line"] for r in recs if r["kind"] == "rx"))
+        finally:
+            st.close()
+
+    def test_game_course(self):
+        """Simulator --course through the shipped course zones: boost, mud, laps, HUD state."""
+        with open(os.path.join(KART, "sim", "zones.course.json")) as f:
+            zones = json.load(f)
+        for z in zones["zones"]:
+            if z["type"] == "lapline":
+                z["min_lap_s"] = 5                   # --warp 3: a lap of the 191 m loop takes ~12 s
+        st = Stack(["--course", "--warp", "3"], zones=zones)
+        try:
+            code, body = st.request("GET", "/")
+            for marker in (b'id="speedo"', b'id="gear"', b'id="boostMeter"', b'id="lapPanel"', b'id="gameChip"',
+                           b'id="flash"', b'id="stopBanner"', b'id="slowBanner"', b'id="connBanner"'):
+                self.assertIn(marker, body)
+            s = st.wait(lambda s: s["game"]["on"], what="game on (zones fetched)")
+            self.assertEqual(s["map"]["zones"]["version"], 1)
+            self.assertEqual(s["map"]["package"]["zones_version"], 1)
+            self.assertEqual(st.request("GET", "/map/zones.json")[0], 200)
+            kinds = set()
+
+            def lapped(s):
+                kinds.add(s["game"]["meter"]["kind"])
+                return s["game"]["lap"]["count"] >= 1
+            s = st.wait(lapped, timeout=45, what="one lap completed")
+            g = s["game"]
+            self.assertTrue(g["lap"]["running"])
+            self.assertGreater(g["lap"]["last_s"], 5)
+            self.assertEqual(g["lap"]["best_s"], g["lap"]["last_s"])
+            self.assertIsNotNone(g["lap"]["current_s"])
+            self.assertTrue({"boost", "mud"} <= kinds, kinds)      # HUD meter saw both while lapping
+            self.assertGreaterEqual(g["cmds_sent"], 3)
+            self.assertIn(g["last_result"]["result_name"], ("accepted", "applied"))
+            logs = [f for f in os.listdir(st.logs) if f.startswith("session-")]
+            with open(os.path.join(st.logs, logs[0])) as f:
+                recs = [json.loads(x) for x in f]
+            tx = [r["line"] for r in recs if r["kind"] == "tx"]
+            self.assertIn("boost 5 1.00", tx)
+            self.assertIn("boost 3 0.50", tx)
+            self.assertFalse([x for x in tx if x.split()[0] in ("stop", "start", "mode", "slow")], tx)
+            game = [r for r in recs if r["kind"] == "game"]
+            evs = {r["ev"] for r in game}
+            self.assertTrue({"game_on", "zone_enter", "zone_exit", "cmd", "boost", "mud", "lap_start", "lap"} <= evs, evs)
+            self.assertTrue(all(r["sent"] for r in game if r["ev"] == "cmd"))
+            # the simulator applied the override: a self line with scale 1.0 while in NORMAL
+            rx = [json.loads(r["line"]) for r in recs if r["kind"] == "rx" and '"t":"self"' in r["line"]]
+            self.assertTrue(any(x["scale"] == 1.0 and x["mode_req"] == 1 for x in rx))
+            self.assertTrue(any(x["scale"] == 0.5 for x in rx))
         finally:
             st.close()
 

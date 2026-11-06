@@ -14,6 +14,7 @@
   <span id="radioChip" class="chip">radio ?</span>
   <span id="repChip" class="chip">no repeater</span>
   <span id="raceChip" class="chip">race off</span>
+  <button id="gameChip" class="gamechip off">GAME OFF</button>
   <span class="spacer"></span>
   <button id="fOnline" class="toggle">Online</button>
   <button id="fEntered" class="toggle">Entered</button>
@@ -23,7 +24,7 @@
 <div id="connBanner" class="banner bad hidden"></div>
 <div class="fleetbar">
   <button id="stopAll" class="hold stopall">STOP ALL<small>hold 1 s</small></button>
-  <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button><button id="slowAll" class="hold slowall">SLOW ALL<small>hold 1 s</small></button>
+  <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button><button id="slowAll" class="hold slowall">SLOW ALL<small>hold 1 s</small></button><button id="boostAll" class="hold boostall">BOOST ALL<small>hold 1 s</small></button>
   <button data-allmode="0">ALL<br>ECO</button>
   <button data-allmode="1">ALL<br>NORMAL</button>
   <button data-allmode="2">ALL<br>SPORT</button>
@@ -42,7 +43,7 @@
       <div class="mapctl"><button data-zoom="in">+</button><button data-zoom="out">&minus;</button><button data-zoom="fit">Fit</button></div>
     </div>
     <div id="tab-cmds" class="tabpane panel hidden"><div id="outcomes"></div></div>
-    <div id="tab-race" class="tabpane panel hidden"><div id="race"></div></div>
+    <div id="tab-race" class="tabpane panel hidden"><div id="race"></div><h3 class="laph">Laps</h3><div id="laps"></div></div>
     <div id="tab-log" class="tabpane panel hidden"><div id="log" class="log"></div></div>
   </div>
 </div>

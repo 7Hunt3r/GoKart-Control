@@ -174,5 +174,93 @@ class MapCache(unittest.TestCase):
             self.assertIsNone(m.file_path(name), name)
 
 
+def zdoc(version, enabled=True, n=1):
+    return {"version": version, "enabled": enabled,
+            "zones": [{"id": f"b{i}", "type": "boost", "shape": "circle", "lat": 41.094, "lon": -73.4164, "r_m": 10}
+                      for i in range(n)]}
+
+
+def with_zones(p, zv):
+    return dict(p, zones="/map/zones.json", zones_version=zv)
+
+
+class Zones(unittest.TestCase):
+    setUp = MapCache.setUp
+    tearDown = MapCache.tearDown
+    sync = MapCache.sync
+    image_hits = MapCache.image_hits
+
+    def zone_hits(self):
+        return [h for h in self.pit.hits if h.endswith("zones.json")]
+
+    def test_fetch_on_version_change(self):
+        self.pit.package = with_zones(pkg(6), 1)
+        self.pit.files = {"a.jpg": JPEG_A, "zones.json": json.dumps(zdoc(1, n=1)).encode()}
+        m = self.sync()
+        self.assertTrue(m.sync_once())
+        snap = m.snapshot()
+        self.assertEqual(snap["zones"]["version"], 1)
+        self.assertEqual(m.zones()["version"], 1)
+        self.assertEqual(snap["package"]["zones_version"], 1)
+        with open(os.path.join(self.cache, "zones.json")) as f:
+            self.assertEqual(json.load(f), zdoc(1, n=1))
+        # same zones_version: not downloaded again
+        self.assertFalse(m.sync_once())
+        self.assertEqual(len(self.zone_hits()), 1)
+        # zones_version bump with the same map version: zones re-fetched, image not
+        self.pit.package = with_zones(pkg(6), 2)
+        self.pit.files["zones.json"] = json.dumps(zdoc(2, n=3)).encode()
+        self.assertTrue(m.sync_once())
+        self.assertEqual(len(m.zones()["zones"]), 3)
+        self.assertEqual(len(self.zone_hits()), 2)
+        self.assertEqual(len([h for h in self.image_hits() if h.endswith(".jpg")]), 1)
+        self.assertEqual([n for n in os.listdir(self.cache) if n.startswith(".dl-")], [])
+        # restart offline: zones come back from the cache
+        m2 = self.sync([dead_url()])
+        self.assertEqual(m2.zones()["version"], 2)
+        # a deleted cache file is re-fetched at the same version
+        os.unlink(os.path.join(self.cache, "zones.json"))
+        m3 = self.sync()
+        self.assertIsNone(m3.zones())
+        m3.sync_once()
+        self.assertEqual(m3.zones()["version"], 2)
+
+    def test_absent_zones_is_game_off(self):
+        self.pit.package, self.pit.files = pkg(1), {"a.jpg": JPEG_A}
+        m = self.sync()
+        self.assertTrue(m.sync_once())
+        self.assertIsNone(m.zones())
+        self.assertIsNone(m.snapshot()["zones"])
+        self.assertIsNone(m.snapshot()["package"]["zones_version"])
+        self.assertEqual(self.zone_hits(), [])
+        # zones appear, then the pit drops them again: cached file removed
+        self.pit.package = with_zones(pkg(1), 4)
+        self.pit.files["zones.json"] = json.dumps(zdoc(4)).encode()
+        self.assertTrue(m.sync_once())
+        self.assertEqual(m.zones()["version"], 4)
+        self.pit.package = pkg(1)
+        self.assertTrue(m.sync_once())
+        self.assertIsNone(m.zones())
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "zones.json")))
+
+    def test_bad_zones_keep_old_and_map_still_updates(self):
+        self.pit.package = with_zones(pkg(1), 1)
+        self.pit.files = {"a.jpg": JPEG_A, "zones.json": json.dumps(zdoc(1)).encode()}
+        m = self.sync()
+        m.sync_once()
+        self.pit.package = with_zones(pkg(2, image="/map/b.jpg"), 2)
+        self.pit.files = {"b.jpg": JPEG_B, "zones.json": b"{not json"}
+        self.assertTrue(m.sync_once())                     # the map still moves to v2
+        snap = m.snapshot()
+        self.assertEqual(snap["package"]["version"], 2)
+        self.assertEqual(snap["package"]["zones_version"], 1)   # kept, so it is retried
+        self.assertEqual(m.zones()["version"], 1)
+        self.assertIn("zones:", snap["sync"]["zones_error"])
+        self.pit.files["zones.json"] = json.dumps(zdoc(2)).encode()
+        self.assertTrue(m.sync_once())
+        self.assertEqual(m.zones()["version"], 2)
+        self.assertIsNone(m.snapshot()["sync"]["zones_error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

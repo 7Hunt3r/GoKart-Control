@@ -205,3 +205,44 @@ input, textarea, select { -webkit-user-select: text !important; user-select: tex
 
 .b-slow { background: #f0a500; color: #000; font-weight: 800; }
 .hold.slowall { background: #f0a500; color: #000; }
+
+/* game layer: BOOST, zones editor, laps */
+.b-boost { background: #ff7a00; color: #000; font-weight: 800; border-color: #8a3f00; }
+.hold.boostall { background: #ff7a00; color: #000; border-color: #8a3f00; }
+.kbtns .b-stop { grid-column: span 3; }
+.kbtns .b-start { grid-column: span 2; }
+.badge.lap { background: #111; color: #fff; border-color: #111; font-variant-numeric: tabular-nums; }
+.gamechip { min-height: 36px; padding: 2px 12px; border-radius: 999px; font-size: 14px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; }
+.gamechip.on { background: #ff7a00; color: #000; border-color: #ff7a00; }
+.gamechip.off { background: #333; color: #ccc; border-color: #888; }
+.maph { display: flex; align-items: center; gap: 8px; }
+.zbtn { min-height: 36px; padding: 2px 14px; }
+.zonebar { border: 2px solid var(--line); border-radius: var(--radius); background: #f0efe9; padding: 6px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 6px; }
+.ztools, .zprops { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.ztools button { min-height: 44px; padding: 4px 10px; }
+.ztools .zt-boost { border-color: #b85a00; } .ztools .zt-mud { border-color: #4a2c10; }
+.ztools button.sel { background: var(--ink); color: #fff; }
+.zsave { background: var(--ok); color: #fff; border-color: #064d16; min-width: 90px; }
+.zprops label { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.zprops input[type=text], .zprops input:not([type]) { font-size: 15px; padding: 6px 8px; border: 2px solid var(--line); border-radius: 6px; width: 180px; }
+.zprops input[type=range] { width: 200px; }
+.zsel { font-weight: 800; font-size: 13px; min-width: 120px; }
+table.laps { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+table.laps th { font-size: 11px; color: var(--muted); text-align: left; border-bottom: 2px solid var(--line); padding: 2px 4px; }
+table.laps td { border-bottom: 1px solid #bbb; padding: 3px 4px; font-weight: 700; }
+table.laps td.pos { font-size: 18px; font-weight: 900; width: 28px; }
+table.laps td.n { text-align: right; }
+.lsw { display: inline-block; min-width: 24px; text-align: center; border: 2px solid #000; border-radius: 4px; font-weight: 900; color: #000; text-shadow: 0 0 3px #fff; padding: 0 2px; }
+.lapsfoot { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.resetlaps { min-height: 48px; background: #ddd; flex: none; }
+.lapmsg { margin: 4px 0; font-size: 13px; }
+.laph { margin: 12px 0 4px; font-size: 15px; }
+.maplaps { position: absolute; left: 6px; top: 6px; background: rgba(255,255,255,.92); border: 2px solid var(--line); border-radius: 6px; font-size: 13px; z-index: 2; min-width: 120px; }
+.maplaps .mlhead { min-height: 32px; width: 100%; padding: 2px 8px; border: 0; border-radius: 4px; background: #111; color: #fff; font-size: 13px; text-align: left; }
+.maplaps .mlrow { display: grid; grid-template-columns: 16px 28px 34px 1fr; gap: 4px; align-items: center; padding: 1px 6px; font-variant-numeric: tabular-nums; font-weight: 700; }
+.maplaps .mlrow .lsw { min-width: 22px; font-size: 12px; }
+body.kiosk .gamechip { min-height: 34px; font-size: 13px; padding: 2px 10px; }
+body.mobile .mstrip .gamechip { min-height: 32px; font-size: 13px; padding: 2px 10px; }
+body.mobile .mfleet .boostall, body.mobile .mfleet .slowall { font-size: 16px; }
+body.mobile .kexp .kbtns .b-slow, body.mobile .kexp .kbtns .b-boost { grid-column: span 3; }
+body.mobile table.laps { font-size: 16px; }

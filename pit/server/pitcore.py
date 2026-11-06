@@ -10,6 +10,7 @@ group (link, VESC, GPS) with local monotonic time.
 """
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 
@@ -249,6 +250,7 @@ class Fleet:
         self.fallback_origin = fallback_origin  # from map.json / config
         self.rx_lines = 0
         self.rx_bad = 0
+        self.game = Game()
 
     # -- ingest ------------------------------------------------------------
     def ingest(self, msg, now, wall):
@@ -259,7 +261,13 @@ class Fleet:
             if k not in self.karts:
                 self.rx_bad += 1
                 return None
-            self.karts[k].ingest_tele(msg, now, wall)
+            ks = self.karts[k]
+            prev = (ks.fix.get("lat"), ks.fix.get("lon"), ks.last_fix_mono) if ks.fix else None
+            ks.ingest_tele(msg, now, wall)
+            if prev is not None and ks.last_fix_mono == now:
+                cur = (ks.fix["lat"], ks.fix["lon"])
+                if cur != prev[:2]:
+                    self.game.on_move(k, prev, cur, now, wall)
             self._maybe_origin("kart", msg.get("lat"), msg.get("lon"), msg.get("fix"))
             return k
         if t == "base":
@@ -302,13 +310,22 @@ class Fleet:
 
     def snapshot(self, now):
         base_age = _age(self.base_mono, now)
+        laps = self.game.board(now)
+        by_kart = {r["kart"]: r for r in laps}
+        karts = []
+        for k in KART_IDS:
+            snap = self.karts[k].snapshot(now)
+            snap["lap"] = by_kart.get(k)
+            karts.append(snap)
         return {
-            "karts": [self.karts[k].snapshot(now) for k in KART_IDS],
+            "karts": karts,
             "base": dict(self.base, age_s=base_age) if self.base else None,
             "stat": dict(self.stat, age_s=_age(self.stat_mono, now)) if self.stat else None,
             "repeater": dict(self.repeater, age_s=_age(self.repeater_mono, now)) if self.repeater else None,
             "simulation": self.simulation,
             "race": dict(self.race),
+            "game": self.game.status(),
+            "laps": laps,
             "origin": self.current_origin(),
             "thresholds": {"online_s": ONLINE_S, "stale_s": STALE_S},
         }
@@ -336,11 +353,243 @@ HISTORY = 40
 ECHOED = {"received", "accepted", "applied", "no_vesc", "rejected", "unknown"}
 FINAL = {"applied", "no_vesc", "rejected", "unknown", "no_ack", "offline",
          "superseded", "cancelled", "link_lost"}
-VALID_CMDS = {"mode", "stop", "start", "ping", "slow"}
+VALID_CMDS = {"mode", "stop", "start", "ping", "slow", "boost"}
+BOOST_MIN_PCT, BOOST_MAX_PCT = 10, 100   # firmware GK_CMD_BOOST: scale percent, lasts 5 s
 
 
 class CommandError(ValueError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Game zones (Mario Kart layer) and lap timing. Contract: map/ZONES.md
+# ---------------------------------------------------------------------------
+R_EARTH = 6371000.0
+ZONE_TYPES = ("boost", "mud", "lapline")
+ZONE_SHAPES = {"boost": ("circle", "polygon"), "mud": ("circle", "polygon"), "lapline": ("line",)}
+ZONE_DEFAULT_NAMES = {"boost": "Boost pad", "mud": "Mud", "lapline": "Start / finish"}
+MIN_R_M, MAX_R_M = 8.0, 500.0
+MAX_ZONES = 64
+MAX_POLY_POINTS = 64
+MIN_LINE_M = 4.0
+DEFAULT_MIN_LAP_S = 20.0
+EMPTY_ZONES = {"version": 0, "enabled": False, "zones": []}
+
+
+class ZoneError(CommandError):
+    pass
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def _num(z, key, default=None, what=None):
+    v = z.get(key, default)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ZoneError(f"zone {z.get('id')!r}: {what or key} must be a number")
+    return float(v)
+
+
+def _point(p, zid, what):
+    if not isinstance(p, (list, tuple)) or len(p) != 2 or any(
+            isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) for c in p):
+        raise ZoneError(f"zone {zid!r}: {what} must be [lat, lon]")
+    lat, lon = float(p[0]), float(p[1])
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        raise ZoneError(f"zone {zid!r}: {what} is not a valid lat/lon")
+    return [round(lat, 7), round(lon, 7)]
+
+
+def local_en(lat0, lon0):
+    """Tangent-plane projection (metres east, north) around lat0/lon0; cos(lat) scaling for lon."""
+    cl = math.cos(math.radians(lat0))
+    return lambda lat, lon: (math.radians(lon - lon0) * R_EARTH * cl, math.radians(lat - lat0) * R_EARTH)
+
+
+def validate_zones(doc):
+    """Check a zones document against ZONES.md and return the normalized
+    {"enabled", "zones"} (version is assigned by the caller). Raises ZoneError.
+    Out-of-range scale/secs/cooldown/min_lap_s are clamped; geometry that is too
+    small, missing or malformed is refused."""
+    if not isinstance(doc, dict):
+        raise ZoneError("zones document must be a JSON object")
+    zones = doc.get("zones")
+    if not isinstance(zones, list):
+        raise ZoneError("zones must be a list")
+    if len(zones) > MAX_ZONES:
+        raise ZoneError(f"at most {MAX_ZONES} zones")
+    out, ids, laplines = [], set(), 0
+    for i, z in enumerate(zones):
+        if not isinstance(z, dict):
+            raise ZoneError(f"zone #{i + 1} must be an object")
+        zid = z.get("id")
+        if not isinstance(zid, str) or not zid.strip() or len(zid) > 16 \
+                or not all(c.isalnum() or c in "-_" for c in zid):
+            raise ZoneError(f"zone #{i + 1}: id must be 1-16 letters, digits, - or _")
+        if zid in ids:
+            raise ZoneError(f"duplicate zone id {zid!r}")
+        ids.add(zid)
+        typ = z.get("type")
+        if isinstance(typ, str) and typ and typ not in ZONE_TYPES and len(json.dumps(z)) <= 4096:
+            out.append(dict(z))      # newer zone kind: kept as-is, ignored by timing, drawn greyed (ZONES.md)
+            continue
+        if typ not in ZONE_TYPES:
+            raise ZoneError(f"zone {zid!r}: type must be boost, mud or lapline")
+        shape = z.get("shape", ZONE_SHAPES[typ][0])
+        if shape not in ZONE_SHAPES[typ]:
+            raise ZoneError(f"zone {zid!r}: a {typ} zone must be a {' or '.join(ZONE_SHAPES[typ])}")
+        name = z.get("name")
+        name = (name.strip()[:40] if isinstance(name, str) else "") or ZONE_DEFAULT_NAMES[typ]
+        n = {"id": zid, "type": typ, "name": name, "shape": shape}
+        if shape == "circle":
+            lat, lon = _point([z.get("lat"), z.get("lon")], zid, "centre")
+            r = _num(z, "r_m", what="r_m")
+            if r < MIN_R_M:
+                raise ZoneError(f"zone {zid!r}: radius {r:g} m is below the {MIN_R_M:g} m minimum")
+            if r > MAX_R_M:
+                raise ZoneError(f"zone {zid!r}: radius {r:g} m is above {MAX_R_M:g} m")
+            n.update(lat=lat, lon=lon, r_m=round(r, 1))
+        elif shape == "polygon":
+            pts = z.get("points")
+            if not isinstance(pts, list) or len(pts) < 3:
+                raise ZoneError(f"zone {zid!r}: a polygon needs at least 3 points")
+            if len(pts) > MAX_POLY_POINTS:
+                raise ZoneError(f"zone {zid!r}: at most {MAX_POLY_POINTS} polygon points")
+            n["points"] = [_point(p, zid, f"point {j + 1}") for j, p in enumerate(pts)]
+        else:
+            a, b = _point(z.get("a"), zid, "a"), _point(z.get("b"), zid, "b")
+            en = local_en(a[0], a[1])
+            if math.hypot(*en(*b)) < MIN_LINE_M:
+                raise ZoneError(f"zone {zid!r}: lap line must be at least {MIN_LINE_M:g} m long")
+            n.update(a=a, b=b)
+        if typ == "boost":
+            n["scale"] = round(_clamp(_num(z, "scale", 1.0), 0.1, 1.0), 2)
+            n["secs"] = int(round(_clamp(_num(z, "secs", 5), 1, 30)))
+            n["cooldown_s"] = int(round(_clamp(_num(z, "cooldown_s", 20), 0, 600)))
+        elif typ == "mud":
+            n["scale"] = round(_clamp(_num(z, "scale", 0.5), 0.1, 1.0), 2)
+        else:
+            laplines += 1
+            n["min_lap_s"] = int(round(_clamp(_num(z, "min_lap_s", DEFAULT_MIN_LAP_S), 5, 600)))
+        out.append(n)
+    if laplines > 1:
+        raise ZoneError("only one lap line is allowed")
+    enabled = doc.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ZoneError("enabled must be true or false")
+    return {"enabled": enabled, "zones": out}
+
+
+def segment_cross(p1, p2, q1, q2):
+    """Fraction t along p1->p2 where it crosses segment q1-q2, or None. 2D points."""
+    rx, ry = p2[0] - p1[0], p2[1] - p1[1]
+    sx, sy = q2[0] - q1[0], q2[1] - q1[1]
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-12:
+        return None                                  # parallel / degenerate
+    qpx, qpy = q1[0] - p1[0], q1[1] - p1[1]
+    t = (qpx * sy - qpy * sx) / den
+    u = (qpx * ry - qpy * rx) / den
+    if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+class LapState:
+    def __init__(self):
+        self.laps = 0               # completed laps
+        self.started_mono = None    # last crossing (start of the running lap)
+        self.started_wall = None
+        self.last_s = None
+        self.best_s = None
+        self.crossings = 0
+
+    def to_dict(self, kart, now):
+        return {"kart": kart, "laps": self.laps,
+                "last_s": None if self.last_s is None else round(self.last_s, 2),
+                "best_s": None if self.best_s is None else round(self.best_s, 2),
+                "current_s": None if self.started_mono is None else round(max(0.0, now - self.started_mono), 1),
+                "last_cross_wall": self.started_wall, "running": self.started_mono is not None}
+
+
+class Game:
+    """Zones document + per-kart lap timing from telemetry fixes."""
+
+    def __init__(self):
+        self.doc = dict(EMPTY_ZONES)
+        self.laps = {}                       # kart -> LapState
+        self._line = None                    # (a_en, b_en, project, min_lap_s) or None
+
+    def set_doc(self, doc):
+        """Install a validated document ({"version","enabled","zones"}). Lap state is
+        cleared when the lap line geometry or min_lap_s changes."""
+        old = self._lapline()
+        self.doc = {"version": int(doc.get("version", 0)), "enabled": bool(doc.get("enabled")),
+                    "zones": list(doc.get("zones") or [])}
+        new = self._lapline()
+        key = lambda z: None if z is None else (tuple(z["a"]), tuple(z["b"]), z.get("min_lap_s"))  # noqa: E731
+        if key(old) != key(new):
+            self.laps = {}
+        if new is None:
+            self._line = None
+        else:
+            proj = local_en(new["a"][0], new["a"][1])
+            self._line = (proj(*new["a"]), proj(*new["b"]), proj,
+                          float(new.get("min_lap_s", DEFAULT_MIN_LAP_S)))
+
+    def _lapline(self):
+        return next((z for z in self.doc["zones"] if z.get("type") == "lapline" and z.get("shape") == "line"), None)
+
+    @property
+    def active(self):
+        return self.doc["enabled"] and self._line is not None
+
+    def reset_laps(self):
+        self.laps = {}
+
+    def on_move(self, kart, prev, cur, now, wall=None):
+        """prev = (lat, lon, mono_of_that_fix), cur = (lat, lon) received at `now`.
+        Returns True when the move crossed the lap line and counted."""
+        if not self.active:
+            return False
+        a, b, proj, min_lap = self._line
+        t = segment_cross(proj(prev[0], prev[1]), proj(cur[0], cur[1]), a, b)
+        if t is None:
+            return False
+        pm = prev[2]
+        at = pm + t * (now - pm) if pm is not None and 0 <= now - pm <= 5.0 else now
+        st = self.laps.setdefault(kart, LapState())
+        if st.started_mono is not None:
+            lap = at - st.started_mono
+            if lap < min_lap:
+                return False
+            st.laps += 1
+            st.last_s = lap
+            st.best_s = lap if st.best_s is None else min(st.best_s, lap)
+        st.started_mono, st.started_wall = at, wall
+        st.crossings += 1
+        return True
+
+    def board(self, now):
+        """Ranked laps: completed laps desc, then earlier last crossing first."""
+        if not self.active:
+            return []
+        rows = [(k, st) for k, st in self.laps.items() if st.started_mono is not None]
+        rows.sort(key=lambda r: (-r[1].laps, r[1].started_mono, r[0]))
+        out = []
+        for pos, (k, st) in enumerate(rows, 1):
+            d = st.to_dict(k, now)
+            d["pos"] = pos
+            out.append(d)
+        return out
+
+    def status(self):
+        line = self._lapline()
+        return {"enabled": self.doc["enabled"], "version": self.doc["version"],
+                "zones": len(self.doc["zones"]), "lapline": line is not None,
+                "min_lap_s": line.get("min_lap_s") if line else None, "timing": self.active}
+
 
 
 class Command:
@@ -368,7 +617,7 @@ class Command:
 
     def wire(self, kart=None):
         obj = {"cmd": self.cmd, "kart": self.kart if kart is None else kart, "seq": self.seq}
-        if self.cmd == "mode":
+        if self.cmd in ("mode", "slow", "boost"):
             obj["arg"] = self.arg
         if self.cmd != "ping":
             obj["ttl"] = self.ttl
@@ -377,7 +626,8 @@ class Command:
     def to_dict(self):
         return {
             "id": self.id, "seq": self.seq, "cmd": self.cmd, "kart": self.kart, "arg": self.arg,
-            "arg_name": (MODE_NAMES.get(self.arg) if self.cmd == "mode" else (f"{self.arg or 5} mph" if self.cmd == "slow" else None)),
+            "arg_name": (MODE_NAMES.get(self.arg) if self.cmd == "mode" else (f"{self.arg or 5} mph" if self.cmd == "slow"
+                         else (f"{self.arg}%" if self.cmd == "boost" else None))),
             "ttl": self.ttl, "source": self.source, "state": self.state,
             "created_wall": self.created_wall, "first_tx_wall": self.first_tx_wall,
             "tx_count": self.tx_count, "radio_sent": self.radio_sent,
@@ -424,16 +674,26 @@ class CommandManager:
                 raise CommandError("mode arg must be 0 ECO, 1 NORMAL or 2 SPORT")
             if arg not in MODE_NAMES:
                 raise CommandError("mode arg must be 0 ECO, 1 NORMAL or 2 SPORT")
+        elif cmd == "slow":
+            try:
+                arg = 5 if arg in (None, "") else int(arg)
+            except (TypeError, ValueError):
+                raise CommandError("slow: mph must be 1-60")
+            if not 1 <= arg <= 60:
+                raise CommandError("slow: mph must be 1-60")
+        elif cmd == "boost":
+            try:
+                arg = BOOST_MAX_PCT if arg in (None, "") else int(arg)
+            except (TypeError, ValueError):
+                raise CommandError("boost: scale percent must be 10-100")
+            if not BOOST_MIN_PCT <= arg <= BOOST_MAX_PCT:
+                raise CommandError("boost: scale percent must be 10-100")
         else:
             arg = None
         c = Command(None, cmd, kart, arg, self.ttl, source, now, wall)
         self._ids += 1
         c.id = self._ids
         self.history.append(c)
-        if cmd == "slow":
-            arg = 5 if arg in (None, "") else int(arg)
-            if not 1 <= arg <= 60:
-                raise CommandError("slow: mph must be 1-60")
         if cmd == "stop":
             self._preempt(c, now)
             self._transmit_first(c, now, wall)      # STOP never waits in the queue

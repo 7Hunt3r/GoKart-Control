@@ -105,6 +105,10 @@ class App:
         self.map_cfg = self._load_map()
         fallback = self.map_cfg.get("origin") or cfg.get("origin")
         self.fleet = pitcore.Fleet(fallback_origin=fallback)
+        self.zones_path = os.path.join(map_dir, "zones.json")
+        self.zones_comment = None
+        self._zones_mtime = None
+        self._load_zones()
         self.link = Link(self._on_line, self._on_link_state, port=cfg.get("serial_port"),
                          tcp=cfg.get("tcp"), log=self._console)
         self.cmds = pitcore.CommandManager(self.fleet, self._send, log=self._cmd_log,
@@ -157,6 +161,93 @@ class App:
             return m if isinstance(m, dict) else {}
         except (OSError, ValueError):
             return {}
+
+    # -- game zones (map/ZONES.md) ------------------------------------------
+    def _load_zones(self):
+        """(Re)load zones.json if its mtime changed. A missing file = game off.
+        An invalid file is logged and ignored (karts are served the last good document)."""
+        try:
+            mtime = os.stat(self.zones_path).st_mtime_ns
+        except OSError:
+            mtime = None
+        if mtime == self._zones_mtime:
+            return
+        self._zones_mtime = mtime
+        if mtime is None:
+            with self.lock:
+                self.fleet.game.set_doc(pitcore.EMPTY_ZONES)
+            return
+        try:
+            with open(self.zones_path) as f:
+                raw = json.load(f)
+            doc = pitcore.validate_zones(raw)
+            ver = raw.get("version", 0)
+            doc["version"] = ver if isinstance(ver, int) and not isinstance(ver, bool) and ver >= 0 else 0
+        except (OSError, ValueError) as e:
+            self.log.write("event", what="zones_invalid", path=self.zones_path, error=str(e))
+            print(f"{wall_iso()} zones.json ignored: {e}", flush=True)
+            return
+        self.zones_comment = raw.get("_comment") if isinstance(raw.get("_comment"), str) else self.zones_comment
+        with self.lock:
+            self.fleet.game.set_doc(doc)
+
+    def zones_doc(self):
+        self._load_zones()
+        with self.lock:
+            d = self.fleet.game.doc
+            out = {"_comment": self.zones_comment} if self.zones_comment else {}
+            out.update(version=d["version"], enabled=d["enabled"], zones=[dict(z) for z in d["zones"]])
+        return out
+
+    def _save_zones(self, doc):
+        """Write atomically (tmp + rename), keeping the file's _comment."""
+        out = {"_comment": self.zones_comment} if self.zones_comment else {}
+        out.update(version=doc["version"], enabled=doc["enabled"], zones=doc["zones"])
+        tmp = self.zones_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(out, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, self.zones_path)
+        self._zones_mtime = os.stat(self.zones_path).st_mtime_ns
+
+    def save_zones(self, body, who):
+        self._load_zones()
+        with self.lock:
+            cur = self.fleet.game.doc
+            body = dict(body)
+            body.setdefault("enabled", cur["enabled"])      # the editor does not flip the master switch
+            doc = pitcore.validate_zones(body)
+            doc["version"] = cur["version"] + 1
+            try:
+                self._save_zones(doc)
+            except OSError as e:
+                raise pitcore.ZoneError(f"could not write zones.json: {e}")
+            self.fleet.game.set_doc(doc)
+        self.log.write("op", who=who, action="zones_save", version=doc["version"], enabled=doc["enabled"],
+                       zones=[{"id": z["id"], "type": z["type"]} for z in doc["zones"]])
+        return self.zones_doc()
+
+    def enable_zones(self, body, who):
+        en = body.get("enabled")
+        if not isinstance(en, bool):
+            raise pitcore.ZoneError("enabled must be true or false")
+        self._load_zones()
+        with self.lock:
+            cur = self.fleet.game.doc
+            doc = {"version": cur["version"] + 1, "enabled": en, "zones": cur["zones"]}
+            try:
+                self._save_zones(doc)
+            except OSError as e:
+                raise pitcore.ZoneError(f"could not write zones.json: {e}")
+            self.fleet.game.set_doc(doc)
+        self.log.write("op", who=who, action="zones_enable", enabled=en, version=doc["version"])
+        return {"enabled": en, "version": doc["version"]}
+
+    def reset_laps(self, who):
+        with self.lock:
+            self.fleet.game.reset_laps()
+        self.log.write("op", who=who, action="laps_reset")
+        return {"reset": True}
 
     # -- link callbacks (reader thread) --------------------------------------
     def _on_line(self, text):
@@ -213,6 +304,7 @@ class App:
             "fleet": fleet,
             "commands": cmds,
             "map": self.map_package(fleet["origin"]),
+            "zones": self.zones_doc(),
         }
 
     def state_json(self):
@@ -225,6 +317,7 @@ class App:
 
     def map_package(self, origin=None):
         m = self._load_map()
+        self._load_zones()
         img = m.get("image")
         if origin is None:
             with self.lock:
@@ -239,7 +332,8 @@ class App:
                 "origin_source": origin.get("source") if origin else None,
                 "course": m.get("course") or [],
                 "pit": pit,
-                "source": m.get("source"), "attribution": m.get("attribution")}
+                "source": m.get("source"), "attribution": m.get("attribution"),
+                "zones": "/map/zones.json", "zones_version": self.fleet.game.doc["version"]}
 
     # -- actions -------------------------------------------------------------
     def command(self, body, who):
@@ -356,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.app.cfg.get("password"):
             self._send(403, "Pit password not configured: set \"password\" in pit/server/config.json "
                             "and restart. Only the local kiosk can connect until then.")
-        elif self.path.startswith(("/api/", "/events", "/cmd")):
+        elif self.path.startswith(("/api/", "/events", "/cmd", "/zones", "/laps")):
             self._json(401, {"ok": False, "error": "login required"})
         else:
             p = urlparse(self.path).path
@@ -380,6 +474,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(STATIC_DIR, p[len("/static/"):])
         if p == "/map/package.json":
             return self._json(200, app.map_package())
+        if p == "/map/zones.json":
+            return self._json(200, app.zones_doc())
         if p.startswith("/map/"):
             return self._file(app.map_dir, p[len("/map/"):])
         if p == "/logout":
@@ -433,7 +529,7 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         app = self.app
         try:
-            raw = self._read_body()
+            raw = self._read_body(262144 if p == "/zones" else 8192)
         except ValueError:
             return self._json(413, {"ok": False, "error": "body too large"})
         if p == "/login":
@@ -471,6 +567,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "command": app.command(body, who)})
             if p == "/api/race":
                 return self._json(200, {"ok": True, "race": app.race(body, who)})
+            if p == "/zones":
+                return self._json(200, {"ok": True, "zones": app.save_zones(body, who)})
+            if p == "/zones/enable":
+                return self._json(200, {"ok": True, **app.enable_zones(body, who)})
+            if p == "/laps/reset":
+                return self._json(200, {"ok": True, **app.reset_laps(who)})
         except pitcore.CommandError as e:
             app.log.write("op", who=who, action=p, request=body, refused=str(e))
             return self._json(409, {"ok": False, "error": str(e)})

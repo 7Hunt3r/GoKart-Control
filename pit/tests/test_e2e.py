@@ -7,6 +7,7 @@ Run:  python3 -I pit/tests/test_e2e.py
 import http.client
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import unittest
 PIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIM = os.path.join(PIT, "sim", "sim_tbeam.py")
 SERVER = os.path.join(PIT, "server", "pit_server.py")
+MAP_DIR = os.path.join(PIT, "server", "map")
 
 
 def free_port():
@@ -37,12 +39,17 @@ class Stack:
         first = self.sim.stdout.readline().split()      # "tcp 127.0.0.1:PORT"
         assert first and first[0] == "tcp", first
         self.http_port = free_port()
+        self.map_dir = os.path.join(self.tmp.name, "map")      # zones get written here, never into the repo
+        os.makedirs(self.map_dir)
+        for name in ("map.json", "zones.json"):
+            if os.path.exists(os.path.join(MAP_DIR, name)):
+                shutil.copy(os.path.join(MAP_DIR, name), self.map_dir)
         cfg_path = os.path.join(self.tmp.name, "config.json")
         with open(cfg_path, "w") as f:
             json.dump(config or {}, f)
         self.srv = subprocess.Popen([sys.executable, "-I", SERVER, "--tcp", first[1], "--bind", "127.0.0.1",
                                      "--http-port", str(self.http_port), "--config", cfg_path,
-                                     "--log-dir", os.path.join(self.tmp.name, "logs")],
+                                     "--log-dir", os.path.join(self.tmp.name, "logs"), "--map-dir", self.map_dir],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.cookie = None
         deadline = time.time() + 10
@@ -147,6 +154,74 @@ class EndToEnd(unittest.TestCase):
         finally:
             st.close()
 
+    def test_zones_laps_and_boost(self):
+        st = Stack(["--offline", "0", "--flaky", "0", "--nofix", "0", "--fault", "0", "--loss", "0",
+                    "--track-scale", "0.3"])
+        try:
+            code, body, _ = st.request("GET", "/map/package.json")
+            pkg = json.loads(body)
+            self.assertEqual(pkg["zones"], "/map/zones.json")
+            v0 = pkg["zones_version"]
+            code, body, _ = st.request("GET", "/map/zones.json")
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body)["version"], v0)
+            for page in ("/", "/kiosk", "/m"):
+                code, body, _ = st.request("GET", page)
+                self.assertIn(b"gameChip" if page != "/" else b"zoneBar", body, page)
+
+            zones = json.loads(subprocess.run([sys.executable, "-I", SIM, "--print-zones", "--track-scale", "0.3"],
+                                              capture_output=True, text=True, check=True).stdout)
+            bad = json.loads(json.dumps(zones))
+            bad["zones"][1]["r_m"] = 5
+            code, body, _ = st.request("POST", "/zones", bad)
+            self.assertEqual(code, 409, body)
+            self.assertIn("8 m minimum", json.loads(body)["error"])
+            zones.pop("_comment")
+            code, body, _ = st.request("POST", "/zones", zones)
+            self.assertEqual(code, 200, body)
+            saved = json.loads(body)["zones"]
+            self.assertEqual(saved["version"], v0 + 1)
+            self.assertTrue(saved["enabled"])
+            self.assertEqual([z["id"] for z in saved["zones"]], ["lap", "b1", "m1"])
+            with open(os.path.join(st.map_dir, "zones.json")) as f:
+                disk = json.load(f)
+            self.assertEqual(disk["version"], v0 + 1)
+            self.assertIn("_comment", disk)                       # comment kept from the original file
+            pkg = json.loads(st.request("GET", "/map/package.json")[1])
+            self.assertEqual(pkg["zones_version"], v0 + 1)
+
+            code, body, _ = st.request("POST", "/zones/enable", {"enabled": False})
+            self.assertEqual((code, json.loads(body)["version"]), (200, v0 + 2))
+            self.assertFalse(json.loads(st.request("GET", "/map/zones.json")[1])["enabled"])
+            self.assertEqual(st.request("POST", "/zones/enable", {"enabled": "yes"})[0], 409)
+            code, body, _ = st.request("POST", "/zones/enable", {"enabled": True})
+            self.assertEqual(json.loads(body)["version"], v0 + 3)
+
+            s = st.wait(lambda s: any(r["laps"] >= 1 for r in s["fleet"]["laps"]), timeout=60)
+            board = s["fleet"]["laps"]
+            self.assertEqual([r["pos"] for r in board], list(range(1, len(board) + 1)))
+            top = board[0]
+            self.assertGreaterEqual(top["laps"], 1)
+            self.assertIsNotNone(top["best_s"])
+            self.assertEqual(s["fleet"]["karts"][top["kart"] - 1]["lap"]["laps"], top["laps"])
+            self.assertTrue(s["fleet"]["game"]["timing"])
+            self.assertEqual(s["zones"]["version"], v0 + 3)
+
+            code, body, _ = st.request("POST", "/cmd", {"cmd": "boost", "kart": 1, "arg": 100})
+            self.assertEqual(code, 200, body)
+            s = st.wait(lambda s: s["fleet"]["karts"][0]["vesc"].get("scale") == 1.0, timeout=10)
+            st.wait(lambda s: s["fleet"]["karts"][0]["vesc"].get("scale") == 0.75, timeout=12)   # auto-revert
+
+            code, body, _ = st.request("POST", "/laps/reset", {})
+            self.assertEqual(code, 200, body)
+            time.sleep(0.3)
+            self.assertFalse(any(r["laps"] >= 1 for r in st.state()["fleet"]["laps"]))
+            rows = json.loads(st.request("GET", "/api/log/recent?n=200")[1])
+            acts = {r.get("action") for r in rows if r.get("kind") == "op"}
+            self.assertTrue({"zones_save", "zones_enable", "laps_reset"} <= acts, acts)
+        finally:
+            st.close()
+
     def test_auth_and_offline_kart(self):
         st = Stack(["--offline", "8", "--flaky", "0", "--loss", "0"],
                    config={"password": "letmein", "trust_localhost": False})
@@ -154,6 +229,10 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(st.request("GET", "/api/state")[0], 401)
             self.assertEqual(st.request("GET", "/")[2].get("Location"), "/login")
             self.assertEqual(st.request("GET", "/map/package.json")[0], 200)   # kart displays: public
+            self.assertEqual(st.request("GET", "/map/zones.json")[0], 200)     # kart Pis: public too
+            self.assertEqual(st.request("POST", "/zones", {"zones": []})[0], 401)
+            self.assertEqual(st.request("POST", "/zones/enable", {"enabled": True})[0], 401)
+            self.assertEqual(st.request("POST", "/laps/reset", {})[0], 401)
             self.assertEqual(st.request("GET", "/m")[2].get("Location"), "/login?next=/m")
             self.assertEqual(st.request("GET", "/static/manifest.webmanifest")[0], 200)  # iOS fetches it cookie-less
             code, _, h = st.request("POST", "/login", "password=nope&name=x&next=/m",

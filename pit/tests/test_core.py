@@ -296,5 +296,169 @@ class CommandDelivery(unittest.TestCase):
         self.assertEqual(snap["per_kart"]["3"]["cmd"], "stop")
 
 
+# ---------------------------------------------------------------------------
+# Game zones + laps (map/ZONES.md)
+# ---------------------------------------------------------------------------
+LAT0, LON0 = 41.0940, -73.4165
+M_LAT = 1 / 111194.93                       # degrees per metre north
+M_LON = M_LAT / math.cos(math.radians(LAT0))
+
+
+def at(e, n):
+    """lat/lon of a point e metres east, n metres north of LAT0/LON0."""
+    return [round(LAT0 + n * M_LAT, 7), round(LON0 + e * M_LON, 7)]
+
+
+def zdoc(*zones, enabled=True):
+    return {"enabled": enabled, "zones": list(zones)}
+
+
+LAPLINE = {"id": "lap", "type": "lapline", "shape": "line", "a": at(0, -10), "b": at(0, 10)}
+
+
+class ZoneValidation(unittest.TestCase):
+    def test_good_document_normalized(self):
+        d = pc.validate_zones(zdoc(
+            {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 12, "scale": 3, "secs": 99},
+            {"id": "m1", "type": "mud", "shape": "polygon", "points": [at(0, 0), at(20, 0), at(10, 15)], "scale": 0.01},
+            dict(LAPLINE)))
+        b, m, lap = d["zones"]
+        self.assertEqual((b["scale"], b["secs"], b["cooldown_s"], b["name"]), (1.0, 30, 20, "Boost pad"))  # clamped
+        self.assertEqual(m["scale"], 0.1)
+        self.assertEqual((lap["min_lap_s"], lap["name"]), (20, "Start / finish"))
+        self.assertTrue(d["enabled"])
+
+    def test_refused(self):
+        circle = {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 12}
+        bad = [
+            zdoc(dict(circle, r_m=7.9)),                                      # below 8 m
+            zdoc({"id": "m", "type": "mud", "shape": "polygon", "points": [at(0, 0), at(9, 9)]}),
+            zdoc(circle, dict(circle)),                                       # duplicate id
+            zdoc(dict(circle, id="")),
+            zdoc(dict(circle, id="has space")),
+            zdoc(dict(circle, shape="line")),
+            zdoc(dict(circle, lat=95)),
+            zdoc(dict(circle, r_m="12")),
+            zdoc(dict(LAPLINE, b=at(0, -9))),                                 # 1 m line
+            zdoc(dict(LAPLINE, shape="circle")),
+            zdoc(LAPLINE, dict(LAPLINE, id="lap2")),                          # one lap line only
+            {"zones": "nope"}, [], {"zones": [], "enabled": "yes"},
+            zdoc({"id": "x", "type": 7}),
+        ]
+        for doc in bad:
+            with self.assertRaises(pc.ZoneError, msg=doc):
+                pc.validate_zones(doc)
+        self.assertTrue(issubclass(pc.ZoneError, pc.CommandError))         # -> HTTP 409 like commands
+
+    def test_unknown_type_passthrough(self):
+        d = pc.validate_zones(zdoc({"id": "o1", "type": "oil", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 9}))
+        self.assertEqual(d["zones"][0]["type"], "oil")
+
+
+class Laps(unittest.TestCase):
+    def setUp(self):
+        self.f = pc.Fleet()
+        self.set(zdoc(dict(LAPLINE, min_lap_s=20)))
+        self.t = 1000.0
+
+    def set(self, doc, version=1):
+        d = pc.validate_zones(doc)
+        d["version"] = version
+        self.f.game.set_doc(d)
+
+    def fix(self, k, e, n, dt=1.0):
+        self.t += dt
+        lat, lon = at(e, n)
+        self.f.ingest(tele(k, lat=lat, lon=lon), self.t, "w%.1f" % self.t)
+
+    def lap(self, k):
+        return self.f.snapshot(self.t)["karts"][k - 1]["lap"]
+
+    def test_crossing_starts_then_counts_laps(self):
+        self.fix(1, -5, 0)
+        self.assertIsNone(self.lap(1))
+        self.fix(1, 5, 0)                                   # first crossing: clock starts, lap 0
+        self.assertEqual((self.lap(1)["laps"], self.lap(1)["running"]), (0, True))
+        self.fix(1, 20, 0, dt=10)
+        self.fix(1, -5, 0, dt=15)                            # back across westbound (either direction)
+        self.assertEqual(self.lap(1)["laps"], 1)
+        self.assertAlmostEqual(self.lap(1)["last_s"], 25.0, delta=1.5)
+        self.fix(1, 5, 0, dt=30)
+        lp = self.lap(1)
+        self.assertEqual(lp["laps"], 2)
+        self.assertAlmostEqual(lp["best_s"], min(lp["last_s"], 25.0), delta=1.5)
+
+    def test_interpolated_crossing_time(self):
+        self.fix(1, -10, 0)
+        self.fix(1, 10, 0, dt=2.0)                           # crossed halfway -> 1 s before receipt
+        self.fix(1, 30, 0, dt=20.0)
+        self.fix(1, -10, 0, dt=4.0)                          # crossed 3/4 along (30 -> -10 m)
+        # start at t0+2-1, end at t0+2+20+3 -> 24 s
+        self.assertAlmostEqual(self.lap(1)["last_s"], 24.0, places=1)
+
+    def test_min_lap_s(self):
+        self.fix(1, -5, 0)
+        self.fix(1, 5, 0)
+        self.fix(1, -5, 0, dt=5)                             # 5 s later: too soon, ignored
+        self.assertEqual(self.lap(1)["laps"], 0)
+        self.fix(1, 5, 0, dt=20)
+        self.assertEqual(self.lap(1)["laps"], 1)
+
+    def test_miss_line_and_outside_segment(self):
+        self.fix(1, -5, 30)
+        self.fix(1, 5, 30)                                   # passes north of the 20 m line
+        self.assertIsNone(self.lap(1))
+
+    def test_disabled_or_no_line(self):
+        self.set(zdoc(LAPLINE, enabled=False))
+        self.fix(1, -5, 0); self.fix(1, 5, 0)
+        self.assertIsNone(self.lap(1))
+        self.assertEqual(self.f.snapshot(self.t)["laps"], [])
+        self.set(zdoc(enabled=True))
+        self.fix(1, -5, 0); self.fix(1, 5, 0)
+        self.assertEqual(self.f.snapshot(self.t)["game"]["timing"], False)
+
+    def test_ranking_and_reset(self):
+        for k in (1, 2, 3):
+            self.fix(k, -5, 0)
+        self.fix(2, 5, 0); self.fix(1, 5, 0); self.fix(3, 5, 0)     # start order 2, 1, 3
+        self.fix(1, -5, 0, dt=25); self.fix(3, -5, 0)               # 1 and 3 complete lap 1; 2 does not
+        board = self.f.snapshot(self.t)["laps"]
+        self.assertEqual([r["kart"] for r in board], [1, 3, 2])
+        self.assertEqual([r["pos"] for r in board], [1, 2, 3])
+        self.f.game.reset_laps()
+        self.assertEqual(self.f.snapshot(self.t)["laps"], [])
+
+    def test_line_change_clears_laps(self):
+        self.fix(1, -5, 0); self.fix(1, 5, 0)
+        self.set(zdoc(LAPLINE, {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 9}), 2)
+        self.assertIsNotNone(self.lap(1))                    # unrelated edit keeps timing
+        self.set(zdoc(dict(LAPLINE, b=at(0, 12))), 3)
+        self.assertIsNone(self.lap(1))
+
+    def test_relay_duplicate_does_not_double_count(self):
+        self.fix(1, -5, 0)
+        self.t += 1
+        lat, lon = at(5, 0)
+        self.f.ingest(tele(1, seq=9, lat=lat, lon=lon), self.t, "w")
+        self.f.ingest(tele(1, seq=9, lat=lat, lon=lon, relayed=True), self.t + 0.02, "w")
+        self.assertEqual(self.lap(1)["laps"], 0)
+
+
+class BoostCommand(unittest.TestCase):
+    def test_boost_arg_on_wire(self):
+        h = Harness()
+        h.cm.submit("boost", 2, 100, now=h.now)
+        self.assertEqual(h.sent[-1]["cmd"], "boost")
+        self.assertEqual(h.sent[-1]["arg"], 100)
+        h.cm.submit("boost", 3, None, now=h.now)
+        self.assertEqual(h.sent[-1]["arg"], 100)                # default full scale
+        h.cm.submit("slow", 4, 7, now=h.now)
+        self.assertEqual(h.sent[-1]["arg"], 7)
+        for bad in (9, 101, "x"):
+            with self.assertRaises(pc.CommandError):
+                h.cm.submit("boost", 1, bad, now=h.now)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

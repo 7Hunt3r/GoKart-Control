@@ -15,8 +15,14 @@ surveyed course). Default scenario, each switchable with 0 to disable:
   --offline 8  kart 8 never transmits
   --novesc 0   a kart whose VESC link is down (answers commands with no_vesc)
 Commands from the host are honoured: echoed in last_cmd_seq/cmd_result,
-stop/start/mode change the simulated kart. --loss drops that fraction of
-command receptions per kart so the retry path can be watched.
+stop/start/mode change the simulated kart, boost raises the echoed `scale` (and
+the speed) for 5 s like the firmware. --loss drops that fraction of command
+receptions per kart so the retry path can be watched.
+
+Game zones: `--print-zones` prints a zones.json document matching the oval (a
+lap line across the bottom straight, a boost pad on the top straight, mud on the
+east bend), ready to POST to the pit's /zones. `--track-scale 0.3` shrinks the
+oval so laps come round in about 15 s (used by the e2e test).
 """
 from __future__ import annotations
 
@@ -48,9 +54,35 @@ def en_to_latlon(e, n):
     return lat, lon
 
 
+TRACK_SCALE = 1.0
+
+
+def track_dims():
+    return 120.0 * TRACK_SCALE, 35.0 * TRACK_SCALE
+
+
+def sim_zones():
+    """zones.json for the simulated oval (see ZONES.md); enabled."""
+    L, r = track_dims()
+    per = 2 * L + 2 * math.pi * r
+    half = min(10.0, r * 0.8)
+    ll = lambda e, n: [round(x, 7) for x in en_to_latlon(e, n)]  # noqa: E731
+    blat, blon = en_to_latlon(0.0, r)
+    mlat, mlon = en_to_latlon(L / 2 + r, 0.0)
+    return {"_comment": "Simulator oval zones (pit/sim/sim_tbeam.py --print-zones); not a real course.",
+            "version": 1, "enabled": True, "zones": [
+                {"id": "lap", "type": "lapline", "name": "Start / finish", "shape": "line",
+                 "a": ll(0.0, -r - half), "b": ll(0.0, -r + half),
+                 "min_lap_s": 20 if TRACK_SCALE >= 1.0 else max(5, int(per / 24))},
+                {"id": "b1", "type": "boost", "name": "Boost pad", "shape": "circle",
+                 "lat": round(blat, 7), "lon": round(blon, 7), "r_m": 12, "scale": 1.0, "secs": 5, "cooldown_s": 20},
+                {"id": "m1", "type": "mud", "name": "Mud", "shape": "circle",
+                 "lat": round(mlat, 7), "lon": round(mlon, 7), "r_m": 15, "scale": 0.5}]}
+
+
 def oval(s):
-    """Point and heading on a 2*120 m straight + r=35 m loop, s in metres along it."""
-    L, r = 120.0, 35.0
+    """Point and heading on a 2*120 m straight + r=35 m loop (times --track-scale), s in metres along it."""
+    L, r = track_dims()
     per = 2 * L + 2 * math.pi * r
     s %= per
     if s < L:
@@ -90,6 +122,9 @@ class SimKart:
         self.boot = time.monotonic() - random.uniform(100, 900)
         self.target_jitter = random.uniform(-1.0, 1.0)
         self.batt_a = 0.0
+        self.slow_mph = 0
+        self.boost_scale = None                # timed override (firmware GK_CMD_BOOST), None = off
+        self.boost_until = 0.0
 
     def silent(self, now):
         if self.offline:
@@ -103,6 +138,10 @@ class SimKart:
             if self.cmd_result == 1:
                 self.cmd_result = 2
         top = 0.0 if self.stopped else MODE_MAX_MS.get(self.mode_actual if self.mode_actual is not None else 1)
+        if self.boost_scale is not None and now >= self.boost_until:
+            self.boost_scale = None            # auto-revert to the mode scale
+        if self.boost_scale is not None and not self.stopped:
+            top *= self.boost_scale / self.mode_scale()
         top += self.target_jitter + 0.8 * math.sin(now / 7.0 + self.k)
         top = max(0.0, top)
         accel = max(-6.0, min(2.5, (top - self.v) * 0.8))
@@ -115,6 +154,9 @@ class SimKart:
         target_t = (84.0 if self.fault else 34.0 + self.batt_a * 0.25)
         self.esc_c += (target_t - self.esc_c) * dt / 40.0
         self.motor_a = motor_a
+
+    def mode_scale(self):
+        return {0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual, 0.75)
 
     def tele(self, rx_ms):
         self.seq = (self.seq + 1) % 256
@@ -136,13 +178,14 @@ class SimKart:
             "duty": round(min(0.95, self.v / 14.0), 3) if vl else None,
             "esc_c": round(self.esc_c, 1) if vl else None, "fault": self.fault if vl else None,
             "mode_req": self.mode_req, "mode_actual": self.mode_actual if vl else None,
-            "scale": ({0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual) if not self.stopped else 0.0) if vl else None,
+            "scale": ((self.boost_scale if self.boost_scale is not None else {0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual))
+                      if not self.stopped else 0.0) if vl else None,
             "stopped": self.stopped, "vesc_link": vl,
             "mode_confirmed": vl and self.mode_req is not None and self.mode_req == self.mode_actual,
             "pps": fix, "wifi": False, "writes": True,
             "last_cmd_seq": self.last_cmd_seq, "cmd_result": self.cmd_result,
             "ah": round(self.ah, 3), "uptime_s": int(time.monotonic() - self.boot),
-            "base_rssi": random.randint(-95, -70), "rssi": random.randint(-98, -72), "slow_mph": 0, "relayed": False,
+            "base_rssi": random.randint(-95, -70), "rssi": random.randint(-98, -72), "slow_mph": self.slow_mph, "relayed": False,
             "snr": round(random.uniform(2.0, 9.5), 1), "rx_ms": rx_ms,
         }
 
@@ -160,10 +203,18 @@ class SimKart:
             return
         if cmd == "stop":
             self.stopped, self.cmd_result = True, 2
+            self.boost_scale = None
         elif cmd == "slow":
             self.slow_mph = int(msg.get("arg") or 5); self.cmd_result = 2
         elif cmd == "start":
             self.stopped, self.cmd_result = False, 2
+            self.boost_scale = None
+        elif cmd == "boost":
+            arg = msg.get("arg")
+            if self.stopped or not isinstance(arg, int) or not 10 <= arg <= 100:
+                self.cmd_result = 4
+            else:
+                self.boost_scale, self.boost_until, self.cmd_result = arg / 100.0, now + 5.0, 2
         elif cmd == "mode" and msg.get("arg") in (0, 1, 2):
             self.mode_req = msg["arg"]
             self.cmd_result = 1                 # accepted; becomes applied when "re-read" confirms
@@ -326,7 +377,14 @@ def main():
     ap.add_argument("--novesc", type=int, default=0)
     ap.add_argument("--loss", type=float, default=0.1, help="per-kart command loss fraction")
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--track-scale", type=float, default=1.0, help="shrink/grow the oval (0.3 = ~15 s laps)")
+    ap.add_argument("--print-zones", action="store_true", help="print zones.json for this oval and exit")
     args = ap.parse_args()
+    global TRACK_SCALE
+    TRACK_SCALE = max(0.1, args.track_scale)
+    if args.print_zones:
+        print(json.dumps(sim_zones(), indent=2))
+        return
     if args.seed is not None:
         random.seed(args.seed)
     sim = Sim(args)

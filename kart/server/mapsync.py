@@ -15,6 +15,14 @@ local cache; the pit is only polled to refresh it:
   its GPS fix without a version bump); the image is not re-downloaded;
 - unreachable pit: nothing changes, the cached copy keeps being served.
 
+Game zones (pit/server/map/ZONES.md): when the package lists `"zones":
+"/map/zones.json"` with `"zones_version": N`, the zones file is fetched into the
+cache (same temp-file + rename discipline, before the package is written)
+whenever N differs from the cached one or the file is missing. A package
+without `zones` means the pit has no game: the cached zones file is removed
+(game off). A bad zones download keeps the previous zones and is retried on the
+next poll; it never blocks the map itself.
+
 Standard library only.
 """
 from __future__ import annotations
@@ -33,6 +41,8 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_PACKAGE_BYTES = 256 * 1024
 PACKAGE = "package.json"
+ZONES = "zones.json"
+MAX_ZONES_BYTES = 256 * 1024
 
 
 def _wall():
@@ -53,8 +63,10 @@ class MapSync:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self.package = self._load_cached()
+        self._zones = self._load_zones()
         self.status = {"reachable": None, "pit_url": None, "last_try_wall": None, "last_ok_wall": None,
-                       "last_error": None, "last_update_wall": None, "downloads": 0}
+                       "last_error": None, "last_update_wall": None, "downloads": 0,
+                       "zones_error": None, "zones_downloads": 0}
 
     # -- public ----------------------------------------------------------------
     def start(self):
@@ -72,7 +84,11 @@ class MapSync:
         with self._lock:
             pkg = dict(self.package) if self.package else None
             st = dict(self.status)
-        return {"package": pkg, "sync": st, "cached": pkg is not None}
+        return {"package": pkg, "sync": st, "cached": pkg is not None, "zones": self._zones}
+
+    def zones(self):
+        """The cached zones document (dict) or None (no game). Replaced, never mutated."""
+        return self._zones
 
     def file_path(self, name):
         """Absolute path of a cached file that may be served, or None."""
@@ -157,24 +173,65 @@ class MapSync:
             with self._lock:
                 self.status["downloads"] += 1
             self.log(f"map sync: downloaded {name} ({len(data)} bytes) for package version {version}")
+        zones_doc, zones_version = self._sync_zones(base, pkg, cur)
         local = {k: pkg.get(k) for k in ("version", "bounds", "origin", "origin_source", "course",
                                           "pit", "source", "attribution")}
+        local["zones_version"] = zones_version
         local["image"] = f"/map/{name}" if name else None
         local["image_file"] = name
         local["fetched_from"] = base
         changed = cur is None or {k: v for k, v in cur.items() if k not in ("fetched_wall",)} \
             != {k: v for k, v in local.items()}
         if not changed:
+            with self._lock:
+                self._zones = zones_doc          # e.g. a deleted zones.json re-fetched at the same version
             return False
         local["fetched_wall"] = _wall()
         self._atomic_write(PACKAGE, json.dumps(local, indent=1).encode())
         with self._lock:
             self.package = local
+            self._zones = zones_doc
             self.status["last_update_wall"] = local["fetched_wall"]
         if cur is None or cur.get("version") != version:
             self.log(f"map sync: package version {cur.get('version') if cur else None} -> {version}")
-        self._prune(keep={PACKAGE, name})
+        self._prune(keep={PACKAGE, name, ZONES})
         return True
+
+    def _sync_zones(self, base, pkg, cur):
+        """-> (zones doc or None, zones_version to record). Writes/removes cache/zones.json."""
+        remote = pkg.get("zones")
+        zv = pkg.get("zones_version")
+        path = os.path.join(self.cache_dir, ZONES)
+        if not remote:
+            if os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                self.log("map sync: the pit lists no game zones; game off")
+            with self._lock:
+                self.status["zones_error"] = None
+            return None, None
+        have = cur.get("zones_version") if cur else None
+        if have is not None and have == zv and self._zones is not None and os.path.isfile(path):
+            return self._zones, have
+        try:
+            raw = self._get(urljoin(base + "/", str(remote).lstrip("/")), MAX_ZONES_BYTES)
+            doc = json.loads(raw)
+            if not isinstance(doc, dict) or not isinstance(doc.get("zones"), list):
+                raise ValueError("zones file has no zones list")
+        except Exception as e:          # noqa: BLE001 - keep the old zones, retry next poll
+            with self._lock:
+                self.status["zones_error"] = f"{base}: zones: {e}"[:300]
+            self.log(f"map sync: zones download failed ({e}); keeping zones version {have}")
+            return self._zones, have
+        self._atomic_write(ZONES, json.dumps(doc, indent=1).encode())
+        with self._lock:
+            self.status["zones_error"] = None
+            self.status["zones_downloads"] = self.status.get("zones_downloads", 0) + 1
+        self.log(f"map sync: zones version {have} -> {zv} ({len(doc['zones'])} zones, "
+                 f"enabled={doc.get('enabled') is True})")
+        return doc, zv
 
     def _atomic_write(self, name, data):
         fd, tmp = tempfile.mkstemp(prefix=".dl-", dir=self.cache_dir)
@@ -207,6 +264,18 @@ class MapSync:
                 pkg = json.load(f)
             if isinstance(pkg, dict):
                 return pkg
+        except (OSError, ValueError):
+            pass
+        return None
+
+    def _load_zones(self):
+        if not self.package or self.package.get("zones_version") is None:
+            return None
+        try:
+            with open(os.path.join(self.cache_dir, ZONES)) as f:
+                doc = json.load(f)
+            if isinstance(doc, dict) and isinstance(doc.get("zones"), list):
+                return doc
         except (OSError, ValueError):
             pass
         return None

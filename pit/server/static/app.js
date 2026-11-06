@@ -63,7 +63,7 @@ function cmdLabel(cmd, kart, arg) {
 }
 function sendCmd(cmd, kart, arg) {
   const body = { cmd, kart };
-  if (cmd === "mode") body.arg = arg;
+  if (cmd === "mode" || ((cmd === "slow" || cmd === "boost") && !nul(arg))) body.arg = arg;
   post("/cmd", body).then((j) => { if (j && j.ok) toast(`${cmdLabel(cmd, kart, arg)} sent (seq ${j.command.seq ?? "queued"})`); });
 }
 
@@ -93,6 +93,7 @@ function kartButtons(k) {
     <button data-c="mode" data-k="${k}" data-a="1">NORMAL</button>
     <button data-c="mode" data-k="${k}" data-a="2">SPORT</button>
     <button class="b-slow" data-c="slow" data-k="${k}" data-a="5">SLOW</button>
+    <button class="b-boost" data-c="boost" data-k="${k}" data-a="100">BOOST</button>
     <button class="b-stop" data-c="stop" data-k="${k}">STOP</button>
     <button class="b-start" data-c="start" data-k="${k}">START</button></div>`;
 }
@@ -222,6 +223,7 @@ function updateCards() {
     if (st.vesc_link === false) b.push('<span class="badge unknown">VESC LINK DOWN</span>');
     if (st.writes === false) b.push('<span class="badge grey">WRITES OFF</span>');
     if (entered.includes(k.id)) b.push('<span class="badge entered">ENTERED</span>');
+    if (gameTiming() && k.lap) b.push(`<span class="badge lap">P${k.lap.pos} L${k.lap.laps}${nul(k.lap.best_s) ? "" : " · " + fmtLap(k.lap.best_s)}</span>`);
     c.f.badges.innerHTML = b.join("");
     c.el.querySelectorAll("[data-c]").forEach((btn) => {
       btn.disabled = !linkUp;
@@ -260,7 +262,13 @@ function updateTop() {
   const cb = $("connBanner");
   if (!L.connected) { cb.textContent = "T-BEAM LINK DOWN: telemetry is frozen and commands cannot be sent"; cb.classList.remove("hidden"); }
   else cb.classList.add("hidden");
-  ["stopAll", "startAll"].forEach((id) => { $(id).disabled = !L.connected; });
+  ["stopAll", "startAll", "slowAll", "boostAll"].forEach((id) => { if ($(id)) $(id).disabled = !L.connected; });
+  const Z = zonesDoc();
+  const gc = $("gameChip");
+  if (gc) {
+    gc.textContent = Z.enabled ? (COMPACT ? "GAME ON" : `GAME ON · ${Z.zones.length} zone${Z.zones.length === 1 ? "" : "s"}`) : "GAME OFF";
+    gc.className = "gamechip " + (Z.enabled ? "on" : "off");
+  }
   document.querySelectorAll("[data-allmode]").forEach((b) => { b.disabled = !L.connected; });
   $("fOnline").classList.toggle("sel", filters.online);
   $("fEntered").classList.toggle("sel", filters.entered);
@@ -387,9 +395,9 @@ function drawMap() {
     if (note) note.textContent = "";
     return;
   }
-  const cl = Math.cos(o.lat * Math.PI / 180);
-  const en = (lat, lon) => [(lon - o.lon) * Math.PI / 180 * R_EARTH * cl, (lat - o.lat) * Math.PI / 180 * R_EARTH];
+  const en = geo().en;
   const M = S.map || {};
+  const zones = zed.on ? zed.draft : zonesDoc().zones;
   const base = S.fleet.base;
   const shown = S.fleet.karts.filter((k) => visible(k) && k.gps && k.gps.last_fix);
 
@@ -399,6 +407,7 @@ function drawMap() {
     shown.forEach((k) => { pts.push(en(k.gps.last_fix.lat, k.gps.last_fix.lon)); k.trail.forEach((p) => pts.push(en(p[0], p[1]))); });
     if (base && base.fix && !nul(base.lat)) pts.push(en(base.lat, base.lon));
     (M.course || []).forEach((p) => pts.push(en(p[0], p[1])));
+    zonePoints(zones).forEach((p) => pts.push(en(p[0], p[1])));
     if (!pts.length && M.bounds) { pts.push(en(M.bounds.north, M.bounds.west), en(M.bounds.south, M.bounds.east)); }
     if (!pts.length) pts.push([0, 0]);
     const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
@@ -423,6 +432,7 @@ function drawMap() {
     M.course.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
     ctx.stroke(); ctx.setLineDash([]);
   }
+  drawZones(ctx, zones, px, en, !zed.on && !zonesDoc().enabled);
   if (base && base.fix && !nul(base.lat)) {
     const b = px(en(base.lat, base.lon));
     ctx.fillStyle = "#000"; ctx.fillRect(b[0] - 7, b[1] - 7, 14, 14);
@@ -459,6 +469,11 @@ function drawMap() {
   ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(12, H - 12); ctx.lineTo(12 + len, H - 12); ctx.stroke();
   ctx.fillStyle = "#000"; ctx.font = "bold 12px sans-serif"; ctx.fillText(`${step} m`, 18 + len, H - 8);
   ctx.font = "bold 14px sans-serif"; ctx.fillText("N ↑", W - 34, H - 10);
+  if (zed.on && zed.lapA) {
+    const a = px(en(zed.lapA[0], zed.lapA[1]));
+    ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(a[0], a[1], 6, 0, 2 * Math.PI); ctx.fill();
+    ctx.font = "bold 12px sans-serif"; ctx.fillText("tap the other end", a[0] + 10, a[1] - 8);
+  }
   if (note) note.textContent = `origin: ${o.source === "base" ? "base GPS" : o.source === "kart" ? "first kart fix" : "configured"}`
     + (M.image ? (M.attribution ? ` | imagery: ${M.attribution}` : " | imagery loaded") : " | no imagery");
 }
@@ -484,7 +499,14 @@ function setupMapInput() {
   cv.addEventListener("pointerdown", (e) => {
     cv.setPointerCapture(e.pointerId);
     ptrs.set(e.pointerId, local(e));
-    if (ptrs.size === 1) { const [x, y] = local(e); drag = { x, y, cx: view.cx, cy: view.cy, moved: false }; pinch = null; }
+    if (ptrs.size === 1) {
+      const [x, y] = local(e);
+      drag = { x, y, cx: view.cx, cy: view.cy, moved: false }; pinch = null;
+      if (zed.on && zed.tool === "select") {          // zone editor: grab a zone to move it
+        const hit = zoneAt(world(x, y));
+        if (hit) { zed.sel = hit.id; drag.zone = hit; drag.last = world(x, y); if (S) drawMap(); }
+      }
+    }
     else if (ptrs.size === 2) {
       drag = null;
       const [a, b] = [...ptrs.values()];
@@ -507,10 +529,18 @@ function setupMapInput() {
       const [x, y] = local(e);
       const dx = x - drag.x, dy = y - drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; view.fit = false; }
-      if (drag.moved) { view.cx = drag.cx - dx / view.scale; view.cy = drag.cy + dy / view.scale; if (S) drawMap(); }
+      if (drag.moved && drag.zone) {
+        const w = world(x, y);
+        moveZone(drag.zone, w[0] - drag.last[0], w[1] - drag.last[1]);
+        drag.last = w; zed.dirty = true; if (S) drawMap();
+      } else if (drag.moved) { view.cx = drag.cx - dx / view.scale; view.cy = drag.cy + dy / view.scale; if (S) drawMap(); }
     }
   });
   const release = (e) => {
+    if (zed.on && e.type === "pointerup" && drag && !drag.moved && ptrs.size === 1 && ptrs.has(e.pointerId)) {
+      const [x, y] = local(e);
+      zoneTap(world(x, y));
+    }
     ptrs.delete(e.pointerId);
     if (ptrs.size < 2) pinch = null;
     if (ptrs.size === 1) { const [x, y] = [...ptrs.values()][0]; drag = { x, y, cx: view.cx, cy: view.cy, moved: true }; }
@@ -519,6 +549,290 @@ function setupMapInput() {
   ["pointerup", "pointercancel", "lostpointercapture"].forEach((ev) => cv.addEventListener(ev, release));
   cv.addEventListener("wheel", (e) => { e.preventDefault(); const [x, y] = local(e); zoomAt(x, y, Math.pow(1.0015, -e.deltaY)); if (S) drawMap(); }, { passive: false });
   cv.addEventListener("dblclick", (e) => { const [x, y] = local(e); zoomAt(x, y, 1.6); if (S) drawMap(); });
+}
+
+/* -------------------------------------------------- game zones + laps (map/ZONES.md) */
+const ZONE_STYLE = {
+  boost: { fill: "rgba(255,140,0,0.32)", stroke: "#b85a00" },
+  mud: { fill: "rgba(115,72,30,0.42)", stroke: "#4a2c10" },
+};
+const ZONE_DEFAULT_R = { boost: 12, mud: 15 };
+// zone editor state (operator page only): draft is edited locally until SAVE
+const zed = { on: false, tool: "select", draft: [], sel: null, lapA: null, dirty: false, baseVersion: null, shownSel: undefined };
+
+function zonesDoc() { return (S && S.zones) || { version: 0, enabled: false, zones: [] }; }
+function gameTiming() { return !!(S && S.fleet.game && S.fleet.game.timing); }
+function fmtLap(s) {
+  if (nul(s)) return "--";
+  if (s < 60) return s.toFixed(1);
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return `${m}:${r.toFixed(1).padStart(4, "0")}`;
+}
+/* local tangent plane around the map origin: en(lat,lon) -> [east m, north m], ll(e,n) -> [lat, lon] */
+function geo() {
+  const o = S.fleet.origin;
+  const cl = Math.cos(o.lat * Math.PI / 180), k = 180 / Math.PI / R_EARTH;
+  return {
+    en: (lat, lon) => [(lon - o.lon) * Math.PI / 180 * R_EARTH * cl, (lat - o.lat) * Math.PI / 180 * R_EARTH],
+    ll: (e, n) => [+(o.lat + n * k).toFixed(7), +(o.lon + e * k / cl).toFixed(7)],
+  };
+}
+function zonePoints(zones) {
+  const pts = [];
+  (zones || []).forEach((z) => {
+    if (z.shape === "circle" && !nul(z.lat)) pts.push([z.lat, z.lon]);
+    else if (z.shape === "polygon" && Array.isArray(z.points)) z.points.forEach((p) => pts.push(p));
+    else if (z.shape === "line" && z.a && z.b) pts.push(z.a, z.b);
+  });
+  return pts;
+}
+
+function drawChevrons(ctx, c, size) {
+  ctx.strokeStyle = "#111"; ctx.lineWidth = Math.max(2, size / 4); ctx.lineJoin = "miter"; ctx.lineCap = "butt";
+  for (const dy of [-size * 0.45, size * 0.25]) {
+    ctx.beginPath();
+    ctx.moveTo(c[0] - size * 0.6, c[1] + dy + size * 0.4); ctx.lineTo(c[0], c[1] + dy - size * 0.2); ctx.lineTo(c[0] + size * 0.6, c[1] + dy + size * 0.4);
+    ctx.stroke();
+  }
+}
+function drawLapline(ctx, a, b, sel) {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (len < 1) return;
+  const n = Math.max(4, Math.round(len / 7)), w = len / n, h = 4;
+  ctx.save();
+  ctx.translate(a[0], a[1]); ctx.rotate(Math.atan2(b[1] - a[1], b[0] - a[0]));
+  if (sel) { ctx.strokeStyle = "#0b4fb3"; ctx.lineWidth = 3; ctx.setLineDash([5, 4]); ctx.strokeRect(-4, -h - 4, len + 8, 2 * h + 8); ctx.setLineDash([]); }
+  for (let i = 0; i < n; i++) {
+    ctx.fillStyle = i % 2 ? "#fff" : "#000"; ctx.fillRect(i * w, -h, w, h);
+    ctx.fillStyle = i % 2 ? "#000" : "#fff"; ctx.fillRect(i * w, 0, w, h);
+  }
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(0, -h, len, 2 * h);
+  ctx.restore();
+  // flag on end a: pole + 3x2 checkered flag
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(a[0], a[1] - 26); ctx.stroke();
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) {
+    ctx.fillStyle = (i + j) % 2 ? "#fff" : "#000"; ctx.fillRect(a[0] + 1 + i * 5, a[1] - 26 + j * 5, 5, 5);
+  }
+  ctx.strokeRect(a[0] + 1, a[1] - 26, 15, 10);
+}
+function drawZones(ctx, zones, px, en, off) {
+  if (!zones || !zones.length) return;
+  ctx.save();
+  if (off) ctx.globalAlpha = 0.4;               // game switched off: zones drawn faded
+  for (const z of zones) {
+    const sel = zed.on && zed.sel === z.id;
+    if (z.type === "lapline" && z.shape === "line" && z.a && z.b) {
+      drawLapline(ctx, px(en(z.a[0], z.a[1])), px(en(z.b[0], z.b[1])), sel);
+      continue;
+    }
+    const st = ZONE_STYLE[z.type] || { fill: "rgba(150,150,150,0.22)", stroke: "#888" };   // unknown kind: greyed
+    let c, rpx;
+    ctx.beginPath();
+    if (z.shape === "circle" && !nul(z.lat)) {
+      c = px(en(z.lat, z.lon)); rpx = Math.max(4, (z.r_m || 0) * view.scale);
+      ctx.arc(c[0], c[1], rpx, 0, 2 * Math.PI);
+    } else if (z.shape === "polygon" && Array.isArray(z.points) && z.points.length > 2) {
+      const ps = z.points.map((p) => px(en(p[0], p[1])));
+      ps.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+      ctx.closePath();
+      c = [ps.reduce((a, q) => a + q[0], 0) / ps.length, ps.reduce((a, q) => a + q[1], 0) / ps.length];
+      rpx = Math.min(...ps.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1])));
+    } else continue;
+    ctx.fillStyle = st.fill; ctx.fill();
+    ctx.lineWidth = sel ? 4 : 2; ctx.strokeStyle = sel ? "#0b4fb3" : st.stroke;
+    if (!ZONE_STYLE[z.type] || sel) ctx.setLineDash([6, 4]);
+    ctx.stroke(); ctx.setLineDash([]);
+    const g = Math.min(16, Math.max(6, rpx * 0.5));
+    if (z.type === "boost") drawChevrons(ctx, c, g);
+    else if (z.type === "mud") {
+      ctx.fillStyle = "#2b1a08";
+      [[-0.5, 0.2], [0.1, -0.35], [0.45, 0.3]].forEach(([dx, dy]) => { ctx.beginPath(); ctx.arc(c[0] + dx * g, c[1] + dy * g, Math.max(2, g / 5), 0, 2 * Math.PI); ctx.fill(); });
+    }
+    if (rpx > 22 || sel) {
+      ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = "#000";
+      ctx.fillText(z.name || z.type, c[0], c[1] + rpx + 12); ctx.textAlign = "left";
+    }
+  }
+  ctx.restore();
+}
+
+/* ---- editor (operator page) ---- */
+function zoneAt(w) {
+  if (!S || !S.fleet.origin) return null;
+  const en = geo().en, tol = 14 / view.scale;
+  for (let i = zed.draft.length - 1; i >= 0; i--) {
+    const z = zed.draft[i];
+    if (z.shape === "circle" && !nul(z.lat)) {
+      const c = en(z.lat, z.lon);
+      if (Math.hypot(w[0] - c[0], w[1] - c[1]) <= Math.max(z.r_m, tol)) return z;
+    } else if (z.shape === "line" && z.a && z.b) {
+      const a = en(z.a[0], z.a[1]), b = en(z.b[0], z.b[1]);
+      const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((w[0] - a[0]) * dx + (w[1] - a[1]) * dy) / L2));
+      if (Math.hypot(w[0] - a[0] - t * dx, w[1] - a[1] - t * dy) <= tol) return z;
+    } else if (z.shape === "polygon" && Array.isArray(z.points)) {
+      const ps = z.points.map((p) => en(p[0], p[1]));
+      let inside = false;
+      for (let a = 0, b = ps.length - 1; a < ps.length; b = a++) {
+        if ((ps[a][1] > w[1]) !== (ps[b][1] > w[1]) && w[0] < (ps[b][0] - ps[a][0]) * (w[1] - ps[a][1]) / (ps[b][1] - ps[a][1]) + ps[a][0]) inside = !inside;
+      }
+      if (inside) return z;
+    }
+  }
+  return null;
+}
+function moveZone(z, de, dn) {
+  const g = geo();
+  const sh = (p) => { const q = g.en(p[0], p[1]); return g.ll(q[0] + de, q[1] + dn); };
+  if (z.shape === "circle") { const q = sh([z.lat, z.lon]); z.lat = q[0]; z.lon = q[1]; }
+  else if (z.shape === "polygon") z.points = z.points.map(sh);
+  else if (z.shape === "line") { z.a = sh(z.a); z.b = sh(z.b); }
+}
+function newZoneId(prefix) {
+  const ids = new Set(zed.draft.map((z) => z.id));
+  if (prefix === "lap" && !ids.has("lap")) return "lap";
+  for (let i = 1; ; i++) if (!ids.has(prefix + i)) return prefix + i;
+}
+function zoneTap(w) {
+  if (!S || !S.fleet.origin) { toast("No map origin yet: wait for a GPS fix", true); return; }
+  const g = geo(), here = g.ll(w[0], w[1]);
+  const t = zed.tool;
+  if (t === "boost" || t === "mud") {
+    const z = t === "boost"
+      ? { id: newZoneId("b"), type: "boost", name: "Boost pad", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.boost, scale: 1.0, secs: 5, cooldown_s: 20 }
+      : { id: newZoneId("m"), type: "mud", name: "Mud", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.mud, scale: 0.5 };
+    zed.draft.push(z); zed.sel = z.id; zed.dirty = true;
+    setZoneTool("select");
+  } else if (t === "lapline") {
+    if (!zed.lapA) { zed.lapA = here; }
+    else {
+      const a = g.en(zed.lapA[0], zed.lapA[1]);
+      if (Math.hypot(w[0] - a[0], w[1] - a[1]) < 4) { toast("Lap line must be at least 4 m long", true); return; }
+      const old = zed.draft.find((z) => z.type === "lapline");
+      const z = { id: old ? old.id : newZoneId("lap"), type: "lapline", name: old ? old.name : "Start / finish", shape: "line",
+        a: zed.lapA, b: here, min_lap_s: old && old.min_lap_s ? old.min_lap_s : 20 };
+      zed.draft = zed.draft.filter((q) => q.type !== "lapline").concat([z]);   // one lap line per course
+      zed.lapA = null; zed.sel = z.id; zed.dirty = true;
+      setZoneTool("select");
+    }
+  } else if (t === "delete") {
+    const hit = zoneAt(w);
+    if (hit) { zed.draft = zed.draft.filter((z) => z !== hit); if (zed.sel === hit.id) zed.sel = null; zed.dirty = true; }
+  } else {
+    const hit = zoneAt(w);
+    zed.sel = hit ? hit.id : null;
+  }
+  if (S) { drawMap(); updateZoneBar(); }
+}
+function setZoneTool(t) { zed.tool = t; zed.lapA = null; updateZoneBar(); }
+function zoneEdit(on) {
+  if (on) {
+    zed.draft = JSON.parse(JSON.stringify(zonesDoc().zones));
+    zed.baseVersion = zonesDoc().version;
+    zed.sel = null; zed.lapA = null; zed.dirty = false; zed.tool = "select";
+    view.fit = false;                        // keep the view still while placing zones
+  }
+  zed.on = on;
+  zed.shownSel = undefined;
+  if ($("zoneBar")) $("zoneBar").classList.toggle("hidden", !on);
+  if ($("zoneEdit")) $("zoneEdit").classList.toggle("sel", on);
+  if (S) { drawMap(); updateZoneBar(); }
+}
+const ZONE_HINT = {
+  boost: "Tap the map to drop a boost pad (12 m).", mud: "Tap the map to drop a mud patch (15 m).",
+  lapline: "Tap one end of the start/finish line, then the other end.", delete: "Tap a zone to delete it.",
+  select: "Tap a zone to select it; drag it to move. Drag empty map to pan.",
+};
+function updateZoneBar() {
+  if (!zed.on || !$("zoneBar")) return;
+  document.querySelectorAll("[data-ztool]").forEach((b) => b.classList.toggle("sel", b.dataset.ztool === zed.tool));
+  const z = zed.draft.find((q) => q.id === zed.sel);
+  const nm = $("zName"), rr = $("zRadius");
+  if (zed.shownSel !== zed.sel) {           // only refresh inputs on selection change, never while typing
+    zed.shownSel = zed.sel;
+    nm.value = z ? (z.name || "") : "";
+    if (z && z.shape === "circle") rr.value = z.r_m;
+  }
+  nm.disabled = !z;
+  rr.disabled = !(z && z.shape === "circle");
+  $("zRadiusVal").textContent = z && z.shape === "circle" ? `${Math.round(z.r_m)} m` : "--";
+  $("zSel").textContent = z ? `${z.type.toUpperCase()} ${z.id}` : "nothing selected";
+  const counts = ["boost", "mud", "lapline"].map((t) => zed.draft.filter((q) => q.type === t).length);
+  $("zHint").textContent = (zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line." : ZONE_HINT[zed.tool])
+    + ` ${counts[0]} boost, ${counts[1]} mud, ${counts[2] ? "lap line set" : "no lap line"}${zed.dirty ? " (unsaved)" : ""}.`;
+}
+function saveZones() {
+  if (zonesDoc().version !== zed.baseVersion && !confirm("Zones were changed elsewhere since you started editing. Overwrite them?")) return;
+  post("/zones", { enabled: zonesDoc().enabled, zones: zed.draft }).then((j) => {
+    if (j && j.ok) { toast(`Zones saved (version ${j.zones.version}, ${j.zones.zones.length} zones)`); zoneEdit(false); }
+  });
+}
+function setupZoneEditor() {
+  if (!$("zoneBar")) return;
+  $("zName").addEventListener("input", (e) => {
+    const z = zed.draft.find((q) => q.id === zed.sel);
+    if (z) { z.name = e.target.value.slice(0, 40); zed.dirty = true; if (S) drawMap(); }
+  });
+  $("zRadius").addEventListener("input", (e) => {
+    const z = zed.draft.find((q) => q.id === zed.sel);
+    if (z && z.shape === "circle") { z.r_m = Number(e.target.value); zed.dirty = true; if (S) { drawMap(); updateZoneBar(); } }
+  });
+}
+
+/* ---- leaderboard ---- */
+let lapsBuilt = false;
+function lapsTable(board, compact) {
+  return `<table class="laps"><tr><th>P</th><th>Kart</th><th>Laps</th><th>Last</th><th>Best</th>${compact ? "" : "<th>Now</th>"}</tr>` +
+    board.map((r) => {
+      const k = S.fleet.karts[r.kart - 1];
+      return `<tr><td class="pos">${r.pos}</td><td><span class="lsw" style="background:${k.color}">${r.kart}</span></td>
+        <td class="n">${r.laps}</td><td class="n">${fmtLap(r.last_s)}</td><td class="n">${fmtLap(r.best_s)}</td>${compact ? "" : `<td class="n">${fmtLap(r.current_s)}</td>`}</tr>`;
+    }).join("") + "</table>";
+}
+function lapsStatus() {
+  const G = S.fleet.game || {};
+  if (!G.enabled) return "Game is OFF: no lap timing. Zones are ignored by the karts.";
+  if (!G.lapline) return "No lap line yet: draw one with ZONES on the operator page.";
+  if (!(S.fleet.laps || []).length) return `Waiting for the first crossing (min lap ${G.min_lap_s} s).`;
+  return "";
+}
+function updateLaps() {
+  const box = $("laps");
+  if (box) {
+    if (!lapsBuilt) {
+      box.innerHTML = `<div id="lapsBody"></div><div class="lapsfoot">
+        <button id="lapsReset" class="hold resetlaps">RESET LAPS<small>hold 1 s</small></button>
+        <span class="note">Laps are counted by the pit from telemetry (1-2 fixes/s, about ±0.5 s) and reset when the server restarts.</span></div>`;
+      holdButton($("lapsReset"), 1000, () => post("/laps/reset", {}).then((j) => { if (j && j.ok) toast("Laps reset"); }));
+      lapsBuilt = true;
+    }
+    const msg = lapsStatus(), board = S.fleet.laps || [];
+    const key = JSON.stringify([msg, board.map((r) => [r.kart, r.laps, r.last_s, r.best_s, MOBILE ? 0 : Math.floor(r.current_s || 0)])]);
+    if (box.dataset.key !== key) {
+      box.dataset.key = key;
+      $("lapsBody").innerHTML = (msg ? `<p class="note lapmsg">${esc(msg)}</p>` : "") + (board.length ? lapsTable(board, MOBILE) : "");
+    }
+  }
+  // compact overlay on every map: top positions, collapsible per viewer
+  const wrap = $("map") && $("map").parentElement;
+  if (!wrap) return;
+  let ov = $("mapLaps");
+  if (!ov) {
+    ov = document.createElement("div"); ov.id = "mapLaps"; ov.className = "maplaps hidden";
+    ov.innerHTML = '<button id="mapLapsHead" class="mlhead">LAPS</button><div id="mapLapsBody"></div>';
+    wrap.appendChild(ov);
+  }
+  const board = S.fleet.laps || [];
+  ov.classList.toggle("hidden", !gameTiming() || !board.length);
+  const open = store.get("gk_maplaps", true);
+  $("mapLapsHead").textContent = open ? "LAPS ▾" : `LAPS ▸ ${board.length ? "K" + board[0].kart + " leads" : ""}`;
+  $("mapLapsBody").classList.toggle("hidden", !open);
+  if (open) {
+    $("mapLapsBody").innerHTML = board.slice(0, 8).map((r) => {
+      const k = S.fleet.karts[r.kart - 1];
+      return `<div class="mlrow"><b>${r.pos}</b><span class="lsw" style="background:${k.color}">${r.kart}</span><span>L${r.laps}</span><span>${fmtLap(r.best_s)}</span></div>`;
+    }).join("");
+  }
 }
 
 /* ------------------------------------------------------------ kiosk sheet */
@@ -564,6 +878,7 @@ function updateSheet() {
     ["Uptime / Ah", `${nul(st.uptime_s) ? "--" : ageText(st.uptime_s)} / ${fmt(v.ah, 2)}`],
     ["Last command", outcomeText(k.id) || "none"],
   ];
+  if (gameTiming()) rows.push(["Laps / last / best", k.lap ? `P${k.lap.pos} · ${k.lap.laps} · ${fmtLap(k.lap.last_s)} · ${fmtLap(k.lap.best_s)}` : "no crossing yet"]);
   $("shBody").innerHTML = rows.map(([a, b]) => `<div><div class="lbl">${a}</div><div>${b}</div></div>`).join("");
   $("sheetInner").querySelectorAll("[data-c]").forEach((btn) => {
     btn.disabled = !S.server.link.connected;
@@ -577,8 +892,10 @@ function render() {
   updateCards();
   updateOutcomes();
   updateRace();
+  updateLaps();
   drawMap();
   updateSheet();
+  updateZoneBar();
 }
 
 document.addEventListener("click", (e) => {
@@ -604,6 +921,15 @@ document.addEventListener("click", (e) => {
     const cur = S.fleet.race.entered;
     post("/api/race", { entered: cur.includes(k) ? cur.filter((x) => x !== k) : cur.concat([k]) });
   } else if (ds.racemode !== undefined) post("/api/race", { mode: Number(ds.racemode) });
+  else if (ds.ztool) setZoneTool(ds.ztool);
+  else if (b.id === "zoneEdit") { if (zed.on && zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(!zed.on); }
+  else if (b.id === "zSave") saveZones();
+  else if (b.id === "zCancel") { if (zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(false); }
+  else if (b.id === "gameChip") {
+    if (!S) return;
+    const on = !zonesDoc().enabled;
+    post("/zones/enable", { enabled: on }).then((j) => { if (j && j.ok) toast(on ? "Game ON: karts react to zones" : "Game OFF: karts ignore all zones"); });
+  } else if (b.id === "mapLapsHead") { store.set("gk_maplaps", !store.get("gk_maplaps", true)); if (S) updateLaps(); }
   else if (b.id === "raceOff") post("/api/race", { active: false }).then((j) => { if (j && j.ok) toast("Race flag off (no commands sent)"); });
   else if (b.id === "fOnline" || b.id === "fEntered") {
     const key = b.id === "fOnline" ? "online" : "entered";
@@ -639,6 +965,8 @@ setupMapInput();
 holdButton($("stopAll"), 1000, () => sendCmd("stop", 255));
 holdButton($("slowAll"), 1000, () => sendCmd("slow", 255, 5));
 holdButton($("startAll"), 1000, () => sendCmd("start", 255));
+if ($("boostAll")) holdButton($("boostAll"), 1000, () => sendCmd("boost", 255, 100));
+setupZoneEditor();
 const TAB_KEY = MOBILE ? "gk_mtab" : "gk_tab";
 if (KIOSK || MOBILE) {
   const first = KIOSK ? "map" : "karts";

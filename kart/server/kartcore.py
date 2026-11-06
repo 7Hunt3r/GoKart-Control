@@ -34,7 +34,9 @@ KART_COLORS = {     # identical to pitcore.KART_COLORS so a kart has one colour 
     5: "#f58231", 6: "#911eb4", 7: "#42d4f4", 8: "#f032e6",
 }
 MODE_NAMES = {0: "ECO", 1: "NORMAL", 2: "SPORT"}
-CMD_CODES = {"mode": 1, "stop": 2, "start": 3, "ping": 4, "slow": 5}
+# Motor-current scale per mode: firmware/kart-heltec-v4/config.h MODES[] (80/140, 100/140, 1.0).
+MODE_SCALES = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}
+CMD_CODES = {"mode": 1, "stop": 2, "start": 3, "ping": 4, "slow": 5, "boost": 6}
 CMD_NAMES = {v: k for k, v in CMD_CODES.items()}
 CMD_RESULT_NAMES = {0: "none", 1: "accepted", 2: "applied", 3: "no_vesc", 4: "rejected", 5: "unknown"}
 SRC_USB = 0xFE      # the firmware's source id for commands typed on its USB port (us)
@@ -410,3 +412,424 @@ class CommandTracker:
     def snapshot(self, now):
         return [{k: v for k, v in r.items() if k != "sent_mono"} | {"age_s": _age(r["sent_mono"], now)}
                 for r in reversed(self.items)]
+
+
+# --- game layer (Mario Kart zones) ----------------------------------------------
+# Contract: pit/server/map/ZONES.md. The kart evaluates the zone file against its own
+# GPS (self lines, 2 Hz) so the game works with no radio and no Wi-Fi. The only thing
+# it ever sends is `boost SECS SCALE` (timed current-scale override in the Heltec,
+# never above 1.0, auto-reverting, cancelled by STOP/START). Pure logic: the server
+# sends the returned command lines and logs every returned record.
+R_EARTH = 6371000.0
+ZONE_EXIT_HYST_M = 3.0       # "outside" again only > 3 m outside the edge
+NO_FIX_EXIT_S = 5.0          # no fix for this long: leave every zone, forget the previous fix
+MUD_REPEAT_S = 2.0           # mud: re-send while inside
+MUD_SECS = 3                 # each mud command lasts 3 s (so the cap ends <= 3 s after leaving)
+BOOST_DEFAULTS = {"secs": 5, "scale": 1.0, "cooldown_s": 20.0}
+MUD_DEFAULT_SCALE = 0.5
+MIN_LAP_DEFAULT_S = 20.0
+MIN_CIRCLE_R_M = 8.0
+SCALE_MIN, SCALE_MAX = 0.10, 1.00
+SCALE_TOL = 0.015            # firmware MODE_MATCH_TOL
+
+
+def local_en(lat, lon, ref):
+    """(east, north) metres of lat/lon on the tangent plane at ref = (lat, lon)."""
+    return ((lon - ref[1]) * math.pi / 180.0 * R_EARTH * math.cos(math.radians(ref[0])),
+            (lat - ref[0]) * math.pi / 180.0 * R_EARTH)
+
+
+def point_in_polygon(p, poly):
+    """Even-odd ray cast; p and poly in the same planar coordinates."""
+    x, y = p
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y):
+            xc = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < xc:
+                inside = not inside
+    return inside
+
+
+def dist_point_segment(p, a, b):
+    ax, ay = a
+    dx, dy = b[0] - ax, b[1] - ay
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2))
+    return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
+
+
+def segment_crossing(p1, p2, q1, q2):
+    """Fraction t in [0, 1] along p1->p2 where it crosses segment q1-q2, else None.
+    Touching an end point counts; collinear overlap does not (no direction to cross)."""
+    rx, ry = p2[0] - p1[0], p2[1] - p1[1]
+    sx, sy = q2[0] - q1[0], q2[1] - q1[1]
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-12:
+        return None
+    qpx, qpy = q1[0] - p1[0], q1[1] - p1[1]
+    t = (qpx * sy - qpy * sx) / den
+    u = (qpx * ry - qpy * rx) / den
+    if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+def clamp_scale(x):
+    return max(SCALE_MIN, min(SCALE_MAX, float(x)))
+
+
+def boost_line(secs, scale):
+    """The Heltec USB command. secs 1-30, scale 0.10-1.00, never above 1.0."""
+    secs = int(max(1, min(30, round(float(secs)))))
+    return f"boost {secs} {clamp_scale(scale):.2f}"
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _pt(v):
+    return isinstance(v, (list, tuple)) and len(v) >= 2 and _num(v[0]) and _num(v[1])
+
+
+class Zone:
+    """One boost/mud area or a lap line, projected around its own reference point."""
+
+    def __init__(self, z):
+        self.raw = z
+        self.id = str(z.get("id"))
+        self.type = z.get("type")
+        self.name = z.get("name") or self.id
+        self.shape = z.get("shape")
+        if self.type == "lapline":
+            if self.shape not in (None, "line") or not (_pt(z.get("a")) and _pt(z.get("b"))):
+                raise ValueError("lapline needs shape line with points a and b")
+            self.ref = (float(z["a"][0]), float(z["a"][1]))
+            self.a = (0.0, 0.0)
+            self.b = local_en(float(z["b"][0]), float(z["b"][1]), self.ref)
+            self.min_lap_s = float(z["min_lap_s"]) if _num(z.get("min_lap_s")) and z["min_lap_s"] > 0 else MIN_LAP_DEFAULT_S
+            return
+        if self.shape == "circle":
+            if not (_num(z.get("lat")) and _num(z.get("lon")) and _num(z.get("r_m"))):
+                raise ValueError("circle needs lat, lon, r_m")
+            if z["r_m"] < MIN_CIRCLE_R_M:
+                raise ValueError(f"circle r_m {z['r_m']} < {MIN_CIRCLE_R_M:g} m")
+            self.ref = (float(z["lat"]), float(z["lon"]))
+            self.r = float(z["r_m"])
+        elif self.shape == "polygon":
+            pts = z.get("points")
+            if not isinstance(pts, list) or len(pts) < 3 or not all(_pt(p) for p in pts):
+                raise ValueError("polygon needs >= 3 [lat, lon] points")
+            self.ref = (float(pts[0][0]), float(pts[0][1]))
+            self.poly = [local_en(float(p[0]), float(p[1]), self.ref) for p in pts]
+        else:
+            raise ValueError(f"unknown shape {self.shape!r}")
+        if self.type == "boost":
+            self.scale = clamp_scale(z["scale"]) if _num(z.get("scale")) else BOOST_DEFAULTS["scale"]
+            self.secs = int(max(1, min(30, z["secs"]))) if _num(z.get("secs")) else BOOST_DEFAULTS["secs"]
+            self.cooldown_s = float(z["cooldown_s"]) if _num(z.get("cooldown_s")) and z["cooldown_s"] >= 0 \
+                else BOOST_DEFAULTS["cooldown_s"]
+        else:   # mud
+            self.scale = clamp_scale(z["scale"]) if _num(z.get("scale")) else MUD_DEFAULT_SCALE
+
+    def outside_m(self, lat, lon):
+        """<= 0 inside the shape, else metres outside its edge."""
+        p = local_en(lat, lon, self.ref)
+        if self.shape == "circle":
+            return math.hypot(p[0], p[1]) - self.r
+        if point_in_polygon(p, self.poly):
+            return 0.0
+        n = len(self.poly)
+        return min(dist_point_segment(p, self.poly[i], self.poly[(i + 1) % n]) for i in range(n))
+
+    def crossing(self, lat1, lon1, lat2, lon2):
+        return segment_crossing(local_en(lat1, lon1, self.ref), local_en(lat2, lon2, self.ref), self.a, self.b)
+
+
+def parse_zones(doc):
+    """-> (enabled, [Zone boost/mud], lapline Zone or None, [ignored {id, reason}])."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("zones"), list):
+        return False, [], None, []
+    areas, lapline, ignored = [], None, []
+    seen = set()
+    for z in doc["zones"]:
+        if not isinstance(z, dict):
+            continue
+        zid = str(z.get("id"))
+        if z.get("type") not in ("boost", "mud", "lapline"):
+            ignored.append({"id": zid, "reason": f"unknown type {z.get('type')!r}"})
+            continue
+        if zid in seen:
+            ignored.append({"id": zid, "reason": "duplicate id"})
+            continue
+        try:
+            zone = Zone(z)
+        except (ValueError, TypeError, KeyError) as e:
+            ignored.append({"id": zid, "reason": str(e)})
+            continue
+        seen.add(zid)
+        if zone.type == "lapline":
+            if lapline is None:
+                lapline = zone
+            else:
+                ignored.append({"id": zid, "reason": "only the first lap line is timed"})
+        else:
+            areas.append(zone)
+    return doc.get("enabled") is True, areas, lapline, ignored
+
+
+class GameEngine:
+    """Zone triggers + lap timing for this kart. Callers hold the app lock.
+
+    on_self(msg, now) / tick(now) / set_zones(doc, now) return a list of records;
+    every record is logged by the caller, and records with "ev": "cmd" carry the
+    "line" to send to the Heltec. Rules: ZONES.md. Extra kart-side rules:
+    no zone commands while the kart reports STOPPED (a boost entered while stopped
+    is used up, not saved for later); mud wins over boost when they overlap."""
+
+    def __init__(self, local_enabled=True):
+        self.local_enabled = bool(local_enabled)
+        self.doc = None
+        self.version = None
+        self.enabled = False
+        self.areas, self.lapline, self.ignored = [], None, []
+        self.inside = {}            # zone id -> entered mono
+        self.zst = {}               # zone id -> {"fired": bool, "cool_until": mono}
+        self.next_mud = None
+        self.prev_fix = None        # (lat, lon, mono)
+        self.last_fix_mono = None
+        self.stopped = None
+        self.scale = None
+        self.mode_req = None
+        self.override = None        # {"kind", "scale", "until"} as last sent
+        self.events = deque(maxlen=12)
+        self.seq = 0
+        self.cmds_sent = 0
+        self.last_result = None     # {"result", "result_name", "mono"} of the last boost echo
+        self._reset_lap()
+
+    # -- state ------------------------------------------------------------------
+    def _reset_lap(self):
+        self.lap = {"count": 0, "running": False, "start": None, "last_cross": None,
+                    "last_s": None, "best_s": None, "times": []}
+
+    def active(self):
+        return self.local_enabled and self.enabled and (bool(self.areas) or self.lapline is not None)
+
+    def off_reason(self):
+        if not self.local_enabled:
+            return "off in this kart's config"
+        if self.doc is None:
+            return "no zones from the pit"
+        if not self.enabled:
+            return "off at the pit"
+        if not self.areas and self.lapline is None:
+            return "no zones"
+        return None
+
+    def _rec(self, recs, ev, now, **kw):
+        self.seq += 1
+        r = {"ev": ev, "seq": self.seq, **kw}
+        recs.append(r)
+        if ev != "cmd":
+            self.events.append(dict(r, mono=now))
+        return r
+
+    def _cmd(self, recs, now, zone, kind, secs, scale):
+        line = boost_line(secs, scale)
+        self.cmds_sent += 1
+        self.override = {"kind": kind, "scale": clamp_scale(scale), "until": now + int(secs), "zone": zone.id}
+        self._rec(recs, "cmd", now, line=line, zone=zone.id, effect=kind)
+        if kind == "boost":
+            self._rec(recs, "boost", now, zone=zone.id, name=zone.name, scale=clamp_scale(scale), secs=int(secs))
+
+    # -- zones file ---------------------------------------------------------------
+    def set_zones(self, doc, now):
+        """New zones document (or None = no file). Same document again = no-op."""
+        recs = []
+        if doc == self.doc:
+            return recs
+        old_lap = self.lapline.raw if self.lapline else None
+        was_active = self.active()
+        self.doc = doc
+        self.version = doc.get("version") if isinstance(doc, dict) else None
+        self.enabled, self.areas, self.lapline, self.ignored = parse_zones(doc)
+        ids = {z.id: z for z in self.areas}
+        for zid in list(self.inside):
+            if zid not in ids or not self.active():
+                del self.inside[zid]
+                self._rec(recs, "zone_exit", now, zone=zid, why="zones changed")
+        self.zst = {k: v for k, v in self.zst.items() if k in ids}
+        if not self.active() or (self.lapline.raw if self.lapline else None) != old_lap:
+            if self.lap["running"] or self.lap["count"]:
+                self._rec(recs, "lap_reset", now, why="game off" if not self.active() else "lap line changed")
+            self._reset_lap()
+        if not self.active():
+            self.prev_fix = None
+            self.next_mud = None
+        if self.active() != was_active:
+            self._rec(recs, "game_on" if self.active() else "game_off", now, version=self.version,
+                      why=self.off_reason())
+        else:
+            self._rec(recs, "zones_updated", now, version=self.version)
+        return recs
+
+    # -- telemetry ----------------------------------------------------------------
+    def on_self(self, msg, now):
+        self.stopped = msg.get("stopped")
+        self.mode_req = msg.get("mode_req")
+        self.scale = msg.get("scale") if msg.get("vesc_link") is True else None
+        recs = []
+        if not self.active():
+            return recs
+        lat, lon = msg.get("lat"), msg.get("lon")
+        if msg.get("fix") is not True or not _num(lat) or not _num(lon):
+            return self._timeouts(now, recs)
+        self._evaluate(float(lat), float(lon), now, recs)
+        return recs
+
+    def tick(self, now):
+        recs = []
+        if not self.active():
+            return recs
+        self._timeouts(now, recs)
+        self._mud(now, recs, entered=False)
+        return recs
+
+    def _timeouts(self, now, recs):
+        if self.last_fix_mono is not None and now - self.last_fix_mono > NO_FIX_EXIT_S and (self.inside or self.prev_fix):
+            for zid in list(self.inside):
+                del self.inside[zid]
+                self._exit_state(zid, now)
+                self._rec(recs, "zone_exit", now, zone=zid, why="no GPS fix for 5 s")
+            self.prev_fix = None
+            self.next_mud = None
+        return recs
+
+    def _exit_state(self, zid, now):
+        st = self.zst.setdefault(zid, {"fired": False, "cool_until": None})
+        z = next((a for a in self.areas if a.id == zid), None)
+        if st["fired"] and z is not None and z.type == "boost":
+            st["fired"] = False
+            st["cool_until"] = now + z.cooldown_s
+
+    def _evaluate(self, lat, lon, now, recs):
+        entered = []
+        for z in self.areas:
+            d = z.outside_m(lat, lon)
+            if z.id not in self.inside:
+                if d <= 0:
+                    self.inside[z.id] = now
+                    entered.append(z)
+                    self._rec(recs, "zone_enter", now, zone=z.id, type=z.type, name=z.name)
+            elif d > ZONE_EXIT_HYST_M:
+                del self.inside[z.id]
+                self._exit_state(z.id, now)
+                self._rec(recs, "zone_exit", now, zone=z.id, type=z.type, name=z.name)
+        in_mud = any(z.type == "mud" for z in self.areas if z.id in self.inside)
+        for z in entered:
+            if z.type != "boost":
+                continue
+            st = self.zst.setdefault(z.id, {"fired": False, "cool_until": None})
+            if self.stopped is True:
+                self._rec(recs, "suppressed", now, zone=z.id, why="kart STOPPED")
+            elif in_mud:
+                self._rec(recs, "suppressed", now, zone=z.id, why="inside mud")
+            elif st["cool_until"] is not None and now < st["cool_until"]:
+                self._rec(recs, "suppressed", now, zone=z.id, why=f"cooldown {st['cool_until'] - now:.0f} s")
+            else:
+                st["fired"] = True
+                self._cmd(recs, now, z, "boost", z.secs, z.scale)
+        self._mud(now, recs, entered=any(z.type == "mud" for z in entered))
+        if self.lapline is not None and self.prev_fix is not None and now - self.prev_fix[2] <= NO_FIX_EXIT_S:
+            t = self.lapline.crossing(self.prev_fix[0], self.prev_fix[1], lat, lon)
+            if t is not None:
+                self._cross(self.prev_fix[2] + t * (now - self.prev_fix[2]), now, recs)
+        self.prev_fix = (lat, lon, now)
+        self.last_fix_mono = now
+
+    def _mud(self, now, recs, entered):
+        muds = [z for z in self.areas if z.type == "mud" and z.id in self.inside]
+        if not muds:
+            self.next_mud = None
+            return
+        if not entered and self.next_mud is not None and now < self.next_mud:
+            return
+        if self.stopped is True:
+            return          # stays due: resumes on the first tick after START if still inside
+        z = min(muds, key=lambda m: m.scale)
+        self._cmd(recs, now, z, "mud", MUD_SECS, z.scale)
+        self.next_mud = now + MUD_REPEAT_S
+        if entered:
+            self._rec(recs, "mud", now, zone=z.id, name=z.name, scale=z.scale)
+
+    def _cross(self, t_cross, now, recs):
+        L = self.lapline
+        lap = self.lap
+        if lap["last_cross"] is None:
+            lap.update(running=True, start=t_cross, last_cross=t_cross)
+            self._rec(recs, "lap_start", now, zone=L.id)
+            return
+        since = t_cross - lap["last_cross"]
+        if since < L.min_lap_s:
+            self._rec(recs, "lap_ignored", now, zone=L.id, since_s=round(since, 2), min_lap_s=L.min_lap_s)
+            return
+        lap_s = round(t_cross - lap["start"], 2)
+        best = lap["best_s"] is None or lap_s < lap["best_s"]
+        lap["count"] += 1
+        lap["last_s"] = lap_s
+        if best:
+            lap["best_s"] = lap_s
+        lap["times"] = (lap["times"] + [lap_s])[-10:]
+        lap.update(start=t_cross, last_cross=t_cross, running=True)
+        self._rec(recs, "lap", now, zone=L.id, lap=lap["count"], lap_s=lap_s, best=best)
+
+    def on_cmd(self, msg, now):
+        """A {"t":"cmd"} line: remember the result of our last boost (src 254, cmd 6)."""
+        if msg.get("src") != SRC_USB or msg.get("cmd") != CMD_CODES["boost"]:
+            return None
+        res = msg.get("result")
+        self.last_result = {"result": res, "result_name": CMD_RESULT_NAMES.get(res), "arg": msg.get("arg"), "mono": now}
+        return self.last_result
+
+    # -- display ------------------------------------------------------------------
+    def meter(self, now):
+        """Live current scale vs the requested mode's scale: boost above, mud below."""
+        ms = MODE_SCALES.get(self.mode_req)
+        sc = self.scale
+        ov = self.override if self.override and now < self.override["until"] else None
+        if self.stopped is True:
+            kind = "stopped"
+        elif sc is None or ms is None:
+            kind = ov["kind"] if ov else "unknown"
+        elif sc > ms + SCALE_TOL or (ov and ov["kind"] == "boost" and sc >= ms - SCALE_TOL):
+            kind = "boost"
+        elif sc < ms - SCALE_TOL:
+            kind = "mud"
+        else:
+            kind = "normal"
+        return {"scale": sc, "mode_scale": round(ms, 3) if ms is not None else None, "kind": kind,
+                "override": {"kind": ov["kind"], "scale": ov["scale"], "left_s": round(ov["until"] - now, 1)} if ov else None}
+
+    def snapshot(self, now):
+        lap = self.lap
+        return {
+            "on": self.active(),
+            "off_reason": self.off_reason(),
+            "version": self.version,
+            "inside": sorted(self.inside),
+            "ignored": list(self.ignored),
+            "lap": {"count": lap["count"], "running": lap["running"],
+                    "current_s": round(now - lap["start"], 1) if lap["running"] and lap["start"] is not None else None,
+                    "last_s": lap["last_s"], "best_s": lap["best_s"], "times": list(lap["times"])},
+            "meter": self.meter(now),
+            "events": [{k: v for k, v in e.items() if k != "mono"} | {"age_s": _age(e["mono"], now)}
+                       for e in list(self.events)[-8:]],
+            "cmds_sent": self.cmds_sent,
+            "last_result": ({k: v for k, v in self.last_result.items() if k != "mono"}
+                            | {"age_s": _age(self.last_result["mono"], now)}) if self.last_result else None,
+        }
