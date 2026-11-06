@@ -1,6 +1,56 @@
 {
   "_comment": "Game zones for the bench preset (50 Day St). Edited from the pit operator page; see ZONES.md.",
-  "version": 1,
-  "enabled": false,
-  "zones": []
+  "version": 2,
+  "enabled": true,
+  "zones": [
+    {
+      "id": "lap",
+      "type": "lapline",
+      "name": "Start / finish",
+      "shape": "line",
+      "a": [
+        41.0938995,
+        -73.4163411
+      ],
+      "b": [
+        41.093797,
+        -73.4163411
+      ],
+      "min_lap_s": 15
+    },
+    {
+      "id": "b1",
+      "type": "boost",
+      "name": "Boost pad",
+      "shape": "circle",
+      "lat": 41.0938482,
+      "lon": -73.4159728,
+      "r_m": 10.0,
+      "scale": 1.0,
+      "secs": 5,
+      "cooldown_s": 20
+    },
+    {
+      "id": "b2",
+      "type": "boost",
+      "name": "Boost pad 2",
+      "shape": "circle",
+      "lat": 41.0938482,
+      "lon": -73.4167094,
+      "r_m": 10.0,
+      "scale": 1.0,
+      "secs": 4,
+      "cooldown_s": 20
+    },
+    {
+      "id": "m1",
+      "type": "mud",
+      "name": "Mud",
+      "shape": "circle",
+      "lat": 41.0935749,
+      "lon": -73.4166244,
+      "r_m": 10.0,
+      "scale": 0.5
+    }
+  ]
 }
