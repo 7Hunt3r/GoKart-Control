@@ -110,7 +110,10 @@ DTR (`python3 -c 'import serial,time; s=serial.Serial(PORT,1200); s.dtr=False; t
 wait for the new ROM-bootloader port to appear and upload to that one. Boards already on our
 firmware upload normally.
 
-OLED: `heard n relayed n`, pit RSSI and age, and per-kart RSSI. USB prints one JSON `stat` line a
+OLED: `heard n relayed n`, pit RSSI and age, and per-kart RSSI. The screen's I2C address is picked at boot:
+on the second T-Beam the QMC6310 compass sits at 0x3C (register 0 reads 0x80) and the screen at 0x3D, so a
+fixed 0x3C drives the compass and the screen stays dark. The boot log says which address and driver were
+chosen; `oled sh1106|ssd1306 [3c|3d|auto]` on the USB console overrides and reboots. USB prints one JSON `stat` line a
 second (`heard`, `relayed`, `dupes`, `dropped`, `rx_bad`, `pit_rssi`, `batt_v`, `karts`). Opening
 the USB port with a terminal resets the board (USB-CDC DTR), which is harmless.
 
