@@ -129,6 +129,8 @@ uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
 bool     slowActive = false; float slowErpm = 0; uint8_t slowMph = 0;
+// Timed scale override for the game zones (boost pad / mud): auto-reverts, cleared by STOP/START, never above 1.0.
+bool     ovActive = false; float ovScale = 1.0f; uint32_t ovUntilMs = 0;
 // Limits as first read from this controller after link-up: everything we write echoes these
 // (not the capture constants), so each kart keeps its own configuration.
 VescActiveLimits origLimits; bool origValid = false;
@@ -239,6 +241,7 @@ static void fillTelemetry(GkTelemetry& t) {
 // ---------------------------------------------------------------- vesc writes
 static float scaleTarget() {
   if (stopActive) return 0.0f;
+  if (ovActive) return ovScale;
   if (modeReq != GK_MODE_UNKNOWN) return MODES[modeReq].currentMaxScale;
   return origValid ? origLimits.currentMaxScale : 1.0f;
 }
@@ -278,6 +281,10 @@ static bool startWrite(float scale) {
 
 static void serviceWrites() {
   uint32_t now = millis();
+  if (ovActive && (int32_t)(now - ovUntilMs) >= 0) {
+    ovActive = false; logf("boost over, back to %.2f", scaleTarget());
+    if (!stopActive && vescUp() && origValid) startWrite(scaleTarget());
+  }
   if (rampIdx >= 0 && wState == W_IDLE && (int32_t)(now - rampNextMs) >= 0) {
     const int n = sizeof(STOP_RAMP) / sizeof(STOP_RAMP[0]);
     if (!startWrite(STOP_RAMP[rampIdx])) { cmdResult = GK_RES_NO_VESC; rampIdx = -1; }
@@ -295,7 +302,8 @@ static void serviceWrites() {
         bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL;
         if (slowActive && fabsf(vesc.limits().maxErpm - slowErpm) > 50) ok = false;
         if (rampIdx < 0) cmdResult = ok ? GK_RES_APPLIED : GK_RES_UNKNOWN;
-        modeConfirmed = ok && !stopActive && modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL;
+        modeConfirmed = ok && !stopActive && ((modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL)
+                                              || (ovActive && fabsf(wTarget - ovScale) < MODE_MATCH_TOL));
         logf("vesc write verify %s (scale %.3f)", ok ? "ok" : "MISMATCH", vesc.limits().currentMaxScale);
       } else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) cmdResult = GK_RES_UNKNOWN; }
       break;
@@ -307,6 +315,7 @@ static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg) {
   Serial.printf("{\"t\":\"cmd\",\"kart\":%u,\"src\":%u,\"seq\":%u,\"cmd\":%u,\"arg\":%u,\"result\":%u}\n", kartId, src, seq, cmd, arg, cmdResult);
 }
 
+static uint8_t boostSecs = 0;   // set by the USB `boost` command just before handleCommand
 static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint16_t ttl, uint32_t issued) {
   int si = (src == GK_ADDR_BASE) ? 0 : 1;
   if (dupValid[si] && dupSeq[si] == seq && dupIssued[si] == issued) { emitCmd(src, seq, cmd, arg); return; }   // retransmit: report, do not re-apply
@@ -331,16 +340,25 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
       if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
       if (!vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
       if (!stopActive) preStopScale = origValid ? origLimits.currentMaxScale : -1.0f;
-      stopActive = true; modeConfirmed = false;
+      stopActive = true; modeConfirmed = false; ovActive = false;
       requestBrake();                                   // regen via the VESC script, if present
       rampIdx = 0; rampNextMs = millis();
       break;
     case GK_CMD_START: {
       if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      stopActive = false; slowActive = false; rampIdx = -1;
+      stopActive = false; slowActive = false; ovActive = false; rampIdx = -1;
       float s = scaleTarget();
       if (!origValid) { cmdResult = GK_RES_NO_VESC; break; }
       if (!startWrite(s)) cmdResult = GK_RES_NO_VESC;
+      break;
+    }
+    case GK_CMD_BOOST: {                                   // arg = scale percent; duration from boostSecs (USB) or 5 s
+      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+      if (arg < 10 || arg > 100 || stopActive) { cmdResult = GK_RES_REJECTED; break; }
+      if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
+      ovScale = arg / 100.0f; ovActive = true; ovUntilMs = millis() + (boostSecs ? boostSecs : 5) * 1000UL;
+      logf("boost: scale %.2f for %u s", ovScale, boostSecs ? boostSecs : 5); boostSecs = 0;
+      if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC;
       break;
     }
     case GK_CMD_SLOW: {
@@ -638,6 +656,12 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "start")) handleCommand(0xFE, ++usbSeq, GK_CMD_START, 0, 0, 0);
   else if (!strcmp(line, "ping"))  handleCommand(0xFE, ++usbSeq, GK_CMD_PING, 0, 0, 0);
   else if (!strcmp(line, "slow"))  handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, arg ? atoi(arg) : 0, 0, 0);
+  else if (!strcmp(line, "boost")) {                      // boost SECS SCALE   e.g. "boost 5 1.0" or "boost 4 0.5" (mud)
+    int secs = 5; float sc = 1.0f;
+    if (arg) { secs = atoi(arg); char* a2 = strchr(arg, ' '); if (a2) sc = atof(a2 + 1); }
+    if (secs < 1 || secs > 30 || sc < 0.1f || sc > 1.0f) logf("usage: boost SECS(1-30) SCALE(0.10-1.00)");
+    else { boostSecs = (uint8_t)secs; handleCommand(0xFE, ++usbSeq, GK_CMD_BOOST, (uint8_t)lroundf(sc * 100), 0, 0); }
+  }
   else if (!strcmp(line, "wifi") && arg) {
     char* pw = strchr(arg, ' '); if (pw) { *pw++ = 0; }
     prefs.putString("ssid", arg); prefs.putString("pass", pw ? pw : "");
@@ -662,7 +686,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -687,6 +711,7 @@ static void serviceOled() {
   snprintf(l, sizeof l, "K%u %s%s", kartId, ma != GK_MODE_UNKNOWN ? MODES[ma].name : (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].name : "----"), modeConfirmed ? "*" : "");
   oled.drawStr(0, 9, l);
   if (stopActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
+  else if (ovActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(96, 9, ovScale >= (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].currentMaxScale : 1.0f) ? "BOOST" : "MUD"); oled.setDrawColor(1); }
   else if (slowActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "SLOW"); oled.setDrawColor(1); }
   else if (!writesEnabled()) oled.drawStr(100, 9, "RO");
   const VescValues& v = vesc.values();

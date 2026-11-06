@@ -278,6 +278,7 @@ static uint8_t cmdFromName(const char* s) {
   if (!strcmp(s, "start")) return GK_CMD_START;
   if (!strcmp(s, "ping"))  return GK_CMD_PING;
   if (!strcmp(s, "slow"))  return GK_CMD_SLOW;
+  if (!strcmp(s, "boost")) return GK_CMD_BOOST;   // arg = scale percent 10..100, lasts 5 s
   return GK_CMD_NONE;
 }
 

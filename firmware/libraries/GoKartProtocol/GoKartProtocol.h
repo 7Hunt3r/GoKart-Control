@@ -80,6 +80,7 @@ enum GkCommand : uint8_t {
   GK_CMD_START    = 3,   // release stop, re-apply requested mode
   GK_CMD_PING     = 4,   // no-op; kart reports the seq back
   GK_CMD_SLOW     = 5,   // cap speed: arg = mph (0 = 5 mph); sets the ERPM limit from the controller's own drivetrain numbers
+  GK_CMD_BOOST    = 6,   // timed current-scale override: arg = scale in percent (10..100), 5 s over LoRa; USB `boost SECS SCALE`
 };
 
 // Result of the last command a kart received, reported inside telemetry.

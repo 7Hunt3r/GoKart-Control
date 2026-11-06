@@ -1,0 +1,6 @@
+{
+  "_comment": "Game zones for the bench preset (50 Day St). Edited from the pit operator page; see ZONES.md.",
+  "version": 1,
+  "enabled": false,
+  "zones": []
+}
