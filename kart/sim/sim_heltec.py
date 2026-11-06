@@ -29,6 +29,12 @@ Scenario flags: --kart 2 --nofix (own GPS never fixes) --novesc (VESC link down)
 --fault N (VESC fault code) --pitloss (pit link drops 20 s of every 60 s)
 --pit-stop-at S / --pit-start-at S (the pit sends STOP/START at those seconds)
 --pit-slow-at S (the pit sends SLOW 8 at that second).
+`race [secs]` (USB, SIMULATION ONLY; the driver page never sends it): like the race firmware's
+GK_CMD_RACE, holds the kart at zero power at once (stopped stays false), prints
+{"t":"race","event":"countdown","go_in_ms":...} and {"t":"race","event":"go"} at release;
+STOP/START cancel the hold. --race-at S makes the pit send `race 5` at that second.
+In-process use (kart demo mode): Sim(sim_args(...), path=PolyPath(points)), out callbacks,
+sim.stopping.set() to end run().
 --course: the game-layer course: the loop is centred on the shop preset origin
 (pit/server/map/map.shop.json, 41.09399,-73.41637) so it runs through the boost pad,
 the mud and across the start/finish line of kart/sim/zones.course.json (serve that
@@ -70,6 +76,48 @@ _STRAIGHT_X, _STRAIGHT_Y = LOOP_W - 2 * LOOP_R, LOOP_H - 2 * LOOP_R
 LOOP_LEN = 2 * _STRAIGHT_X + 2 * _STRAIGHT_Y + 2 * math.pi * LOOP_R
 
 
+class LoopPath:
+    """The default rounded-rectangle loop around ORIGIN (read at call time)."""
+    def __init__(self):
+        self.length = LOOP_LEN
+
+    def at(self, s):
+        e, n, hd = loop_point(s)
+        lat, lon = en_to_latlon(e, n)
+        return lat, lon, hd
+
+
+class PolyPath:
+    """A closed polyline of [lat, lon] points driven in point order (demo mode)."""
+    def __init__(self, points):
+        if len(points) < 2:
+            raise ValueError("path needs >= 2 points")
+        self.ref = (float(points[0][0]), float(points[0][1]))
+        cl = math.cos(math.radians(self.ref[0]))
+        en = [((p[1] - self.ref[1]) * math.pi / 180 * R_EARTH * cl, (p[0] - self.ref[0]) * math.pi / 180 * R_EARTH)
+              for p in points]
+        self.segs = []
+        acc = 0.0
+        for a, b in zip(en, en[1:] + en[:1]):
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L > 0:
+                self.segs.append((acc, L, a, b))
+                acc += L
+        self.length = acc
+
+    def at(self, s):
+        s %= self.length
+        for acc, L, a, b in self.segs:
+            if s <= acc + L:
+                f = (s - acc) / L
+                e, n = a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f
+                hd = math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) % 360
+                lat = self.ref[0] + math.degrees(n / R_EARTH)
+                lon = self.ref[1] + math.degrees(e / (R_EARTH * math.cos(math.radians(self.ref[0]))))
+                return lat, lon, hd
+        return self.ref[0], self.ref[1], 0.0
+
+
 def loop_point(s):
     """(east, north, heading_deg) at arc length s along the loop (clockwise seen from above)."""
     s %= LOOP_LEN
@@ -97,8 +145,11 @@ def loop_point(s):
 
 
 class SimKart:
-    def __init__(self, k, phase, mode=1, nofix=False, novesc=False, fault=0):
+    def __init__(self, k, phase, mode=1, nofix=False, novesc=False, fault=0, path=None, full_mph=FULL_SCALE_MPH):
         self.k, self.s, self.mode = k, phase, mode
+        self.path = path or LoopPath()
+        self.full_mph = full_mph
+        self.race_go = None             # mono of GO while in grid hold
         self.mode_actual, self.confirmed = mode, True
         self.mph = 0.0
         self.stopped = False
@@ -112,7 +163,7 @@ class SimKart:
         self.ov = None                  # (scale, until_mono): boost / mud override
 
     def eff_scale(self):
-        if self.stopped:
+        if self.stopped or self.race_go is not None:
             return 0.0
         if self.ov:
             return self.ov[0]
@@ -121,7 +172,7 @@ class SimKart:
     def target_mph(self):
         if self.stopped or self.novesc:
             return 0.0
-        v = FULL_SCALE_MPH * self.eff_scale()
+        v = self.full_mph * self.eff_scale()
         return min(v, self.slow_mph) if self.slow_mph else v
 
     def step(self, dt, now):
@@ -137,14 +188,12 @@ class SimKart:
         self.ah += amps * dt / 3600
 
     def gps_line(self, ms, hdop):
-        e, n, hd = loop_point(self.s)
-        lat, lon = en_to_latlon(e, n)
+        lat, lon, hd = self.path.at(self.s)
         return {"t": "gps", "kart": self.k, "lat": round(lat, 7), "lon": round(lon, 7),
                 "kph": round(self.mph * 1.609344, 1), "heading": round(hd, 1), "hdop": hdop, "sats": 10, "ms": ms}
 
     def tele(self, t, rssi=0.0, snr=0.0, rx_ms=0, base_rssi=0, uptime=0, extra=None):
-        e, n, hd = loop_point(self.s)
-        lat, lon = en_to_latlon(e, n)
+        lat, lon, hd = self.path.at(self.s)
         fix = not self.nofix
         vup = not self.novesc
         erpm = int(self.mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7)
@@ -170,19 +219,32 @@ class SimKart:
                 "rssi": rssi, "snr": snr, "rx_ms": rx_ms, **(extra or {})}
 
 
+def sim_args(**over):
+    """Default command-line options as a namespace, for in-process use."""
+    a = build_parser().parse_args([])
+    for k, v in over.items():
+        setattr(a, k, v)
+    return a
+
+
 class Sim:
-    def __init__(self, args):
+    def __init__(self, args, path=None, full_mph=FULL_SCALE_MPH, start_mph=None):
         self.args = args
+        self.stopping = threading.Event()
         self.lock = threading.RLock()
         self.out = []
         self.t0 = time.monotonic()
         self.usb_seq = 0
         self.boost_secs = 0
-        self.me = SimKart(args.kart, 15.0 if args.course else 0.0, nofix=args.nofix, novesc=args.novesc, fault=args.fault)
+        self.me = SimKart(args.kart, 15.0 if args.course and path is None else 0.0, nofix=args.nofix,
+                          novesc=args.novesc, fault=args.fault, path=path, full_mph=full_mph)
         if args.course:
             self.me.mph = FULL_SCALE_MPH * MODE_SCALE[1]     # already rolling at the line
+        if start_mph is not None:
+            self.me.mph = start_mph
         others = [k for k in (3, 5) if k != args.kart] or [4, 6]
-        self.fleet = [SimKart(others[0], 45.0, mode=2), SimKart(others[1], 120.0, mode=0)]
+        L = self.me.path.length
+        self.fleet = [SimKart(others[0], 45.0 % L, mode=2, path=path), SimKart(others[1], 120.0 % L, mode=0, path=path)]
         self.pit_done = set()
 
     def uptime(self):
@@ -233,15 +295,25 @@ class Sim:
                 self.log(f"boost: scale {arg / 100.0:.2f} for {secs} s")
                 self.log(f"vesc write scale {arg / 100.0:.3f}")
             self.boost_secs = 0
+        elif cmd == 7:                                       # race: grid hold, GO arg seconds later
+            if arg < 1 or arg > 30:
+                res = 4
+            else:
+                k.race_go, k.ov = time.monotonic() + arg, None
+                self.emit({"t": "race", "kart": k.k, "event": "countdown", "go_in_ms": arg * 1000, "secs": arg,
+                           "go_utc": 0})
+                self.log(f"race: grid hold, GO in {arg * 1000} ms")
+                if k.novesc:
+                    res = 3
         elif cmd == 2:
             if k.novesc:
                 res = 3
             else:
-                k.stopped, k.confirmed, k.ov = True, False, None
+                k.stopped, k.confirmed, k.ov, k.race_go = True, False, None, None
                 for sc in (0.5, 0.2, 0.0):
                     self.log(f"vesc write scale {sc:.3f}")
         elif cmd == 3:
-            k.stopped, k.slow_mph, k.ov = False, None, None
+            k.stopped, k.slow_mph, k.ov, k.race_go = False, None, None, None
             if k.novesc:
                 res = 3
             else:
@@ -261,8 +333,7 @@ class Sim:
 
     def status(self):
         k = self.me
-        e, n, _ = loop_point(k.s)
-        lat, lon = en_to_latlon(e, n)
+        lat, lon, _ = k.path.at(k.s)
         self.emit({"t": "status", "kart": k.k, "fw": FW, "built": "sim", "writes": True, "transport": "ble",
                    "radio": True, "radio_status": 0, "lora_tx": self.uptime() * 2, "lora_rx": self.uptime(),
                    "lora_rx_bad": 0, "gps_locked": True, "gps_cfg": "9600", "pps_count": self.uptime(),
@@ -297,10 +368,12 @@ class Sim:
             self.status()
         elif word == "mode" and rest:
             self.command(254, 1, arg)
+        elif word == "race":
+            self.command(254, 7, arg if rest else 5)
         elif word in ("stop", "start", "ping", "slow"):
             self.command(254, {"stop": 2, "start": 3, "ping": 4, "slow": 5}[word], arg)
         elif word == "help":
-            self.log("commands: status | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | ping (SIMULATION)")
+            self.log("commands: status | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping (SIMULATION)")
         else:
             self.log(f"unknown command: {line}")
 
@@ -315,18 +388,23 @@ class Sim:
         next_fleet = [last + 0.3, last + 0.8]
         next_ble = last + 1.0
         next_log = last + 4.0
-        while True:
+        while not self.stopping.is_set():
             time.sleep(0.05)
             now = time.monotonic()
             dt, last = now - last, now
             el = now - self.t0
             with self.lock:
-                for name, at, src_cmd in (("stop", self.args.pit_stop_at, (2, 0)),
+                for name, at, src_cmd in (("race", self.args.race_at, (7, 5)),
+                                          ("stop", self.args.pit_stop_at, (2, 0)),
                                           ("start", self.args.pit_start_at, (3, 0)),
                                           ("slow", self.args.pit_slow_at, (5, 8))):
                     if at is not None and el >= at and name not in self.pit_done:
                         self.pit_done.add(name)
                         self.command(0, *src_cmd)
+                if self.me.race_go is not None and now >= self.me.race_go:
+                    self.me.race_go = None
+                    self.emit({"t": "race", "kart": self.me.k, "event": "go"})
+                    self.log("race: GO")
                 if self.me.ov and now >= self.me.ov[1]:
                     self.me.ov = None
                     self.log(f"boost over, back to {self.me.eff_scale():.2f}")
@@ -431,7 +509,7 @@ class Sim:
         conn.close()
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tcp", type=int, metavar="PORT", help="serve TCP on 127.0.0.1:PORT instead of a pty (0 = any)")
     ap.add_argument("--kart", type=int, default=2)
@@ -448,7 +526,12 @@ def main():
     ap.add_argument("--warp", type=float, default=1.0, help="own kart moves this many times faster (tests)")
     ap.add_argument("--nogpsline", action="store_true", help="no 5 Hz gps lines (firmware `gpsline off`)")
     ap.add_argument("--hdop", type=float, default=0.9, help="reported HDOP (> 4 = poor: the game ignores it)")
-    args = ap.parse_args()
+    ap.add_argument("--race-at", type=float, help="the pit sends `race 5` at this second")
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     if args.course:
         global ORIGIN
         ORIGIN = COURSE_ORIGIN

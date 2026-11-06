@@ -299,7 +299,15 @@ static void hostJson(const char* line) {
   if (cmd == GK_CMD_SLOW && (arg < 0 || arg > 60)) { logf("bad slow mph %d", arg); return; }
   GkCommandMsg m; memset(&m, 0, sizeof m);
   gkFillHeader(m.h, GK_MSG_COMMAND, GK_ADDR_BASE, (uint8_t)kart, (uint8_t)seq);
-  m.cmd = cmd; m.arg = (uint8_t)arg; m.ttl_s = (uint16_t)ttl; m.issued_utc_s = gpsUnix();
+  m.cmd = cmd; m.arg = (uint8_t)arg; m.ttl_s = (uint16_t)ttl;
+  // A retransmit (same seq/cmd/kart within a minute) keeps the ORIGINAL issue time: karts dedupe on seq+issued,
+  // and a race start computes GO from issued + secs, so every kart launches on the same instant even if it only
+  // heard a retry. Stamping each retry anew pushed late receivers' GO out by the retry delay (seen 2026-11-06).
+  static uint32_t issuedBySeq[256] = {0}; static uint8_t issuedKey[256] = {0};
+  uint8_t key = (uint8_t)(cmd * 31 + kart);
+  uint32_t nowU = gpsUnix();
+  if (issuedBySeq[seq] && issuedKey[seq] == key && nowU && nowU - issuedBySeq[seq] < 60) m.issued_utc_s = issuedBySeq[seq];
+  else { m.issued_utc_s = nowU; issuedBySeq[seq] = nowU; issuedKey[seq] = key; }
   if (!queueCommand(m)) logf("command queue full, dropped seq %d", seq);
 }
 

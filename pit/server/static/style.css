@@ -247,3 +247,28 @@ body.mobile .mfleet .boostall, body.mobile .mfleet .slowall { font-size: 16px; }
 body.mobile .kexp .kbtns .b-slow, body.mobile .kexp .kbtns .b-boost { grid-column: span 3; }
 body.mobile table.laps { font-size: 16px; }
 table.laps th:nth-child(n+3) { text-align: right; }
+
+/* race start + item boxes */
+.badge.grid { background: #c40000; color: #fff; border-color: #7a0000; }
+.badge.go { background: #0a7d24; color: #fff; border-color: #064d16; animation: goflash .5s steps(2) infinite; }
+@keyframes goflash { 50% { background: #fff; color: #0a7d24; } }
+.racestart { display: flex; gap: 6px; align-items: stretch; margin-top: 4px; }
+.racesecs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; flex: 0 0 42%; }
+.racesecs button { min-height: 60px; padding: 2px; }
+.racestartbtn { flex: 1; min-height: 60px; background: #111; color: #fff; border-color: #000; font-size: 20px; }
+.racestartbtn::after { background: #ff3b30; }
+.ztools .zt-item { border-color: #0b4fb3; }
+.countdown { position: fixed; left: 50%; top: 18%; transform: translateX(-50%); z-index: 60; pointer-events: none;
+  background: rgba(10,10,10,.92); border: 4px solid #000; border-radius: 16px; padding: 14px 22px; text-align: center; }
+.cdlights { display: flex; gap: 14px; }
+.cdl { width: 58px; height: 58px; border-radius: 50%; background: #2a0606; border: 4px solid #555; }
+.cdl.on { background: #ff1a1a; border-color: #ff8a8a; box-shadow: 0 0 18px #ff1a1a; }
+.countdown.go .cdl { background: #19d14a; border-color: #9cffb6; box-shadow: 0 0 18px #19d14a; }
+.cdtext { color: #fff; font-weight: 900; font-size: 22px; letter-spacing: .06em; min-height: 0; }
+.cdtext:empty { display: none; }
+.countdown.go .cdtext { font-size: 44px; color: #19d14a; margin-top: 8px; }
+body.mobile .cdl { width: 40px; height: 40px; }
+body.mobile .cdlights { gap: 8px; }
+.ztools .zt-track { border-color: #0b4fb3; border-style: dashed; }
+.ztrack { display: inline-flex; gap: 4px; align-items: center; font-weight: 700; font-size: 13px; }
+.ztrack button { min-height: 40px; padding: 2px 8px; font-size: 12px; }

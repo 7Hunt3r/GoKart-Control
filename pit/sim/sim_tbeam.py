@@ -16,12 +16,13 @@ surveyed course). Default scenario, each switchable with 0 to disable:
   --novesc 0   a kart whose VESC link is down (answers commands with no_vesc)
 Commands from the host are honoured: echoed in last_cmd_seq/cmd_result,
 stop/start/mode change the simulated kart, boost raises the echoed `scale` (and
-the speed) for 5 s like the firmware. --loss drops that fraction of command
+the speed) for 5 s like the firmware, race holds every kart at scale 0 until GO
+(arg seconds; STOP keeps it held, START releases early). --loss drops that fraction of command
 receptions per kart so the retry path can be watched.
 
 Game zones: `--print-zones` prints a zones.json document matching the oval (a
 lap line across the bottom straight, a boost pad on the top straight, mud on the
-east bend), ready to POST to the pit's /zones. `--track-scale 0.3` shrinks the
+east bend, an item box on the bottom straight), ready to POST to the pit's /zones. `--track-scale 0.3` shrinks the
 oval so laps come round in about 15 s (used by the e2e test).
 """
 from __future__ import annotations
@@ -66,18 +67,23 @@ def sim_zones():
     L, r = track_dims()
     per = 2 * L + 2 * math.pi * r
     half = min(10.0, r * 0.8)
+    n = max(8, min(60, int(per / 12)))            # centreline points for the "track" route
     ll = lambda e, n: [round(x, 7) for x in en_to_latlon(e, n)]  # noqa: E731
     blat, blon = en_to_latlon(0.0, r)
     mlat, mlon = en_to_latlon(L / 2 + r, 0.0)
+    ilat, ilon = en_to_latlon(L / 4, -r)          # bottom straight, between the east bend and the lap line
     return {"_comment": "Simulator oval zones (pit/sim/sim_tbeam.py --print-zones); not a real course.",
             "version": 1, "enabled": True, "zones": [
                 {"id": "lap", "type": "lapline", "name": "Start / finish", "shape": "line",
                  "a": ll(0.0, -r - half), "b": ll(0.0, -r + half),
                  "min_lap_s": 20 if TRACK_SCALE >= 1.0 else max(5, int(per / 24))},
                 {"id": "b1", "type": "boost", "name": "Boost pad", "shape": "circle",
-                 "lat": round(blat, 7), "lon": round(blon, 7), "r_m": 12, "scale": 1.0, "secs": 5, "cooldown_s": 20},
+                 "lat": round(blat, 7), "lon": round(blon, 7), "r_m": 5, "scale": 1.0, "secs": 5, "cooldown_s": 20},
                 {"id": "m1", "type": "mud", "name": "Mud", "shape": "circle",
-                 "lat": round(mlat, 7), "lon": round(mlon, 7), "r_m": 15, "scale": 0.5}]}
+                 "lat": round(mlat, 7), "lon": round(mlon, 7), "r_m": 6, "scale": 0.5},
+                {"id": "i1", "type": "item", "name": "Item box", "shape": "circle",
+                 "lat": round(ilat, 7), "lon": round(ilon, 7), "r_m": 4, "cooldown_s": 15}],
+            "track": {"points": [ll(*oval(per * i / n)[:2]) for i in range(n)], "closed": True, "width_m": 6}}
 
 
 def oval(s):
@@ -125,6 +131,7 @@ class SimKart:
         self.slow_mph = 0
         self.boost_scale = None                # timed override (firmware GK_CMD_BOOST), None = off
         self.boost_until = 0.0
+        self.grid_until = None                 # race start: zero power until GO (firmware GK_CMD_RACE)
 
     def silent(self, now):
         if self.offline:
@@ -138,6 +145,11 @@ class SimKart:
             if self.cmd_result == 1:
                 self.cmd_result = 2
         top = 0.0 if self.stopped else MODE_MAX_MS.get(self.mode_actual if self.mode_actual is not None else 1)
+        if self.grid_until is not None:
+            if now >= self.grid_until and not self.stopped:
+                self.grid_until = None         # GO
+            else:
+                top = 0.0
         if self.boost_scale is not None and now >= self.boost_until:
             self.boost_scale = None            # auto-revert to the mode scale
         if self.boost_scale is not None and not self.stopped:
@@ -178,7 +190,7 @@ class SimKart:
             "duty": round(min(0.95, self.v / 14.0), 3) if vl else None,
             "esc_c": round(self.esc_c, 1) if vl else None, "fault": self.fault if vl else None,
             "mode_req": self.mode_req, "mode_actual": self.mode_actual if vl else None,
-            "scale": ((self.boost_scale if self.boost_scale is not None else {0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual))
+            "scale": 0.0 if self.grid_until is not None and not self.stopped else ((self.boost_scale if self.boost_scale is not None else {0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual))
                       if not self.stopped else 0.0) if vl else None,
             "stopped": self.stopped, "vesc_link": vl,
             "mode_confirmed": vl and self.mode_req is not None and self.mode_req == self.mode_actual,
@@ -209,6 +221,11 @@ class SimKart:
         elif cmd == "start":
             self.stopped, self.cmd_result = False, 2
             self.boost_scale, self.slow_mph = None, 0   # firmware: START clears SLOW and BOOST
+            self.grid_until = None                      # START releases a grid hold early
+        elif cmd == "race":
+            arg = msg.get("arg")
+            secs = arg if isinstance(arg, int) and 1 <= arg <= 30 else 5
+            self.grid_until, self.boost_scale, self.cmd_result = now + secs, None, 2
         elif cmd == "boost":
             arg = msg.get("arg")
             if self.stopped or not isinstance(arg, int) or not 10 <= arg <= 100:

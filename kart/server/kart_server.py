@@ -17,6 +17,7 @@ HTTP (default 0.0.0.0:8081; the kiosk uses 127.0.0.1):
   POST /cmd     {"cmd":"mode","arg":1} | slow [arg mph] | stop | start | ping | status
                 (from 127.0.0.1 only unless config "remote_cmd": true)
   POST /api/map/refresh   poll the pit for a new map now
+  POST /api/demo  {"on": true|false} or {"toggle": true}: demo mode (localhost only, config "demo")
   /map/<file>   cached course imagery;  /map/package.json  the cached package
   /map/zones.json  the cached game zones (pit/server/map/ZONES.md), 404 when none
   /healthz      "ok"
@@ -45,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import kartcore  # noqa: E402
+from demo import Demo  # noqa: E402
 from link import Link  # noqa: E402
 from mapsync import MapSync  # noqa: E402
 
@@ -56,8 +58,8 @@ DEFAULTS = {
     "pit_urls": ["http://gokart-pit.local:8080", "http://192.168.151.240:8080"],
     "map_poll_s": 30,
     "beginner_mode": False,             # hides driver-facing fault alerts only (docs/requirements.md)
-    "map_orientation": "north_up",      # "north_up" | "heading_up" (heading-up only while following)
-    "follow_span_m": 160,               # metres shown across the map height while following
+    "map_orientation": "heading_up",    # "heading_up" | "north_up" (heading-up only while following)
+    "follow_span_m": 70,                # metres shown across the map height while following
     "follow_resume_s": 10,              # auto-follow resumes this long after the last touch
     "mode_hold_ms": 500,                # press-and-hold to request a mode (0 = plain tap)
     "map_fps": 10,                      # max redraw rate while something moves
@@ -72,6 +74,8 @@ DEFAULTS = {
     "max_log_mb": 800,                  # oldest session logs are deleted beyond this
     "game": True,                       # false = this kart ignores the pit's game zones entirely
     "gps_correction": False,            # game positions += (pit surveyed - pit radio live fix), if < 25 m
+    "demo": True,                       # allow demo mode (hold the KART badge 3 s): simulated kart, real Heltec untouched
+    "demo_max_s": 180,                  # demo ends by itself after this
     "sound": True,                      # driver page: synthesized boost/lap sounds (WebAudio)
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -80,7 +84,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".webp": "image/webp", ".svg": "image/svg+xml"}
 SSE_PERIOD_S = 0.2
 PUBLIC_CFG = ("kart_id", "beginner_mode", "map_orientation", "follow_span_m", "follow_resume_s",
-              "mode_hold_ms", "map_fps", "game", "sound")
+              "mode_hold_ms", "map_fps", "game", "sound", "demo")
 
 
 def wall_iso(ts=None):
@@ -128,10 +132,9 @@ class App:
         self.lock = threading.RLock()
         self.log = SessionLog(cfg.get("log_dir") or os.path.join(KART_ROOT, "logs"), float(cfg["max_log_mb"]))
         cid = cfg.get("kart_id")
-        self.disp = kartcore.KartDisplay(configured_id=int(cid) if cid else None)
-        self.cmds = kartcore.CommandTracker()
-        self.game = kartcore.GameEngine(local_enabled=bool(cfg.get("game", True)),
-                                        gps_correction=bool(cfg.get("gps_correction", False)))
+        self.configured_id = int(cid) if cid else None
+        self._fresh_state()
+        self.demo = None                 # Demo while demoing: it replaces the Heltec for reads AND writes
         self.link = Link(self._on_line, self._on_link_state, port=cfg.get("serial_port"),
                          tcp=cfg.get("tcp"), log=self._console)
         self.maps = MapSync(cfg["pit_urls"], cfg.get("cache_dir") or os.path.join(KART_ROOT, "cache", "map"),
@@ -144,6 +147,74 @@ class App:
                        source=cfg.get("tcp") or cfg.get("serial_port") or "auto",
                        config={k: cfg.get(k) for k in PUBLIC_CFG + ("pit_urls",)})
 
+    def _fresh_state(self):
+        """New display/command/game state (start, and on entering/leaving demo mode)."""
+        self.disp = kartcore.KartDisplay(configured_id=self.configured_id)
+        self.cmds = kartcore.CommandTracker()
+        self.game = kartcore.GameEngine(local_enabled=bool(self.cfg.get("game", True)),
+                                        gps_correction=bool(self.cfg.get("gps_correction", False)))
+
+    # -- demo mode -------------------------------------------------------------------
+    def _demo_zones(self):
+        """The pit's current zones (forced on: demo is a simulation) or, with none, a built-in
+        course around the kart's last fix / the map origin / the pit."""
+        doc = self.maps.zones()
+        usable = isinstance(doc, dict) and (kartcore.parse_track(doc) is not None or any(
+            isinstance(z, dict) and z.get("type") in kartcore.ZONE_TYPES for z in doc.get("zones") or []))
+        if usable:
+            return dict(doc, enabled=True, version=f"demo-{doc.get('version')}"), "pit"
+        pkg = self.maps.package or {}
+        fx = self.disp.me.fix if self.disp.me.fix else None
+        c = (fx["lat"], fx["lon"]) if fx else None
+        for k in ("origin", "pit"):
+            o = pkg.get(k)
+            if c is None and isinstance(o, dict) and o.get("lat") is not None:
+                c = (o["lat"], o["lon"])
+        return kartcore.demo_zones(c or (41.09399, -73.41637), version="demo-builtin"), "builtin"
+
+    def demo_start(self, who):
+        if not self.cfg.get("demo", True):
+            raise kartcore.CommandError("demo mode is off in config.json")
+        if self.demo:
+            return self.demo_info()
+        doc, source = self._demo_zones()
+        with self.lock:
+            kid = self.disp.heltec_id or self.configured_id or 2
+            self._fresh_state()
+            self.demo_source = source
+            self.demo = Demo(doc, kid, self._on_demo_line, max_s=float(self.cfg.get("demo_max_s", 180)))
+        self._state_cache = (0.0, b"{}")
+        self.log.write("event", what="demo_start", who=who, zones=source, path_m=self.demo.path["length_m"],
+                       path_from=self.demo.path.get("source"))
+        print(f"{wall_iso()} DEMO start ({source} zones, loop {self.demo.path['length_m']} m) by {who}", flush=True)
+        return self.demo_info()
+
+    def demo_stop(self, who, why="stopped"):
+        d = self.demo
+        if not d:
+            return self.demo_info()
+        with self.lock:
+            self.demo = None
+            d.stop()
+            self._fresh_state()           # the real Heltec's next lines repopulate it
+            self._status_due = time.monotonic() + 1.0
+        self._state_cache = (0.0, b"{}")
+        self.log.write("event", what="demo_stop", who=who, why=why, sent_to_sim=len(d.writes))
+        print(f"{wall_iso()} DEMO stop ({why}) by {who}", flush=True)
+        return self.demo_info()
+
+    def demo_info(self):
+        d = self.demo
+        if not d:
+            return {"active": False, "allowed": bool(self.cfg.get("demo", True))}
+        return {"active": True, "allowed": True, "left_s": round(d.left_s(), 1), "zones": self.demo_source,
+                "path_m": d.path["length_m"], "path_from": d.path.get("source")}
+
+    def _on_demo_line(self, text):
+        if self.demo is None:
+            return
+        self._ingest(text, demo=True)
+
     def _console(self, msg):
         print(f"{wall_iso()} {msg}", flush=True)
         self.log.write("event", what="link", msg=msg)
@@ -154,8 +225,17 @@ class App:
 
     # -- link (reader thread) --------------------------------------------------
     def _on_line(self, text):
+        if self.demo is not None:          # demoing: the real Heltec's lines are logged, not shown
+            self.log.write("rx", line=text, ignored="demo")
+            return
+        self._ingest(text)
+
+    def _ingest(self, text, demo=False):
         now, wall = time.monotonic(), wall_iso()
-        self.log.write("rx", line=text)
+        if demo:
+            self.log.write("rx", line=text, demo=True)
+        else:
+            self.log.write("rx", line=text)
         try:
             msg = json.loads(text)
         except ValueError:
@@ -180,9 +260,14 @@ class App:
                 game = self.game.on_self(msg, now)
             elif t == "gps":
                 game = self.game.on_gps(msg, now)
+            elif t == "race":
+                game = self.game.on_race(msg, now)
         self._game_out(game)
 
     def _on_link_state(self, connected, desc):
+        if self.demo is not None:
+            self.log.write("event", what="link_up" if connected else "link_down", desc=desc, during="demo")
+            return
         with self.lock:
             self.link_since = wall_iso()
             self.disp.on_link_change()
@@ -195,15 +280,23 @@ class App:
         print(f"{wall_iso()} heltec link {'UP' if connected else 'DOWN'}: {desc}", flush=True)
 
     def _send_text(self, text):
+        d = self.demo
+        if d is not None:                  # demoing: NEVER the real Heltec
+            ok = d.write_text(text)
+            self.log.write("tx", line=text, ok=ok, demo=True)
+            return ok
         ok = self.link.write_text(text)
         self.log.write("tx", line=text, ok=ok)
         return ok
+
+    def _connected(self):
+        return True if self.demo is not None else self.link.connected
 
     def _game_out(self, recs):
         """Log every game record; send the command lines (outside the app lock)."""
         for r in recs:
             if r["ev"] == "cmd":
-                sent = self.link.connected and self._send_text(r["line"])
+                sent = self._connected() and self._send_text(r["line"])
                 self.log.write("game", **r, sent=bool(sent))
             else:
                 self.log.write("game", **r)
@@ -221,13 +314,17 @@ class App:
     def _ticker(self):
         while not self.stopping.wait(0.25):
             now = time.monotonic()
-            zones = self.maps.zones()
+            d = self.demo
+            if d is not None and d.expired(now):
+                self.demo_stop("timer", why=f"{self.cfg.get('demo_max_s', 180)} s limit")
+                d = None
+            zones = d.zones if d is not None else self.maps.zones()
             pkg = self.maps.package
             with self.lock:
                 self.cmds.tick(now)
                 self.game.set_pit(pkg.get("pit") if pkg else None)
                 game = self.game.set_zones(zones, now) + self.game.tick(now)
-                due = self.link.connected and self._status_due and now >= self._status_due
+                due = self._connected() and self._status_due and now >= self._status_due
                 if due:
                     self._status_due = now + float(self.cfg["status_poll_s"])
             self._game_out(game)
@@ -241,13 +338,21 @@ class App:
             d = self.disp.snapshot(now)
             cmds = self.cmds.snapshot(now)
             game = self.game.snapshot(now)
+        dm = self.demo
+        mp = self.maps.snapshot()
+        if dm is not None:
+            mp["zones"] = dm.zones
+        if game.get("track") and isinstance(mp.get("zones"), dict):
+            mp["zones"] = {k: v for k, v in mp["zones"].items() if k != "track"}    # sent once, as game.track
         d.update({
             "server": {"version": VERSION, "time": wall_iso(), "log_file": os.path.basename(self.log.path),
-                       "link": {"connected": self.link.connected, "desc": self.link.description,
+                       "link": {"connected": self._connected(),
+                                "desc": dm.description if dm is not None else self.link.description,
                                 "since": self.link_since}},
+            "demo": self.demo_info(),
             "config": {k: self.cfg.get(k) for k in PUBLIC_CFG},
             "commands": cmds,
-            "map": self.maps.snapshot(),
+            "map": mp,
             "game": game,
         })
         return d
@@ -263,7 +368,7 @@ class App:
     def command(self, body, who):
         cmd, arg = body.get("cmd"), body.get("arg")
         line = kartcore.command_text(cmd, arg)          # raises CommandError
-        if not self.link.connected:
+        if not self._connected():
             self.log.write("op", who=who, action="cmd", request=body, refused="heltec link down")
             raise kartcore.CommandError("Heltec not connected; nothing sent")
         ok = self._send_text(line)
@@ -361,6 +466,18 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/map/refresh":
             app.maps.poke()
             return self._json(200, {"ok": True})
+        if p == "/api/demo":
+            if not self._local() and not app.cfg.get("remote_cmd"):
+                return self._json(403, {"ok": False, "error": "demo only from the kart's own screen"})
+            try:
+                body = json.loads(raw or b"{}")
+                on = (not app.demo) if body.get("toggle") else bool(body.get("on"))
+                info = app.demo_start(who) if on else app.demo_stop(who)
+            except (ValueError, AttributeError) as e:
+                return self._json(400, {"ok": False, "error": f"bad request: {e}"})
+            except kartcore.CommandError as e:
+                return self._json(409, {"ok": False, "error": str(e)})
+            return self._json(200, {"ok": True, "demo": info})
         if p != "/cmd":
             return self._json(404, {"ok": False, "error": "not found"})
         if not self._local() and not app.cfg.get("remote_cmd"):
@@ -425,6 +542,8 @@ def main(argv=None):
         pass
     finally:
         app.stopping.set()
+        if app.demo:
+            app.demo_stop("shutdown")
         app.link.stop()
         app.maps.stop()
         app.log.write("event", what="server_stop")

@@ -22,6 +22,7 @@ Mode taps become text requests to the Heltec, which decides.
 from __future__ import annotations
 
 import math
+import random
 from collections import deque
 
 KART_IDS = tuple(range(1, 9))
@@ -36,7 +37,7 @@ KART_COLORS = {     # identical to pitcore.KART_COLORS so a kart has one colour 
 MODE_NAMES = {0: "ECO", 1: "NORMAL", 2: "SPORT"}
 # Motor-current scale per mode: firmware/kart-heltec-v4/config.h MODES[] (80/140, 100/140, 1.0).
 MODE_SCALES = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}
-CMD_CODES = {"mode": 1, "stop": 2, "start": 3, "ping": 4, "slow": 5, "boost": 6}
+CMD_CODES = {"mode": 1, "stop": 2, "start": 3, "ping": 4, "slow": 5, "boost": 6, "race": 7}
 CMD_NAMES = {v: k for k, v in CMD_CODES.items()}
 CMD_RESULT_NAMES = {0: "none", 1: "accepted", 2: "applied", 3: "no_vesc", 4: "rejected", 5: "unknown"}
 SRC_USB = 0xFE      # the firmware's source id for commands typed on its USB port (us)
@@ -440,9 +441,15 @@ NO_FIX_EXIT_S = 5.0          # no fix for this long: leave every zone, forget th
 MUD_REPEAT_S = 2.0           # mud: re-send while inside
 MUD_SECS = 3                 # each mud command lasts 3 s (so the cap ends <= 3 s after leaving)
 BOOST_DEFAULTS = {"secs": 5, "scale": 1.0, "cooldown_s": 20.0}
+ITEM_COOLDOWN_S = 15.0
+# Item box roll (ZONES.md "Item boxes"): (name, probability, secs, scale); empty = nothing sent
+ITEM_TABLE = (("boost", 0.45, 5, 1.0), ("super", 0.15, 8, 1.0), ("mud", 0.25, 3, 0.5), ("empty", 0.15, None, None))
+RACE_GO_GRACE_S = 0.0        # the overlay/laps follow the computed GO instant; the go line only confirms it
+HEADING_SLEW_DPS = 120.0     # heading-up map: max rotation rate
+ZONE_TYPES = ("boost", "mud", "item", "lapline")
 MUD_DEFAULT_SCALE = 0.5
 MIN_LAP_DEFAULT_S = 20.0
-MIN_CIRCLE_R_M = 8.0
+MIN_CIRCLE_R_M = 3.0         # ZONES.md: >= 3 (pads are typically 5 m)
 SCALE_MIN, SCALE_MAX = 0.10, 1.00
 SCALE_TOL = 0.015            # firmware MODE_MATCH_TOL
 
@@ -542,6 +549,12 @@ class Zone:
             self.poly = [local_en(float(p[0]), float(p[1]), self.ref) for p in pts]
         else:
             raise ValueError(f"unknown shape {self.shape!r}")
+        if self.type == "item":
+            self.cooldown_s = float(z["cooldown_s"]) if _num(z.get("cooldown_s")) and z["cooldown_s"] >= 0 \
+                else ITEM_COOLDOWN_S
+            if self.shape == "circle" and self.r < MIN_CIRCLE_R_M:
+                raise ValueError("item box too small")
+            return
         if self.type == "boost":
             self.scale = clamp_scale(z["scale"]) if _num(z.get("scale")) else BOOST_DEFAULTS["scale"]
             self.secs = int(max(1, min(30, z["secs"]))) if _num(z.get("secs")) else BOOST_DEFAULTS["secs"]
@@ -574,7 +587,7 @@ def parse_zones(doc):
         if not isinstance(z, dict):
             continue
         zid = str(z.get("id"))
-        if z.get("type") not in ("boost", "mud", "lapline"):
+        if z.get("type") not in ZONE_TYPES:
             ignored.append({"id": zid, "reason": f"unknown type {z.get('type')!r}"})
             continue
         if zid in seen:
@@ -712,6 +725,223 @@ class BaseCorrection:
                 "vector": v, "pit": list(self.pit) if self.pit else None, "why_not": why}
 
 
+def race_lights(go_in_s, n=5):
+    """Red lights lit during the countdown: one more each second, all n in the last second.
+    Mirrors raceLights() in static/app.js."""
+    if go_in_s is None:
+        return 0
+    if go_in_s <= 0:
+        return n
+    return max(0, min(n, n + 1 - math.ceil(go_in_s - 1e-9)))
+
+
+TRACK_MAX_POINTS = 200
+TRACK_DEFAULT_WIDTH_M = 6.0
+
+
+def parse_track(doc):
+    """zones.json "track" (ZONES.md "Track route") -> {"points", "closed", "width_m", "length_m"} or
+    None when absent or invalid (a bad track is ignored; the zones still work)."""
+    t = doc.get("track") if isinstance(doc, dict) else None
+    if not isinstance(t, dict):
+        return None
+    pts = t.get("points")
+    if not isinstance(pts, list) or not 2 <= len(pts) <= TRACK_MAX_POINTS or not all(_pt(p) for p in pts):
+        return None
+    pts = [[float(p[0]), float(p[1])] for p in pts]
+    if any(abs(p[0]) > 90 or abs(p[1]) > 180 for p in pts):
+        return None
+    w = t.get("width_m")
+    w = float(w) if _num(w) and 1.0 <= w <= 50.0 else TRACK_DEFAULT_WIDTH_M
+    closed = t.get("closed") is True and len(pts) >= 3
+    ref = pts[0]
+    en = [local_en(p[0], p[1], ref) for p in pts]
+    segs = list(zip(en, en[1:] + ([en[0]] if closed else [])))
+    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in segs)
+    if length < 5.0:
+        return None
+    return {"points": pts, "closed": closed, "width_m": w, "length_m": round(length, 1)}
+
+
+def track_chevrons(track, spacing_m=15.0):
+    """Direction marks along a track: [(lat, lon, heading_deg)] every spacing_m, following point
+    order (the HUD draws the same thing; this is the testable reference)."""
+    pts = track["points"]
+    ref = pts[0]
+    en = [local_en(p[0], p[1], ref) for p in pts]
+    if track["closed"]:
+        en = en + [en[0]]
+    out, carry = [], spacing_m / 2.0
+    for a, b in zip(en, en[1:]):
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        if L <= 0:
+            continue
+        hd = math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) % 360.0
+        d = carry
+        while d <= L:
+            f = d / L
+            lat, lon = en_to_ll(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, ref)
+            out.append((lat, lon, hd))
+            d += spacing_m
+        carry = d - L
+    return out
+
+
+def roll_item(rng):
+    """One item-box roll: (name, secs, scale); secs None = empty box."""
+    x = rng.random()
+    acc = 0.0
+    for name, p, secs, scale in ITEM_TABLE:
+        acc += p
+        if x < acc:
+            return name, secs, scale
+    return ITEM_TABLE[-1][0], None, None
+
+
+def angle_diff_deg(a, b):
+    """Shortest signed difference a - b in degrees, in (-180, 180]."""
+    d = (a - b) % 360.0
+    return d - 360.0 if d > 180.0 else d
+
+
+def slew_heading(cur, target, dt, max_dps=HEADING_SLEW_DPS):
+    """Heading-up map rotation: move cur towards target by at most max_dps * dt (shortest way).
+    cur None = jump to target; target None = hold cur. Mirrors slewHeading() in static/app.js."""
+    if target is None:
+        return cur
+    if cur is None:
+        return target % 360.0
+    d = angle_diff_deg(target, cur)
+    step = max_dps * max(0.0, dt)
+    if abs(d) <= step:
+        return target % 360.0
+    return (cur + math.copysign(step, d)) % 360.0
+
+
+def _centre(z):
+    """(lat, lon) centre of a boost/mud/item zone dict, or None."""
+    if z.get("shape") == "circle" and _num(z.get("lat")) and _num(z.get("lon")):
+        return float(z["lat"]), float(z["lon"])
+    pts = z.get("points")
+    if z.get("shape") == "polygon" and isinstance(pts, list) and len(pts) >= 3 and all(_pt(p) for p in pts):
+        ref = (float(pts[0][0]), float(pts[0][1]))
+        en = [local_en(float(p[0]), float(p[1]), ref) for p in pts]
+        a = cx = cy = 0.0                          # area centroid (shoelace)
+        for i in range(len(en)):
+            x1, y1 = en[i]
+            x2, y2 = en[(i + 1) % len(en)]
+            c = x1 * y2 - x2 * y1
+            a += c
+            cx += (x1 + x2) * c
+            cy += (y1 + y2) * c
+        if abs(a) < 1e-9:
+            e, n = sum(p[0] for p in en) / len(en), sum(p[1] for p in en) / len(en)
+        else:
+            e, n = cx / (3 * a), cy / (3 * a)
+        return en_to_ll(e, n, ref)
+    return None
+
+
+def en_to_ll(e, n, ref):
+    return (ref[0] + math.degrees(n / R_EARTH),
+            ref[1] + math.degrees(e / (R_EARTH * math.cos(math.radians(ref[0])))))
+
+
+def demo_zones(center, version=1):
+    """Built-in demo course (SIMULATION) around center = (lat, lon): the simulator's 70 x 36 m loop
+    with a start/finish line, a boost pad, mud and an item box. Used when the pit has no zones."""
+    ll = lambda e, n: [round(v, 7) for v in en_to_ll(e, n, center)]     # noqa: E731
+    b, it = ll(35, 0), ll(-35, 0)
+    return {"_comment": "DEMO (simulation) course generated by the kart display", "version": version, "enabled": True,
+            "zones": [
+                {"id": "demo-b", "type": "boost", "name": "Boost pad", "shape": "circle", "lat": b[0], "lon": b[1],
+                 "r_m": 9, "scale": 1.0, "secs": 5, "cooldown_s": 20},
+                {"id": "demo-m", "type": "mud", "name": "Mud", "shape": "polygon",
+                 "points": [ll(-12, -10), ll(12, -10), ll(12, -26), ll(-12, -26)], "scale": 0.5},
+                {"id": "demo-i", "type": "item", "name": "Item box", "shape": "circle", "lat": it[0], "lon": it[1],
+                 "r_m": 9, "cooldown_s": 15},
+                {"id": "demo-lap", "type": "lapline", "name": "Start / finish", "shape": "line",
+                 "a": ll(0, 10), "b": ll(0, 26), "min_lap_s": 20}]}
+
+
+def demo_path(doc, center=None, mph=15.0, approach_m=12.0):
+    """Closed driving loop for demo mode through the zones of doc: from just before the lap line,
+    across it, then through the centre of every boost/mud/item zone in angular order around their
+    centroid (travelling the same way round as the lap-line crossing), and back. If the loop would be
+    shorter than min_lap_s at `mph` (+5 s) a detour point is pushed outwards so laps still count.
+    Returns {"origin": (lat, lon), "points": [[lat, lon], ...] (closed: last joins first), "length_m"}."""
+    track = parse_track(doc)
+    if track is not None:                           # ZONES.md: demo drives along the track (closed loop)
+        pts = [list(p) for p in track["points"]]
+        ref = pts[0]
+        en = [local_en(p[0], p[1], ref) for p in pts] + [local_en(pts[0][0], pts[0][1], ref)]
+        L = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(en, en[1:]))
+        return {"origin": tuple(ref), "points": pts, "length_m": round(L, 1), "source": "track"}
+    zones = [z for z in (doc or {}).get("zones", []) if isinstance(z, dict)]
+    centres = [c for c in (_centre(z) for z in zones if z.get("type") in ("boost", "mud", "item")) if c]
+    lap = next((z for z in zones if z.get("type") == "lapline" and _pt(z.get("a")) and _pt(z.get("b"))), None)
+    if lap is not None:
+        origin = ((lap["a"][0] + lap["b"][0]) / 2.0, (lap["a"][1] + lap["b"][1]) / 2.0)
+    elif centres:
+        origin = centres[0]
+    elif center is not None:
+        origin = (float(center[0]), float(center[1]))
+    else:
+        raise ValueError("no zones and no centre for the demo loop")
+    P = [local_en(c[0], c[1], origin) for c in centres]
+    pts = []
+    if lap is not None:
+        a = local_en(lap["a"][0], lap["a"][1], origin)
+        b = local_en(lap["b"][0], lap["b"][1], origin)
+        ux, uy = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(ux, uy) or 1.0
+        nx, ny = -uy / L, ux / L                    # normal to the line
+        if P:                                       # cross towards the side the zones are mostly on? no: away from
+            mx = sum(p[0] for p in P) / len(P)       # their centroid, so the loop comes back round to the line
+            my = sum(p[1] for p in P) / len(P)
+            if mx * nx + my * ny > 0:
+                nx, ny = -nx, -ny
+        before = (-nx * approach_m, -ny * approach_m)
+        after = (nx * approach_m, ny * approach_m)
+    else:
+        before = after = None
+    if len(P) < 2:                                  # too few zones for a loop: add corners around them
+        base = P[0] if P else (0.0, 0.0)
+        extra = [(base[0] + 30, base[1] + 25), (base[0] - 30, base[1] + 25), (base[0] - 30, base[1] - 25),
+                 (base[0] + 30, base[1] - 25)]
+        if before is not None:                      # keep the corners off the lap line's side
+            extra = [(after[0] * 3 + ex[0] * 0.0 + (ex[0] - base[0]), after[1] * 3 + (ex[1] - base[1]))
+                     for ex in extra]
+        P = P + extra
+    cx = sum(p[0] for p in P) / len(P)
+    cy = sum(p[1] for p in P) / len(P)
+    ang = lambda p: math.atan2(p[1] - cy, p[0] - cx)     # noqa: E731
+    if before is not None:
+        # travel direction round the centroid implied by crossing before -> after
+        cross = (before[0] - cx) * (after[1] - before[1]) - (before[1] - cy) * (after[0] - before[0])
+        sign = 1.0 if cross > 0 else -1.0          # +1 = counter-clockwise
+        a0 = ang(after)
+        order = sorted(P, key=lambda p: ((ang(p) - a0) * sign) % (2 * math.pi))
+        loop = [before, after] + order
+    else:
+        loop = sorted(P, key=ang)
+    length = lambda pts_: sum(math.hypot(pts_[i][0] - pts_[i - 1][0], pts_[i][1] - pts_[i - 1][1])   # noqa: E731
+                              for i in range(len(pts_)))
+    if lap is not None:
+        min_lap = float(lap["min_lap_s"]) if _num(lap.get("min_lap_s")) else MIN_LAP_DEFAULT_S
+        need = (min_lap + 5.0) * mph * 0.44704
+        L0 = length(loop)
+        if L0 < need:                               # detour outwards between the last zone and the line
+            p, q = loop[-1], loop[0]
+            mx, my = (p[0] + q[0]) / 2, (p[1] + q[1]) / 2
+            dx, dy = mx - cx, my - cy
+            d = math.hypot(dx, dy) or 1.0
+            push = (need - L0) / 2.0 + 5.0
+            loop.append((mx + dx / d * push, my + dy / d * push))
+    pts = [list(en_to_ll(e, n, origin)) for e, n in loop]
+    return {"origin": origin, "points": pts, "length_m": round(length(loop), 1), "source": "zones"}
+
+
 class GameEngine:
     """Zone triggers + lap timing for this kart. Callers hold the app lock.
 
@@ -721,14 +951,18 @@ class GameEngine:
     no zone commands while the kart reports STOPPED (a boost entered while stopped
     is used up, not saved for later); mud wins over boost when they overlap."""
 
-    def __init__(self, local_enabled=True, gps_correction=False):
+    def __init__(self, local_enabled=True, gps_correction=False, rng=None):
         self.local_enabled = bool(local_enabled)
+        self.rng = rng or random.Random()
+        self.race = {"hold": False, "go_at": None, "secs": None, "rx": None, "go_mono": None,
+                     "go_confirmed": False, "how": None, "go_utc": None}
         self.filter = GpsFilter()
         self.corr = BaseCorrection(gps_correction)
         self.gps_line_mono = None   # last {"t":"gps"} line
         self.gps_lines = 0
         self.pos = None             # last filtered sample (for the HUD)
         self.gps_hz = None
+        self.track = None
         self.doc = None
         self.version = None
         self.enabled = False
@@ -794,6 +1028,9 @@ class GameEngine:
         self.doc = doc
         self.version = doc.get("version") if isinstance(doc, dict) else None
         self.enabled, self.areas, self.lapline, self.ignored = parse_zones(doc)
+        self.track = parse_track(doc)
+        if isinstance(doc, dict) and doc.get("track") is not None and self.track is None:
+            self.ignored.append({"id": "track", "reason": "invalid track (2-200 [lat, lon] points)"})
         ids = {z.id: z for z in self.areas}
         for zid in list(self.inside):
             if zid not in ids or not self.active():
@@ -860,6 +1097,9 @@ class GameEngine:
 
     def tick(self, now):
         recs = []
+        r = self.race
+        if r["hold"] and r["go_at"] is not None and now >= r["go_at"] + RACE_GO_GRACE_S:
+            self._go(r["go_at"], now, "clock", recs)
         if not self.active():
             return recs
         self._timeouts(now, recs)
@@ -879,7 +1119,7 @@ class GameEngine:
     def _exit_state(self, zid, now):
         st = self.zst.setdefault(zid, {"fired": False, "cool_until": None})
         z = next((a for a in self.areas if a.id == zid), None)
-        if st["fired"] and z is not None and z.type == "boost":
+        if st["fired"] and z is not None and z.type in ("boost", "item"):
             st["fired"] = False
             st["cool_until"] = now + z.cooldown_s
 
@@ -898,15 +1138,23 @@ class GameEngine:
                 self._rec(recs, "zone_exit", now, zone=z.id, type=z.type, name=z.name)
         in_mud = any(z.type == "mud" for z in self.areas if z.id in self.inside)
         for z in entered:
-            if z.type != "boost":
+            if z.type not in ("boost", "item"):
                 continue
             st = self.zst.setdefault(z.id, {"fired": False, "cool_until": None})
             if self.stopped is True:
                 self._rec(recs, "suppressed", now, zone=z.id, why="kart STOPPED")
+            elif self.race["hold"]:
+                self._rec(recs, "suppressed", now, zone=z.id, why="grid hold")
             elif in_mud:
                 self._rec(recs, "suppressed", now, zone=z.id, why="inside mud")
             elif st["cool_until"] is not None and now < st["cool_until"]:
                 self._rec(recs, "suppressed", now, zone=z.id, why=f"cooldown {st['cool_until'] - now:.0f} s")
+            elif z.type == "item":
+                st["fired"] = True
+                name, secs, scale = roll_item(self.rng)
+                self._rec(recs, "item", now, zone=z.id, name=z.name, item=name)
+                if secs is not None:
+                    self._cmd(recs, now, z, "mud" if name == "mud" else "boost", secs, scale)
             else:
                 st["fired"] = True
                 self._cmd(recs, now, z, "boost", z.secs, z.scale)
@@ -925,8 +1173,8 @@ class GameEngine:
             return
         if not entered and self.next_mud is not None and now < self.next_mud:
             return
-        if self.stopped is True:
-            return          # stays due: resumes on the first tick after START if still inside
+        if self.stopped is True or self.race["hold"]:
+            return          # stays due: resumes on the first tick after START / GO if still inside
         z = min(muds, key=lambda m: m.scale)
         self._cmd(recs, now, z, "mud", MUD_SECS, z.scale)
         self.next_mud = now + MUD_REPEAT_S
@@ -936,6 +1184,10 @@ class GameEngine:
     def _cross(self, t_cross, now, recs):
         L = self.lapline
         lap = self.lap
+        go = self.race["go_mono"]
+        if self.race["hold"] or (go is not None and t_cross < go):
+            self._rec(recs, "lap_ignored", now, zone=L.id, why="before GO")
+            return
         if lap["last_cross"] is None:
             lap.update(running=True, start=t_cross, last_cross=t_cross)
             self._rec(recs, "lap_start", now, zone=L.id)
@@ -954,8 +1206,50 @@ class GameEngine:
         lap.update(start=t_cross, last_cross=t_cross, running=True)
         self._rec(recs, "lap", now, zone=L.id, lap=lap["count"], lap_s=lap_s, best=best)
 
+    # -- race start (ZONES.md "Race start") -------------------------------------------
+    def on_race(self, msg, now):
+        """{"t":"race","event":"countdown","go_in_ms":N,"secs":S,"go_utc":U} / {"event":"go"}.
+        GO = arrival + go_in_ms (the overlay and the lap reset do not wait for the go line,
+        which only confirms it). Laps count from the first crossing after GO."""
+        recs = []
+        r = self.race
+        ev = msg.get("event")
+        if ev == "countdown":
+            go_in = msg.get("go_in_ms")
+            go_in = max(0.0, float(go_in) / 1000.0) if _num(go_in) else float(msg.get("secs") or 5)
+            r.update(hold=True, go_at=now + go_in, secs=msg.get("secs"), rx=now, go_confirmed=False, how=None,
+                     go_utc=msg.get("go_utc"))
+            self._rec(recs, "race_countdown", now, go_in_s=round(go_in, 2), secs=msg.get("secs"))
+            if go_in <= 0:
+                self._go(now, now, "clock", recs)
+        elif ev == "go":
+            if r["hold"]:
+                self._go(now, now, "line", recs)
+            r["go_confirmed"] = True
+            self._rec(recs, "race_go_line", now)
+        return recs
+
+    def _go(self, t_go, now, how, recs):
+        r = self.race
+        r.update(hold=False, go_mono=t_go, how=how)
+        if self.lap["running"] or self.lap["count"]:
+            self._rec(recs, "lap_reset", now, why="race GO")
+        self._reset_lap()
+        self._rec(recs, "race_go", now, how=how)
+
+    def grid_hold(self):
+        return bool(self.race["hold"])
+
     def on_cmd(self, msg, now):
-        """A {"t":"cmd"} line: remember the result of our last boost (src 254, cmd 6)."""
+        """A {"t":"cmd"} line: STOP/START end a grid hold (the firmware clears it);
+        remember the result of our last boost (src 254, cmd 6)."""
+        if msg.get("cmd") in (CMD_CODES["stop"], CMD_CODES["start"]) and msg.get("result") in (1, 2, 5) \
+                and self.race["hold"]:
+            self.race.update(hold=False, how="stop" if msg.get("cmd") == CMD_CODES["stop"] else "start")
+            self._rec([], "race_released", now, by=CMD_NAMES.get(msg.get("cmd")))
+            if msg.get("cmd") == CMD_CODES["start"]:
+                self.race["go_mono"] = now
+                self._reset_lap()
         if msg.get("src") != SRC_USB or msg.get("cmd") != CMD_CODES["boost"]:
             return None
         res = msg.get("result")
@@ -970,6 +1264,8 @@ class GameEngine:
         ov = self.override if self.override and now < self.override["until"] else None
         if self.stopped is True:
             kind = "stopped"
+        elif self.race["hold"]:
+            kind = "grid"                  # held at zero power for the start: not MUD, not STOPPED
         elif sc is None or ms is None:
             kind = ov["kind"] if ov else "unknown"
         elif sc > ms + SCALE_TOL or (ov and ov["kind"] == "boost" and sc >= ms - SCALE_TOL):
@@ -980,6 +1276,14 @@ class GameEngine:
             kind = "normal"
         return {"scale": sc, "mode_scale": round(ms, 3) if ms is not None else None, "kind": kind,
                 "override": {"kind": ov["kind"], "scale": ov["scale"], "left_s": round(ov["until"] - now, 1)} if ov else None}
+
+    def race_snapshot(self, now):
+        r = self.race
+        out = {"hold": r["hold"], "secs": r["secs"], "go_confirmed": r["go_confirmed"], "how": r["how"],
+               "go_in_s": round(r["go_at"] - now, 2) if r["hold"] and r["go_at"] is not None else None,
+               "go_age_s": round(now - r["go_mono"], 2) if r["go_mono"] is not None else None}
+        out["lights"] = race_lights(out["go_in_s"]) if r["hold"] else (5 if out["go_age_s"] is not None and out["go_age_s"] < 0 else 0)
+        return out
 
     def snapshot(self, now):
         lap = self.lap
@@ -996,6 +1300,8 @@ class GameEngine:
             "events": [{k: v for k, v in e.items() if k != "mono"} | {"age_s": _age(e["mono"], now)}
                        for e in list(self.events)[-8:]],
             "cmds_sent": self.cmds_sent,
+            "race": self.race_snapshot(now),
+            "track": self.track,
             "pos": ({k: v for k, v in self.pos.items() if k != "mono"} | {"age_s": _age(self.pos["mono"], now)})
                    if self.pos else None,
             "gps_source": "gps" if self.gps_line_mono is not None and now - self.gps_line_mono <= GPS_LINE_FRESH_S

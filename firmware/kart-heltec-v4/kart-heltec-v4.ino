@@ -69,6 +69,7 @@ static const GpsCfg GPS_CFGS[] = { {9600,false}, {9600,true}, {115200,false}, {1
 static const int GPS_CFG_N = sizeof(GPS_CFGS) / sizeof(GPS_CFGS[0]);
 int      gpsCfgIdx = 0;
 bool     gpsLocked = false, gpsConfigured = false; uint32_t gpsLockedMs = 0, gpsFixCount = 0, gpsLineMs = 0;
+uint32_t gpsDetectStartMs = 0, gpsResetMs = 0; int gpsResets = 0;   // detection watchdog: hard-reset the module when no baud locks
 bool     gpsLineOn = true;                 // {"t":"gps"} USB line on every new fix (up to 5 Hz) for the kart Pi
 double   baseLat = 0, baseLon = 0; uint32_t baseFixMs = 0;   // pit radio's own fix from the beacon (for position-domain correction)
 uint32_t gpsCfgStartMs = 0, gpsGoodAtStart = 0, gpsLastCharMs = 0;
@@ -539,13 +540,31 @@ static void gpsConfigure() {
   gpsConfigured = true; logf("gps configured: GPS+BDS+GLONASS, GGA+RMC, 5 Hz, 115200");
 }
 
+// Power-cycle + reset the L76K (it comes back at its 9600/1 Hz defaults and gets configured again).
+static void gpsHardReset(const char* why) {
+  gpsResets++; gpsResetMs = millis();
+  logf("gps hard reset (%s), #%d", why, gpsResets);
+  gpsSerial.end();
+  digitalWrite(PIN_GNSS_POWER, HIGH); delay(300);          // P-FET: HIGH = off
+  digitalWrite(PIN_GNSS_RST, LOW);
+  digitalWrite(PIN_GNSS_POWER, LOW);  delay(150);
+  digitalWrite(PIN_GNSS_RST, HIGH);   delay(100);
+  gpsLocked = false; gpsConfigured = false; gpsDetectStartMs = millis();
+  gpsApplyCfg(0);
+}
+
 static void serviceGps() {
   while (gpsSerial.available()) { gps.encode(gpsSerial.read()); gpsLastCharMs = millis(); }
   uint32_t now = millis();
   if (!gpsLocked) {
-    if (gps.passedChecksum() > gpsGoodAtStart + 2) { gpsLocked = true; gpsLockedMs = now; gpsConfigured = false; logf("gps found: %lu baud%s", (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? " (pins swapped)" : ""); }
+    if (gps.passedChecksum() > gpsGoodAtStart + 2) {
+      gpsLocked = true; gpsLockedMs = now; gpsConfigured = false; prefs.putUChar("gpscfg", (uint8_t)gpsCfgIdx);
+      logf("gps found: %lu baud%s", (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? " (pins swapped)" : "");
+    }
     else if (now - gpsCfgStartMs > GPS_DETECT_STEP_MS) gpsApplyCfg((gpsCfgIdx + 1) % GPS_CFG_N);
-  } else if (now - gpsLastCharMs > 15000) { gpsLocked = false; logf("gps silent, re-detecting"); gpsApplyCfg(gpsCfgIdx); }
+    // nothing parses at any baud for two full sweeps: the module is wedged or at an odd setting -> reset it
+    if (!gpsLocked && now - gpsDetectStartMs > 2UL * GPS_CFG_N * GPS_DETECT_STEP_MS && now - gpsResetMs > 120000UL && gpsResets < 20) gpsHardReset("no baud locked");
+  } else if (now - gpsLastCharMs > 15000) { gpsLocked = false; gpsDetectStartMs = now; logf("gps silent, re-detecting"); gpsApplyCfg(gpsCfgIdx); }
   else if (!gpsConfigured && now - gpsLockedMs > 500) gpsConfigure();
   if (gps.location.isValid() && gps.location.isUpdated()) {
     fixLat = gps.location.lat(); fixLon = gps.location.lng(); lastFixMs = now; gpsFixCount++;
@@ -748,9 +767,10 @@ static void usbCommand(char* line) {
 #if !VESC_TRANSPORT_UART
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
+  else if (!strcmp(line, "gpsreset")) gpsHardReset("console");
   else if (!strcmp(line, "gpsline") && arg) { gpsLineOn = !strcmp(arg, "on"); prefs.putBool("gpsline", gpsLineOn); logf("gps fix line %s", gpsLineOn ? "on" : "off"); }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | gpsreset | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -848,7 +868,8 @@ void setup() {
   pinMode(PIN_GNSS_PPS, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_GNSS_PPS), onPps, RISING);
   gpsLineOn = prefs.getBool("gpsline", true);
-  gpsApplyCfg(0);
+  gpsDetectStartMs = millis();
+  { uint8_t c = prefs.getUChar("gpscfg", 0); gpsApplyCfg(c < GPS_CFG_N ? c : 0); }   // try the last baud that worked first
 
   // VESC
 #if VESC_TRANSPORT_UART

@@ -199,12 +199,16 @@ class App:
             d = self.fleet.game.doc
             out = {"_comment": self.zones_comment} if self.zones_comment else {}
             out.update(version=d["version"], enabled=d["enabled"], zones=[dict(z) for z in d["zones"]])
+            if d.get("track"):
+                out["track"] = d["track"]
         return out
 
     def _save_zones(self, doc):
         """Write atomically (tmp + rename), keeping the file's _comment."""
         out = {"_comment": self.zones_comment} if self.zones_comment else {}
         out.update(version=doc["version"], enabled=doc["enabled"], zones=doc["zones"])
+        if doc.get("track"):
+            out["track"] = doc["track"]
         tmp = self.zones_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(out, f, indent=2)
@@ -218,6 +222,8 @@ class App:
             cur = self.fleet.game.doc
             body = dict(body)
             body.setdefault("enabled", cur["enabled"])      # the editor does not flip the master switch
+            if "track" not in body and cur.get("track"):    # absent = keep; null = remove
+                body["track"] = cur["track"]
             doc = pitcore.validate_zones(body)
             doc["version"] = cur["version"] + 1
             try:
@@ -225,8 +231,10 @@ class App:
             except OSError as e:
                 raise pitcore.ZoneError(f"could not write zones.json: {e}")
             self.fleet.game.set_doc(doc)
+        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="zones_save", version=doc["version"], enabled=doc["enabled"],
-                       zones=[{"id": z["id"], "type": z["type"]} for z in doc["zones"]])
+                       zones=[{"id": z["id"], "type": z["type"]} for z in doc["zones"]],
+                       track_points=len(doc["track"]["points"]) if doc.get("track") else 0)
         return self.zones_doc()
 
     def enable_zones(self, body, who):
@@ -237,11 +245,14 @@ class App:
         with self.lock:
             cur = self.fleet.game.doc
             doc = {"version": cur["version"] + 1, "enabled": en, "zones": cur["zones"]}
+            if cur.get("track"):
+                doc["track"] = cur["track"]
             try:
                 self._save_zones(doc)
             except OSError as e:
                 raise pitcore.ZoneError(f"could not write zones.json: {e}")
             self.fleet.game.set_doc(doc)
+        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="zones_enable", enabled=en, version=doc["version"])
         return {"enabled": en, "version": doc["version"]}
 
@@ -253,9 +264,31 @@ class App:
         self.log.write("op", who=who, action="gps_correction", enabled=enabled)
         return {"gps_correction": st}
 
+    def race_start(self, body, who):
+        """Reset lap timing and broadcast one `race` command (grid hold, GO in `secs`). ZONES.md "Race start"."""
+        secs = body.get("secs", 5)
+        if isinstance(secs, bool) or not isinstance(secs, int) or not 1 <= secs <= 30:
+            raise pitcore.CommandError("secs must be a whole number 1-30")
+        if not self.link.connected:
+            raise pitcore.CommandError("T-Beam link is down; race start not sent")
+        now, t = time.monotonic(), time.time()
+        wall = wall_iso(t)
+        with self.lock:
+            c = self.cmds.submit("race", pitcore.ALL_KARTS, secs, source=f"{who} (race start)", now=now, wall=wall)
+            self.fleet.game.reset_laps()
+            race = self.fleet.race
+            race.update(started_wall=wall, go_wall=wall_iso(t + secs), go_epoch=t + secs, go_secs=secs,
+                        start_cmd_id=c.id, by=who, changed_wall=wall)
+            d = c.to_dict()
+        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
+        self.log.write("op", who=who, action="race_start", secs=secs, id=d["id"], seq=d["seq"],
+                       go_wall=wall_iso(t + secs))
+        return {"command": d, "go_wall": wall_iso(t + secs), "secs": secs}
+
     def reset_laps(self, who):
         with self.lock:
             self.fleet.game.reset_laps()
+        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="laps_reset")
         return {"reset": True}
 
@@ -304,6 +337,9 @@ class App:
         now = time.monotonic()
         with self.lock:
             fleet = self.fleet.snapshot(now)
+            ge = fleet["race"].get("go_epoch")
+            # seconds until GO (negative after) from the server clock, so every page counts down together
+            fleet["race"]["go_in_s"] = None if ge is None else round(ge - time.time(), 2)
             cmds = self.cmds.snapshot()
             rx, bad = self.fleet.rx_lines, self.fleet.rx_bad
         return {
@@ -460,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.app.cfg.get("password"):
             self._send(403, "Pit password not configured: set \"password\" in pit/server/config.json "
                             "and restart. Only the local kiosk can connect until then.")
-        elif self.path.startswith(("/api/", "/events", "/cmd", "/zones", "/laps")):
+        elif self.path.startswith(("/api/", "/events", "/cmd", "/zones", "/laps", "/race")):
             self._json(401, {"ok": False, "error": "login required"})
         else:
             p = urlparse(self.path).path
@@ -581,6 +617,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "zones": app.save_zones(body, who)})
             if p == "/zones/enable":
                 return self._json(200, {"ok": True, **app.enable_zones(body, who)})
+            if p == "/race/start":
+                return self._json(200, {"ok": True, **app.race_start(body, who)})
             if p == "/laps/reset":
                 return self._json(200, {"ok": True, **app.reset_laps(who)})
             if p == "/gps_correction":

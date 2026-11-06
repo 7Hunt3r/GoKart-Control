@@ -13,6 +13,7 @@
   <div class="alerts">
     <div id="stopBanner" class="banner stop hidden">STOPPED</div>
     <div id="slowBanner" class="banner slow hidden">SLOW</div>
+    <div id="gridBanner" class="banner grid hidden">GRID: WAIT FOR GO</div>
   </div>
 </div>
 <div class="main">
@@ -63,6 +64,7 @@
       <div class="laprow"><span>BEST</span><b id="lapBest">--</b></div>
     </div>
     <span id="gameChip" class="chip gamechip hidden">GAME OFF</span>
+    <div id="itemBox" class="itembox hidden"><span id="itemGlyph">?</span><small id="itemName"></small></div>
     <div class="mapctl">
       <button id="followBtn" class="sel">FOLLOW</button>
       <button data-zoom="in">+</button>
@@ -74,6 +76,11 @@
   </section>
 </div>
 <div id="flash" class="flash hidden"><span id="flashText"></span></div>
+<div id="raceOv" class="raceov hidden">
+  <div class="lights"><i></i><i></i><i></i><i></i><i></i></div>
+  <div id="raceGo" class="racego hidden">GO!</div>
+  <div id="raceMsg" class="racemsg"></div>
+</div>
 <script src="/static/app.js"></script>
 </body>
 </html>

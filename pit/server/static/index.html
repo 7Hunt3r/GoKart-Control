@@ -43,7 +43,9 @@
       <div class="ztools">
         <button data-ztool="boost" class="zt-boost">BOOST PAD</button>
         <button data-ztool="mud" class="zt-mud">MUD</button>
+        <button data-ztool="item" class="zt-item">ITEM BOX</button>
         <button data-ztool="lapline" class="zt-lap">LAP LINE</button>
+        <button data-ztool="track" class="zt-track">TRACK</button>
         <button data-ztool="select">SELECT / MOVE</button>
         <button data-ztool="delete">DELETE</button>
         <span class="spacer"></span>
@@ -53,7 +55,8 @@
       <div class="zprops">
         <span id="zSel" class="zsel">nothing selected</span>
         <label>Name <input id="zName" maxlength="40" autocomplete="off"></label>
-        <label>Radius <input id="zRadius" type="range" min="8" max="60" step="1" value="12"> <b id="zRadiusVal">--</b></label>
+        <span class="ztrack">Track <button id="tUndo">UNDO POINT</button><button id="tClose">CLOSE LOOP</button><button id="tClear">CLEAR</button></span>
+        <label>Radius <input id="zRadius" type="range" min="3" max="60" step="1" value="5"> <b id="zRadiusVal">--</b></label>
       </div>
       <div id="zHint" class="note"></div>
     </div>

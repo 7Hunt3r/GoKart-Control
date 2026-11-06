@@ -125,27 +125,43 @@ on the Mac against the simulator** (unit + e2e tests, headless Chrome screenshot
 pages, the editor driven with real mouse events). Not yet tried with real karts.
 
 - **Zones file.** `server/map/zones.json` (next to `map.json`): `version`, `enabled` (master
-  switch) and `zones` (`boost` / `mud` circles or polygons, one `lapline`). Served without login
+  switch), `zones` (`boost` / `mud` / `item` circles or polygons, one `lapline`) and an optional
+  `track` route (`points`, `closed`, `width_m`). Served without login
   at `GET /map/zones.json`; `GET /map/package.json` carries `"zones": "/map/zones.json"` and
   `"zones_version"` so kart Pis re-fetch on change. A hand edit on the Pi is picked up on the next
   request (mtime check); an invalid file is logged (`zones_invalid`) and ignored.
-- **Editing (operator page `/`).** `ZONES` above the map enters edit mode: `BOOST PAD` / `MUD`
-  then tap the map (12 m / 15 m circle), `LAP LINE` then tap both ends (replaces the old line; one
+- **Editing (operator page `/`).** `ZONES` above the map enters edit mode: `BOOST PAD` / `MUD` /
+  `ITEM BOX` then tap the map (5 m / 6 m / 4 m circle), `TRACK` then tap the course centreline in
+  driving order (`UNDO POINT`, `CLOSE LOOP`, `CLEAR`), `LAP LINE` then tap both ends (replaces the old line; one
   per course), `SELECT / MOVE` to pick and drag a zone (drag empty map still pans), `DELETE` then
-  tap a zone. The selected zone gets a name field and a radius slider (8-60 m). `SAVE` posts the
+  tap a zone. The selected zone gets a name field and a radius slider (3-60 m). `SAVE` posts the
   whole document; `CANCEL` drops the draft. Saving warns if someone else saved meanwhile.
   Polygons are not drawn by the editor but are rendered, moved and deleted if present in the file.
 - **API (login like `/cmd`, logged as `op` with who).** `POST /zones` `{"zones":[...]}` replaces
-  the zone list (`enabled` kept unless given) after validation: types boost/mud/lapline, circle
-  `r_m` 8-500, polygon 3-64 points, lap line >= 4 m, unique ids (1-16 of `A-Za-z0-9_-`), at most
-  one lap line; `scale` clamped 0.1-1.0, boost `secs` 1-30, `cooldown_s` 0-600, `min_lap_s` 5-600.
+  the zone list (`enabled` kept unless given; `track` kept if absent, removed if `null`) after
+  validation: types boost/mud/item/lapline, circle `r_m` 3-500, polygon 3-64 points, lap line >= 4 m, unique ids (1-16 of `A-Za-z0-9_-`), at most
+  one lap line; `scale` clamped 0.1-1.0, boost `secs` 1-30, `cooldown_s` 0-600 (default 20 boost,
+  15 item), `min_lap_s` 5-600; track 2-200 points (3+ if closed), `width_m` 2-20.
   Refusals are HTTP 409 with the reason. Unknown zone types are kept as-is (karts ignore them,
   the pit draws them grey). `POST /zones/enable {"enabled":true|false}` flips the master switch.
   Both bump `version`. `POST /laps/reset` clears lap state.
 - **GAME ON/OFF.** Chip in the top bar of all three pages; on the kiosk it is the race
   director's kill for the whole game. Off = zones drawn faded, no lap timing, karts ignore zones.
-- **Rendering.** Every pit map draws boost pads (amber, chevrons), mud (brown) and the lap line
-  (checkered, flag at end a) from the same map code.
+- **Rendering.** Every pit map draws, from the same map code: boost pads as an amber chevron
+  panel inside a faint trigger circle (readable at 5 m), mud (brown), item boxes (blue/white "?"
+  box), the lap line (checkered, flag at end a) and the track route (thin dashed line with
+  direction chevrons about every 15 m). All faded when the game is off.
+- **Item boxes.** The kart rolls the item on entry (boost / super / mud / empty, ZONES.md); the
+  pit only stores and draws them and never evaluates them.
+- **Race start.** `START RACE` (hold 1 s) with a 3 / 5 / 10 s chooser, in the race panel on the
+  operator page, the kiosk RACE tab and the phone. `POST /race/start {"secs":5}` (login, 1-30)
+  resets all lap timing, sets `race.started_wall`, `race.go_wall` and sends ONE `race` command
+  (arg = secs) to all karts on the usual broadcast path with retries; logged as `race_start`.
+  `/api/state` carries `fleet.race.go_in_s` (seconds to GO on the server clock, negative after) so
+  every page runs the same countdown: a fixed overlay of 5 red lights going out one per second
+  (or "GO in N s" for longer counts), then GO green for 2 s, with WebAudio beeps (browsers only
+  allow sound after the first touch/click on that page). Kart cards show `GRID` while a kart's
+  live scale is 0.0 and it is not stopped (the hold) and flash `GO` when it comes back.
 - **Laps.** The pit times laps itself from `tele` fixes: a lap counts when the segment previous
   fix -> current fix crosses the lap line (either direction) and `min_lap_s` (default 20) has
   passed since the previous crossing; the first crossing starts the clock. The crossing time is
@@ -157,7 +173,9 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
 - **BOOST.** Per-kart `BOOST` (next to SLOW) and `BOOST ALL` (hold 1 s) send `cmd "boost"`
   with `arg` 100 (full scale for 5 s; firmware auto-reverts, STOP/START cancel it, never above
   1.0). `POST /cmd {"cmd":"boost","kart":1-8|255,"arg":10-100}`.
-- **Simulator.** `sim_tbeam.py` honours `boost` (scale echoed for 5 s, kart speeds up).
+- **Simulator.** `sim_tbeam.py` honours `boost` (scale echoed for 5 s, kart speeds up) and `race`
+  (scale 0 until GO; STOP keeps the hold, START releases it). Its `--print-zones` output includes
+  an item box and a closed track.
   `--print-zones` prints a zones document for its oval (lap line on the bottom straight, boost on
   the top straight, mud on the east bend); `--track-scale 0.3` gives ~15 s laps. To see it:
 

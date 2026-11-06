@@ -264,5 +264,100 @@ class EndToEnd(unittest.TestCase):
             st.close()
 
 
+class FakeLink:
+    """Stands in for the real Heltec link: records every write."""
+    instances = []
+
+    def __init__(self, on_line, on_state, port=None, tcp=None, log=print):
+        self.on_line, self.on_state = on_line, on_state
+        self.connected = True
+        self.description = "fake real Heltec"
+        self.writes = []
+        FakeLink.instances.append(self)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def write_text(self, text):
+        self.writes.append(text)
+        return True
+
+
+class DemoMode(unittest.TestCase):
+    """Demo mode in-process: the real link is never written to; lines go to the simulator."""
+
+    def test_demo_never_writes_to_the_real_link(self):
+        sys.path.insert(0, os.path.join(KART, "server"))
+        import kart_server
+        tmp = tempfile.TemporaryDirectory()
+        real_link = kart_server.Link
+        kart_server.Link = FakeLink
+        app = None
+        try:
+            cfg = dict(kart_server.DEFAULTS, log_dir=os.path.join(tmp.name, "logs"),
+                       cache_dir=os.path.join(tmp.name, "cache"), pit_urls=[f"http://127.0.0.1:{free_port()}"],
+                       map_poll_s=60, demo_max_s=60)
+            app = kart_server.App(cfg)
+            app.start()
+            real = FakeLink.instances[-1]
+            real.on_line('{"t":"self","kart":2,"fix":true,"lat":41.0932,"lon":-73.4187,"stopped":false,"vesc_link":false}')
+            info = app.demo_start("test")
+            self.assertTrue(info["active"])
+            self.assertEqual(info["zones"], "builtin")
+            app.command({"cmd": "mode", "arg": 2}, "test")              # a driver tap while demoing
+            real.on_line('{"t":"self","kart":2,"fix":true,"lat":1.0,"lon":1.0,"stopped":true}')   # ignored
+            deadline = time.time() + 30
+            s = app.state()
+            while time.time() < deadline:
+                s = app.state()
+                if s["game"]["cmds_sent"] >= 1 and s["game"]["race"]["go_age_s"] is not None:
+                    break
+                time.sleep(0.3)
+            self.assertTrue(s["simulation"])
+            self.assertTrue(s["demo"]["active"])
+            self.assertTrue(s["game"]["on"])
+            self.assertIsNotNone(s["game"]["race"]["go_age_s"])            # race 5 countdown ran, GO happened
+            self.assertGreaterEqual(s["game"]["cmds_sent"], 1)
+            self.assertFalse(s["self"]["status"]["stopped"])               # the real kart's STOPPED line was ignored
+            self.assertEqual(s["map"]["zones"]["version"], "demo-builtin")
+            self.assertEqual(real.writes, [])                              # NOTHING to the real Heltec
+            self.assertIn("mode 2", app.demo.writes)
+            self.assertTrue(any(w.startswith("boost ") for w in app.demo.writes))
+            app.demo_stop("test")
+            s = app.state()
+            self.assertFalse(s["demo"]["active"])
+            self.assertFalse(s["simulation"])
+            real.on_line('{"t":"self","kart":2,"fix":true,"lat":41.0932,"lon":-73.4187,"stopped":false,"vesc_link":false}')
+            self.assertEqual(app.state()["self"]["link"], "online")         # back on the real link, no restart
+            self.assertEqual(real.writes, [])
+            with open(app.log.path) as f:
+                recs = [json.loads(x) for x in f]
+            self.assertTrue(all(r.get("demo") for r in recs if r["kind"] == "tx"))
+            self.assertTrue(any(r.get("ignored") == "demo" for r in recs if r["kind"] == "rx"))
+        finally:
+            kart_server.Link = real_link
+            if app:
+                app.stopping.set()
+                if app.demo:
+                    app.demo_stop("test")
+                app.maps.stop()
+            tmp.cleanup()
+
+    def test_sim_race_countdown_over_tcp(self):
+        st = Stack(["--course", "--race-at", "3"])
+        try:
+            s = st.wait(lambda s: s["game"]["race"]["hold"], what="grid hold from the sim's race line")
+            self.assertFalse(s["self"]["status"]["stopped"])               # grid hold is not STOPPED
+            self.assertLessEqual(s["game"]["race"]["go_in_s"], 5.0)
+            s = st.wait(lambda s: s["game"]["race"]["go_confirmed"], timeout=10, what="GO line")
+            self.assertFalse(s["game"]["race"]["hold"])
+            self.assertEqual(st.request("POST", "/cmd", {"cmd": "race", "arg": 5})[0], 409)   # never from the screen
+        finally:
+            st.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -86,6 +86,7 @@ function holdButton(btn, ms, fire) {
 
 /* ------------------------------------------------------------------ cards */
 const cards = {};
+const gridSeen = {}, goFlash = {};   // per kart: was holding on the grid; GO badge until (ms)
 const expanded = new Set();   // mobile: kart ids whose card is expanded (per viewer)
 function kartButtons(k) {
   return `<div class="kbtns">
@@ -218,6 +219,11 @@ function updateCards() {
     c.f.out.innerHTML = outcomeText(k.id) || (MOBILE ? '<span class="note">none this session</span>' : "");
     const b = [];
     if (st.stopped === true) b.push('<span class="badge stopped">STOPPED</span>');
+    const onGrid = k.link === "online" && k.vesc_fresh && v.scale === 0 && st.stopped === false;   // race grid hold
+    if (gridSeen[k.id] && !onGrid && k.link === "online") goFlash[k.id] = Date.now() + 2500;
+    gridSeen[k.id] = onGrid;
+    if (onGrid) b.push('<span class="badge grid">GRID</span>');
+    else if ((goFlash[k.id] || 0) > Date.now()) b.push('<span class="badge go">GO</span>');
     if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph} MPH</span>`);
     if (fi.bad) b.push('<span class="badge fault">FAULT</span>');
     if (st.vesc_link === false) b.push('<span class="badge unknown">VESC LINK DOWN</span>');
@@ -323,9 +329,20 @@ function buildRace() {
     <div style="display:flex;gap:6px;margin-top:8px">
       <button id="raceOn" class="hold startall" style="flex:1">RACE ON<small>hold 1 s</small></button>
       <button id="raceOff" style="flex:1">RACE OFF</button></div>
+    <div class="lbl" style="margin-top:10px">Race start: grid hold, then GO on the shared clock</div>
+    <div class="racestart">
+      <div class="racesecs">${[3, 5, 10].map((n) => `<button data-racesecs="${n}">${n} s</button>`).join("")}</div>
+      <button id="raceStart" class="hold racestartbtn">START RACE<small>hold 1 s · resets laps</small></button></div>
+    <p class="note">START RACE sends one "race" command to all karts: each holds at zero power, then all launch
+      together when the lights go out. STOP still wins during the hold; START releases a kart early.</p>
     <p class="note">RACE ON sends the selected mode + START to entered karts and STOP to karts not entered,
       with per-kart outcomes in CMDS. RACE OFF only clears the race flag; it sends nothing.
       Entry and filters never remove a kart from telemetry or fleet commands.</p>`;
+  holdButton($("raceStart"), 1000, () => {
+    audioUnlock();
+    const secs = store.get("gk_racesecs", 5);
+    post("/race/start", { secs }).then((j) => { if (j && j.ok) toast(`Race start sent: GO in ${j.secs} s (laps reset)`); });
+  });
   holdButton($("raceOn"), 1000, () => post("/api/race", { active: true }).then((j) => { if (j && j.ok) toast(`Race on: ${j.race.issued.length} commands queued`); }));
   raceBuilt = true;
 }
@@ -341,6 +358,9 @@ function updateRace() {
   });
   document.querySelectorAll("[data-racemode]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.racemode) === race.mode));
   $("raceOn").disabled = !S.server.link.connected;
+  $("raceStart").disabled = !S.server.link.connected;
+  const rs = store.get("gk_racesecs", 5);
+  document.querySelectorAll("[data-racesecs]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.racesecs) === rs));
 }
 
 /* -------------------------------------------------------------------- log */
@@ -415,6 +435,8 @@ function drawMap() {
     if (base && base.fix && !nul(base.lat)) pts.push(en(base.lat, base.lon));
     (M.course || []).forEach((p) => pts.push(en(p[0], p[1])));
     zonePoints(zones).forEach((p) => pts.push(en(p[0], p[1])));
+    const trk = zed.on ? zed.track : zonesDoc().track;
+    if (trk && trk.points) trk.points.forEach((p) => pts.push(en(p[0], p[1])));
     if (!pts.length && M.bounds) { pts.push(en(M.bounds.north, M.bounds.west), en(M.bounds.south, M.bounds.east)); }
     if (!pts.length) pts.push([0, 0]);
     const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
@@ -439,6 +461,7 @@ function drawMap() {
     M.course.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
     ctx.stroke(); ctx.setLineDash([]);
   }
+  drawTrack(ctx, zed.on ? zed.track : zonesDoc().track, px, en, !zed.on && !zonesDoc().enabled);
   drawZones(ctx, zones, px, en, !zed.on && !zonesDoc().enabled);
   if (base && base.fix && !nul(base.lat)) {
     const b = px(en(base.lat, base.lon));
@@ -560,12 +583,13 @@ function setupMapInput() {
 
 /* -------------------------------------------------- game zones + laps (map/ZONES.md) */
 const ZONE_STYLE = {
-  boost: { fill: "rgba(255,140,0,0.32)", stroke: "#b85a00" },
+  boost: { fill: "rgba(255,140,0,0.08)", stroke: "rgba(184,90,0,0.55)" },   // faint trigger radius; the panel carries the look
   mud: { fill: "rgba(115,72,30,0.42)", stroke: "#4a2c10" },
+  item: { fill: "rgba(30,110,230,0.22)", stroke: "#0b4fb3" },
 };
-const ZONE_DEFAULT_R = { boost: 12, mud: 15 };
+const ZONE_DEFAULT_R = { boost: 5, mud: 6, item: 4 };
 // zone editor state (operator page only): draft is edited locally until SAVE
-const zed = { on: false, tool: "select", draft: [], sel: null, lapA: null, dirty: false, baseVersion: null, shownSel: undefined };
+const zed = { track: null, on: false, tool: "select", draft: [], sel: null, lapA: null, dirty: false, baseVersion: null, shownSel: undefined };
 
 function zonesDoc() { return (S && S.zones) || { version: 0, enabled: false, zones: [] }; }
 function gameTiming() { return !!(S && S.fleet.game && S.fleet.game.timing); }
@@ -594,13 +618,60 @@ function zonePoints(zones) {
   return pts;
 }
 
-function drawChevrons(ctx, c, size) {
-  ctx.strokeStyle = "#111"; ctx.lineWidth = Math.max(2, size / 4); ctx.lineJoin = "miter"; ctx.lineCap = "butt";
-  for (const dy of [-size * 0.45, size * 0.25]) {
-    ctx.beginPath();
-    ctx.moveTo(c[0] - size * 0.6, c[1] + dy + size * 0.4); ctx.lineTo(c[0], c[1] + dy - size * 0.2); ctx.lineTo(c[0] + size * 0.6, c[1] + dy + size * 0.4);
-    ctx.stroke();
+/* Mario Kart style boost panel: an amber strip with three chevrons, a fixed minimum size so a
+   5 m pad still reads on the kiosk map; the faint circle around it is the real trigger radius. */
+function drawBoostPanel(ctx, c, rpx) {
+  const w = Math.max(14, Math.min(28, rpx * 1.1)), h = w * 1.5;
+  ctx.save();
+  ctx.translate(c[0], c[1]);
+  ctx.fillStyle = "#ff8c00"; ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.rect(-w / 2, -h / 2, w, h); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = "#fff8e0"; ctx.lineWidth = Math.max(2, w / 7); ctx.lineJoin = "miter";
+  for (let i = 0; i < 3; i++) {
+    const y = -h / 2 + h * (0.32 + i * 0.25);
+    ctx.beginPath(); ctx.moveTo(-w * 0.32, y); ctx.lineTo(0, y - w * 0.3); ctx.lineTo(w * 0.32, y); ctx.stroke();
   }
+  ctx.restore();
+}
+/* course centreline (ZONES.md "Track route"): thin dashed line + direction chevrons every ~15 m */
+function drawTrack(ctx, trk, px, en, off) {
+  if (!trk || !Array.isArray(trk.points) || !trk.points.length) return;
+  const ps = trk.points.map((p) => px(en(p[0], p[1])));
+  ctx.save();
+  if (off) ctx.globalAlpha = 0.4;
+  const path = () => { ctx.beginPath(); ps.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); if (trk.closed && ps.length > 2) ctx.closePath(); };
+  path(); ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.lineWidth = 4; ctx.stroke();
+  path(); ctx.strokeStyle = "#0b4fb3"; ctx.lineWidth = 2; ctx.setLineDash([7, 5]); ctx.stroke(); ctx.setLineDash([]);
+  const segs = ps.map((q, i) => [q, ps[i + 1] || (trk.closed && ps.length > 2 ? ps[0] : null)]).filter((sg) => sg[1]);
+  const every = Math.max(24, 15 * view.scale);           // px between chevrons (~15 m, never cluttered)
+  let next = every / 2, acc = 0;                          // distance along the route of the next chevron
+  ctx.strokeStyle = "#0b4fb3"; ctx.lineWidth = 2.5; ctx.lineJoin = "miter";
+  for (const [a, b] of segs) {
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const ux = L ? (b[0] - a[0]) / L : 0, uy = L ? (b[1] - a[1]) / L : 0;
+    for (; next <= acc + L; next += every) {
+      const d = next - acc, x = a[0] + ux * d, y = a[1] + uy * d, s = 5;
+      ctx.beginPath();
+      ctx.moveTo(x - ux * s - uy * s, y - uy * s + ux * s); ctx.lineTo(x, y); ctx.lineTo(x - ux * s + uy * s, y - uy * s - ux * s);
+      ctx.stroke();
+    }
+    acc += L;
+  }
+  if (zed.on) {                                            // editing: show the points, first one ringed
+    ps.forEach((q, i) => { ctx.fillStyle = "#0b4fb3"; ctx.beginPath(); ctx.arc(q[0], q[1], i ? 3.5 : 6, 0, 2 * Math.PI); ctx.fill(); });
+  }
+  ctx.restore();
+}
+function drawItemBox(ctx, c, g) {
+  const h = Math.max(7, g * 0.8);
+  ctx.save();
+  ctx.translate(c[0], c[1]); ctx.rotate(Math.PI / 4 * 0.25);
+  ctx.fillStyle = "#1e6ee6"; ctx.fillRect(-h, -h, 2 * h, 2 * h);
+  ctx.lineWidth = Math.max(2, h / 4); ctx.strokeStyle = "#fff"; ctx.strokeRect(-h * 0.8, -h * 0.8, 1.6 * h, 1.6 * h);
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "#08306b"; ctx.strokeRect(-h, -h, 2 * h, 2 * h);
+  ctx.fillStyle = "#fff"; ctx.font = `900 ${Math.round(h * 1.4)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("?", 0, h * 0.08);
+  ctx.restore();
 }
 function drawLapline(ctx, a, b, sel) {
   const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -650,7 +721,8 @@ function drawZones(ctx, zones, px, en, off) {
     if (!ZONE_STYLE[z.type] || sel) ctx.setLineDash([6, 4]);
     ctx.stroke(); ctx.setLineDash([]);
     const g = Math.min(16, Math.max(6, rpx * 0.5));
-    if (z.type === "boost") drawChevrons(ctx, c, g);
+    if (z.type === "boost") drawBoostPanel(ctx, c, rpx);
+    else if (z.type === "item") drawItemBox(ctx, c, g);
     else if (z.type === "mud") {
       ctx.fillStyle = "#2b1a08";
       [[-0.5, 0.2], [0.1, -0.35], [0.45, 0.3]].forEach(([dx, dy]) => { ctx.beginPath(); ctx.arc(c[0] + dx * g, c[1] + dy * g, Math.max(2, g / 5), 0, 2 * Math.PI); ctx.fill(); });
@@ -704,10 +776,19 @@ function zoneTap(w) {
   if (!S || !S.fleet.origin) { toast("No map origin yet: wait for a GPS fix", true); return; }
   const g = geo(), here = g.ll(w[0], w[1]);
   const t = zed.tool;
-  if (t === "boost" || t === "mud") {
+  if (t === "track") {
+    if (!zed.track) zed.track = { points: [], closed: false, width_m: 6 };
+    if (zed.track.points.length >= 200) { toast("Track is limited to 200 points", true); return; }
+    zed.track.points.push(here); zed.dirty = true;
+    if (S) { drawMap(); updateZoneBar(); }
+    return;
+  }
+  if (t === "boost" || t === "mud" || t === "item") {
     const z = t === "boost"
       ? { id: newZoneId("b"), type: "boost", name: "Boost pad", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.boost, scale: 1.0, secs: 5, cooldown_s: 20 }
-      : { id: newZoneId("m"), type: "mud", name: "Mud", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.mud, scale: 0.5 };
+      : t === "item"
+        ? { id: newZoneId("i"), type: "item", name: "Item box", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.item, cooldown_s: 15 }
+        : { id: newZoneId("m"), type: "mud", name: "Mud", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.mud, scale: 0.5 };
     zed.draft.push(z); zed.sel = z.id; zed.dirty = true;
     setZoneTool("select");
   } else if (t === "lapline") {
@@ -735,6 +816,7 @@ function setZoneTool(t) { zed.tool = t; zed.lapA = null; updateZoneBar(); }
 function zoneEdit(on) {
   if (on) {
     zed.draft = JSON.parse(JSON.stringify(zonesDoc().zones));
+    zed.track = zonesDoc().track ? JSON.parse(JSON.stringify(zonesDoc().track)) : null;
     zed.baseVersion = zonesDoc().version;
     zed.sel = null; zed.lapA = null; zed.dirty = false; zed.tool = "select";
     view.fit = false;                        // keep the view still while placing zones
@@ -746,7 +828,9 @@ function zoneEdit(on) {
   if (S) { drawMap(); updateZoneBar(); }
 }
 const ZONE_HINT = {
-  boost: "Tap the map to drop a boost pad (12 m).", mud: "Tap the map to drop a mud patch (15 m).",
+  boost: "Tap the map to drop a boost pad (5 m).", mud: "Tap the map to drop a mud patch (6 m).",
+  track: "Tap the course centreline point by point in driving order (direction = order), then CLOSE LOOP.",
+  item: "Tap the map to drop an item box (4 m); the kart rolls boost / super / mud / empty.",
   lapline: "Tap one end of the start/finish line, then the other end.", delete: "Tap a zone to delete it.",
   select: "Tap a zone to select it; drag it to move. Drag empty map to pan.",
 };
@@ -764,13 +848,17 @@ function updateZoneBar() {
   rr.disabled = !(z && z.shape === "circle");
   $("zRadiusVal").textContent = z && z.shape === "circle" ? `${Math.round(z.r_m)} m` : "--";
   $("zSel").textContent = z ? `${z.type.toUpperCase()} ${z.id}` : "nothing selected";
-  const counts = ["boost", "mud", "lapline"].map((t) => zed.draft.filter((q) => q.type === t).length);
+  const counts = ["boost", "mud", "lapline", "item"].map((t) => zed.draft.filter((q) => q.type === t).length);
   $("zHint").textContent = (zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line." : ZONE_HINT[zed.tool])
-    + ` ${counts[0]} boost, ${counts[1]} mud, ${counts[2] ? "lap line set" : "no lap line"}${zed.dirty ? " (unsaved)" : ""}.`;
+    + ` ${counts[0]} boost, ${counts[1]} mud, ${counts[3]} item, ${counts[2] ? "lap line set" : "no lap line"}, `
+    + (zed.track && zed.track.points.length ? `track ${zed.track.points.length} pts${zed.track.closed ? " closed" : ""}` : "no track")
+    + `${zed.dirty ? " (unsaved)" : ""}.`;
 }
 function saveZones() {
   if (zonesDoc().version !== zed.baseVersion && !confirm("Zones were changed elsewhere since you started editing. Overwrite them?")) return;
-  post("/zones", { enabled: zonesDoc().enabled, zones: zed.draft }).then((j) => {
+  const trk = zed.track && zed.track.points.length >= 2 ? zed.track : null;
+  if (trk && trk.closed && trk.points.length < 3) { toast("A closed track needs at least 3 points", true); return; }
+  post("/zones", { enabled: zonesDoc().enabled, zones: zed.draft, track: trk }).then((j) => {
     if (j && j.ok) { toast(`Zones saved (version ${j.zones.version}, ${j.zones.zones.length} zones)`); zoneEdit(false); }
   });
 }
@@ -842,6 +930,67 @@ function updateLaps() {
   }
 }
 
+/* ------------------------------------------------- race start countdown (ZONES.md "Race start") */
+// GO time comes from the server as race.go_in_s (server clock), turned into a local target once per
+// race start so every pit page shows the same lights. 5 red lights go out one per second, GO green 2 s.
+let audioCtx = null;
+function audioUnlock() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (e) { audioCtx = null; }
+}
+document.addEventListener("pointerdown", audioUnlock, { passive: true });
+function beep(freq, ms) {
+  if (!audioCtx || audioCtx.state !== "running") return;
+  try {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime;
+    o.type = "square"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + ms / 1000 + 0.05);
+  } catch (e) { /* audio is a nicety */ }
+}
+const cdn = { key: null, goAt: 0, lit: -1, went: false };
+function updateCountdown() {
+  const race = S.fleet.race || {};
+  let ov = $("countdown");
+  if (nul(race.go_in_s) || !race.go_wall) { if (ov) ov.classList.add("hidden"); return; }
+  if (cdn.key !== race.go_wall) {           // new race start: fix the local target once
+    cdn.key = race.go_wall; cdn.goAt = Date.now() + race.go_in_s * 1000; cdn.lit = -1; cdn.went = race.go_in_s <= -2;
+  } else {                                   // drift correction only if way off (tab slept etc.)
+    const t = Date.now() + race.go_in_s * 1000;
+    if (Math.abs(t - cdn.goAt) > 400) cdn.goAt = t;
+  }
+  tickCountdown();
+}
+function tickCountdown() {
+  if (!cdn.key) return;
+  let ov = $("countdown");
+  const r = (cdn.goAt - Date.now()) / 1000;
+  if (r <= -2) { if (ov) ov.classList.add("hidden"); return; }
+  if (!ov) {
+    ov = document.createElement("div"); ov.id = "countdown"; ov.className = "countdown hidden";
+    ov.innerHTML = '<div class="cdlights">' + [0, 1, 2, 3, 4].map(() => '<span class="cdl"></span>').join("") + '</div><div class="cdtext"></div>';
+    document.body.appendChild(ov);
+  }
+  ov.classList.remove("hidden");
+  const lights = ov.querySelectorAll(".cdl"), txt = ov.querySelector(".cdtext");
+  if (r > 0) {
+    const lit = Math.min(5, Math.ceil(r));
+    ov.classList.remove("go");
+    lights.forEach((l, i) => l.classList.toggle("on", i < lit));
+    txt.textContent = r > 5 ? `GRID · GO in ${Math.ceil(r)} s` : "";
+    if (lit !== cdn.lit) { if (cdn.lit !== -1 || r <= 5.05) beep(r > 5 ? 440 : 660, 160); cdn.lit = lit; }
+  } else {
+    ov.classList.add("go");
+    lights.forEach((l) => l.classList.remove("on"));
+    txt.textContent = "GO";
+    if (!cdn.went) { cdn.went = true; beep(1320, 600); }
+  }
+}
+setInterval(tickCountdown, 50);
+
 /* ------------------------------------------------------------ kiosk sheet */
 let sheetKart = null;
 function openSheet(k) {
@@ -903,6 +1052,7 @@ function render() {
   drawMap();
   updateSheet();
   updateZoneBar();
+  updateCountdown();
 }
 
 document.addEventListener("click", (e) => {
@@ -929,8 +1079,18 @@ document.addEventListener("click", (e) => {
     post("/api/race", { entered: cur.includes(k) ? cur.filter((x) => x !== k) : cur.concat([k]) });
   } else if (ds.racemode !== undefined) post("/api/race", { mode: Number(ds.racemode) });
   else if (ds.ztool) setZoneTool(ds.ztool);
+  else if (ds.racesecs) { store.set("gk_racesecs", Number(ds.racesecs)); if (S) updateRace(); }
   else if (b.id === "zoneEdit") { if (zed.on && zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(!zed.on); }
   else if (b.id === "zSave") saveZones();
+  else if (b.id === "tUndo" || b.id === "tClose" || b.id === "tClear") {
+    if (b.id === "tClear") { if (zed.track && zed.track.points.length && !confirm("Clear the whole track?")) return; zed.track = null; }
+    else if (zed.track && b.id === "tUndo") { zed.track.points.pop(); if (zed.track.points.length < 3) zed.track.closed = false; }
+    else if (zed.track && b.id === "tClose") {
+      if (zed.track.points.length < 3) { toast("Add at least 3 points before closing the loop", true); return; }
+      zed.track.closed = !zed.track.closed;
+    }
+    zed.dirty = true; setZoneTool("track"); if (S) drawMap();
+  }
   else if (b.id === "zCancel") { if (zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(false); }
   else if (b.id === "gameChip") {
     if (!S) return;

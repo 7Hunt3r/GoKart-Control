@@ -307,7 +307,7 @@ class Geometry(unittest.TestCase):
         self.assertEqual(kc.boost_line(0, 0.5), "boost 1 0.50")
 
     def test_parse_ignores_bad_and_unknown(self):
-        doc = zones_doc(boost_zone(r=5), {"id": "x", "type": "oil", "shape": "circle"},
+        doc = zones_doc(boost_zone(r=2), {"id": "x", "type": "oil", "shape": "circle"},
                         {"id": "p", "type": "mud", "shape": "polygon", "points": [ll(0, 0), ll(1, 1)]},
                         boost_zone(scale=3.0, r=8) | {"id": "b2"}, lap_zone(), lap_zone() | {"id": "lap2"})
         en, areas, lap, ign = kc.parse_zones(doc)
@@ -325,7 +325,8 @@ class Game(unittest.TestCase):
         recs = g.set_zones(zones_doc(*zones, enabled=enabled), 0.0)
         return g, recs
 
-    def drive(self, g, pts, t0=1.0, dt=0.5, **kw):
+    @staticmethod
+    def drive(_self, g, pts, t0=1.0, dt=0.5, **kw):
         """Feed fixes along pts (e, n) every dt s, ticking 4x per fix. Returns (records, last t)."""
         out, t = [], t0
         for e, n in pts:
@@ -432,7 +433,7 @@ class Game(unittest.TestCase):
 
     def test_stopped_kart_sends_nothing(self):
         g, _ = self.engine(boost_zone(), mud_zone(x0=40, x1=60))
-        r, t = self.drive(g, [(-20, 0), (0, 0), (5, 0), (30, 0), (45, 0), (50, 0), (55, 0)], stopped=True)
+        r, t = self.drive(None, g, [(-20, 0), (0, 0), (5, 0), (30, 0), (45, 0), (50, 0), (55, 0)], stopped=True)
         self.assertEqual(lines(r), [])
         self.assertEqual(evs(r, "suppressed")[0]["why"], "kart STOPPED")
         # START while still inside the mud: the (safe) slowdown resumes; the boost was used up
@@ -442,7 +443,7 @@ class Game(unittest.TestCase):
     def test_disabled_sends_nothing(self):
         g, recs = self.engine(boost_zone(), mud_zone(x0=40, x1=60), lap_zone(), enabled=False)
         self.assertEqual(evs(recs, "game_on"), [])
-        r, _ = self.drive(g, [(-20, 0), (0, 0), (5, 0), (30, 0), (45, 0), (50, 0)])
+        r, _ = self.drive(None, g, [(-20, 0), (0, 0), (5, 0), (30, 0), (45, 0), (50, 0)])
         self.assertEqual(r, [])
         s = g.snapshot(5.0)
         self.assertFalse(s["on"])
@@ -617,6 +618,272 @@ class BaseCorrectionTests(unittest.TestCase):
         g.on_self(fix(-30, 0, **self.base(-8, 0)), 0.5)       # live base fix 8 m west: shift east by 8
         self.assertTrue(g.snapshot(0.5)["correction"]["applied"])
         self.assertEqual(lines(g.on_gps(gps(-17, 0), 1.0)), ["boost 5 1.00"])    # -17 + 8 = -9: inside r 10
+
+
+# --- race start, item boxes, heading slew, track, demo path ----------------------------
+import glob  # noqa: E402
+import random  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+sys.path.insert(0, os.path.join(KART, "sim"))
+import sim_heltec  # noqa: E402
+
+
+class FixedRng:
+    def __init__(self, x):
+        self.x = x
+
+    def random(self):
+        return self.x
+
+
+def item_zone(e=0.0, n=0.0, r=5, **kw):
+    lat, lon = ll(e, n)
+    return {"id": "i1", "type": "item", "name": "Item", "shape": "circle", "lat": lat, "lon": lon, "r_m": r, **kw}
+
+
+class Race(unittest.TestCase):
+    def test_lights(self):
+        self.assertEqual([kc.race_lights(x) for x in (10, 5.5, 5.0, 4.87, 3.2, 1.37, 0.37, 0.0, None)],
+                         [0, 0, 1, 1, 2, 4, 5, 5, 0])
+
+    def test_countdown_timing_and_go_by_clock(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(lap_zone()), 0.0)
+        g.on_self(fix(-2, 0), 1.0)
+        g.on_self(fix(2, 0), 1.5)                          # a lap running before the race
+        self.assertTrue(g.snapshot(2.0)["lap"]["running"])
+        r = g.on_race({"t": "race", "kart": 2, "event": "countdown", "go_in_ms": 4870, "secs": 5, "go_utc": 1762470000}, 10.0)
+        self.assertEqual(r[0]["ev"], "race_countdown")
+        rs = g.snapshot(10.0)["race"]
+        self.assertEqual((rs["hold"], rs["go_in_s"], rs["lights"], rs["secs"]), (True, 4.87, 1, 5))
+        self.assertEqual(g.snapshot(13.5)["race"]["lights"], 4)
+        self.assertEqual(g.tick(14.86), [])                 # not yet
+        self.assertTrue(g.grid_hold())
+        r = g.tick(14.871)                                  # GO from arrival + go_in_ms, without the go line
+        self.assertEqual([x["ev"] for x in r], ["lap_reset", "race_go"])
+        self.assertEqual(r[-1]["how"], "clock")
+        s = g.snapshot(15.0)
+        self.assertFalse(s["race"]["hold"])
+        self.assertEqual((s["lap"]["count"], s["lap"]["running"]), (0, False))
+        self.assertFalse(s["race"]["go_confirmed"])
+        r = g.on_race({"t": "race", "kart": 2, "event": "go"}, 14.95)          # confirms; no second GO
+        self.assertEqual([x["ev"] for x in r], ["race_go_line"])
+        self.assertTrue(g.snapshot(15.0)["race"]["go_confirmed"])
+
+    def test_laps_count_from_first_crossing_after_go(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(lap_zone(min_lap_s=5)), 0.0)
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 3000, "secs": 3}, 0.0)
+        r = g.on_self(fix(-2, 0), 1.0) + g.on_self(fix(2, 0), 1.5)          # creeping over the line in the hold
+        self.assertEqual(evs(r, "lap_ignored")[0]["why"], "before GO")
+        g.tick(3.0)
+        r = g.on_self(fix(-2, 0), 3.2) + g.on_self(fix(2, 0), 3.4)          # first crossing after GO
+        self.assertEqual(len(evs(r, "lap_start")), 1)
+        self.assertEqual(g.snapshot(4.0)["lap"]["count"], 0)
+
+    def test_go_line_first_and_stop_start_release(self):
+        g = kc.GameEngine()
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 5000, "secs": 5}, 0.0)
+        r = g.on_race({"t": "race", "event": "go"}, 4.9)                     # the line can beat the clock
+        self.assertEqual([x["ev"] for x in r], ["race_go", "race_go_line"])
+        self.assertEqual(r[0]["how"], "line")
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 5000, "secs": 5}, 10.0)
+        g.on_cmd({"t": "cmd", "src": 0, "cmd": 2, "arg": 0, "result": 1}, 11.0)   # pit STOP ends the hold
+        rs = g.snapshot(11.0)["race"]
+        self.assertEqual((rs["hold"], rs["how"]), (False, "stop"))
+        self.assertEqual(g.tick(20.0), [])                  # and no GO afterwards
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 5000, "secs": 5}, 30.0)
+        g.on_cmd({"t": "cmd", "src": 0, "cmd": 3, "arg": 0, "result": 1}, 31.0)   # START releases early
+        self.assertEqual(g.snapshot(31.0)["race"]["how"], "start")
+
+    def test_no_zone_commands_in_grid_hold(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(boost_zone(r=10), mud_zone(x0=40, x1=60)), 0.0)
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 30000, "secs": 30}, 0.0)
+        r, t = Game.drive(None, g, [(-20, 0), (0, 0), (5, 0), (30, 0), (45, 0), (50, 0)])
+        self.assertEqual(lines(r), [])
+        self.assertEqual(evs(r, "suppressed")[0]["why"], "grid hold")
+        self.assertEqual(g.meter(3.0)["kind"], "grid")
+
+
+class Items(unittest.TestCase):
+    def test_roll_distribution_seeded(self):
+        rng = random.Random(20261106)
+        n = 20000
+        counts = {}
+        for _ in range(n):
+            name, secs, scale = kc.roll_item(rng)
+            counts[name] = counts.get(name, 0) + 1
+            self.assertTrue(scale is None or scale <= 1.0)
+        for name, p, _, _ in kc.ITEM_TABLE:
+            self.assertAlmostEqual(counts[name] / n, p, delta=0.012, msg=name)
+
+    def test_each_outcome_command(self):
+        for x, item, line in ((0.10, "boost", ["boost 5 1.00"]), (0.50, "super", ["boost 8 1.00"]),
+                              (0.70, "mud", ["boost 3 0.50"]), (0.95, "empty", [])):
+            g = kc.GameEngine(rng=FixedRng(x))
+            g.set_zones(zones_doc(item_zone()), 0.0)
+            g.on_self(fix(-20, 0), 1.0)
+            r = g.on_self(fix(-4, 0), 1.5)
+            self.assertEqual(evs(r, "item")[0]["item"], item)
+            self.assertEqual(lines(r), line, item)
+
+    def test_cooldown_15_and_gates(self):
+        g = kc.GameEngine(rng=FixedRng(0.1))
+        g.set_zones(zones_doc(item_zone()), 0.0)
+        self.assertEqual(lines(g.on_self(fix(0, 0), 1.0)), ["boost 5 1.00"])
+        g.on_self(fix(10, 0), 1.5)                         # out (> 3 m past the 5 m edge)
+        r = g.on_self(fix(0, 0), 16.0)                     # 14.5 s after the exit
+        self.assertEqual(lines(r), [])
+        self.assertIn("cooldown", evs(r, "suppressed")[0]["why"])
+        g.on_self(fix(10, 0), 16.5)
+        self.assertEqual(lines(g.on_self(fix(0, 0), 32.0)), ["boost 5 1.00"])
+        st = kc.GameEngine(rng=FixedRng(0.1))
+        st.set_zones(zones_doc(item_zone()), 0.0)
+        r = st.on_self(fix(0, 0, stopped=True), 1.0)
+        self.assertEqual((lines(r), evs(r, "item")), ([], []))
+        weak = kc.GameEngine(rng=FixedRng(0.1))
+        weak.set_zones(zones_doc(item_zone()), 0.0)
+        self.assertEqual(weak.on_gps(gps(0, 0, hdop=5.0), 1.0), [])
+        off = kc.GameEngine(rng=FixedRng(0.1))
+        off.set_zones(zones_doc(item_zone(), enabled=False), 0.0)
+        self.assertEqual(off.on_self(fix(0, 0), 1.0), [])
+
+    def test_small_zones_allowed(self):
+        en, areas, _, ign = kc.parse_zones(zones_doc(item_zone(r=3), boost_zone(r=3) | {"id": "b3"}, boost_zone(r=2.9)))
+        self.assertEqual(sorted(z.id for z in areas), ["b3", "i1"])
+        self.assertEqual([i["id"] for i in ign], ["b1"])
+
+
+def find_node():
+    n = shutil.which("node")
+    if n:
+        return n
+    c = sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/node")))
+    return c[-1] if c else None
+
+
+def js_function(name):
+    with open(os.path.join(KART, "server", "static", "app.js")) as f:
+        src = f.read()
+    m = re.search(r"^function " + name + r"\(.*?^}", src, re.S | re.M)
+    return m.group(0)
+
+
+class HeadingSlew(unittest.TestCase):
+    def test_python_slew(self):
+        self.assertEqual(kc.slew_heading(None, 45.0, 0.1), 45.0)
+        self.assertEqual(kc.slew_heading(30.0, None, 1.0), 30.0)       # no heading (slow): hold
+        self.assertAlmostEqual(kc.slew_heading(350.0, 10.0, 0.1), 2.0)   # shortest way across north, 12 deg max
+        self.assertAlmostEqual(kc.slew_heading(0.0, 90.0, 0.5), 60.0)
+        self.assertAlmostEqual(kc.slew_heading(80.0, 90.0, 0.5), 90.0)
+        h = 0.0
+        for _ in range(10):                                            # 1 s at 10 Hz towards 180
+            h = kc.slew_heading(h, 180.0, 0.1)
+        self.assertAlmostEqual(h, 120.0)
+
+    def test_js_matches_python(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not installed")
+        js = "\n".join(js_function(n) for n in ("nul", "angleDiffDeg", "slewHeading", "raceLights"))
+        cases = [[350, 10, 0.1], [0, 90, 0.5], [80, 90, 0.5], [10, 350, 0.05], [None, 45, 0.1], [30, None, 1]]
+        prog = js + "\nconst c=" + json.dumps(cases) + ";console.log(JSON.stringify([c.map(x=>slewHeading(x[0],x[1],x[2],120)),"\
+            "[10,5.5,5,4.87,3.2,1.37,0.37,0].map(x=>raceLights(x))]));"
+        out = json.loads(subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20).stdout)
+        py = [kc.slew_heading(a, b, c) for a, b, c in cases]
+        for j, p in zip(out[0], py):
+            self.assertAlmostEqual(j, p, places=6)
+        self.assertEqual(out[1], [kc.race_lights(x) for x in (10, 5.5, 5, 4.87, 3.2, 1.37, 0.37, 0)])
+
+
+def square_track(closed=True, n=None, width=6):
+    pts = [ll(-30, -20), ll(30, -20), ll(30, 20), ll(-30, 20)] if n is None else [ll(i, 0) for i in range(n)]
+    return {"points": pts, "closed": closed, "width_m": width}
+
+
+class Track(unittest.TestCase):
+    def test_parse_and_tolerance(self):
+        t = kc.parse_track({"track": square_track()})
+        self.assertEqual((len(t["points"]), t["closed"], t["width_m"]), (4, True, 6.0))
+        self.assertAlmostEqual(t["length_m"], 200.0, delta=0.5)
+        self.assertEqual(kc.parse_track({"track": dict(square_track(), width_m=-1)})["width_m"], 6.0)
+        for bad in ({"points": [ll(0, 0)]}, square_track(n=201), {"points": [[1, "x"], [2, 3]]},
+                    {"points": [[91, 0], [0, 0]]}, {"points": "nope"}, "track", {"points": [ll(0, 0), ll(1, 0)]}):
+            self.assertIsNone(kc.parse_track({"track": bad}), bad)
+        g = kc.GameEngine()
+        g.set_zones(dict(zones_doc(boost_zone()), track={"points": [ll(0, 0)]}), 0.0)   # bad track, zones kept
+        s = g.snapshot(0.0)
+        self.assertTrue(s["on"])
+        self.assertIsNone(s["track"])
+        self.assertIn("track", [i["id"] for i in s["ignored"]])
+        self.assertEqual(lines(g.on_self(fix(0, 0), 1.0)), ["boost 5 1.00"])
+
+    def test_chevrons_follow_point_order(self):
+        t = kc.parse_track({"track": square_track()})
+        ch = kc.track_chevrons(t, 15.0)
+        self.assertEqual(len(ch), 13)                                  # 200 m loop / 15 m
+        self.assertAlmostEqual(ch[0][2], 90.0, places=3)                # first leg runs east
+        self.assertAlmostEqual(ch[-1][2], 180.0, places=3)              # closing leg runs south
+        open_ = kc.parse_track({"track": square_track(closed=False)})
+        self.assertLess(len(kc.track_chevrons(open_, 15.0)), len(ch))
+
+
+def drive_path(path, g, mph=15.0, laps=2.2, dt=0.2):
+    """Drive the GameEngine along a demo path (sim PolyPath) with 5 Hz gps lines."""
+    P = sim_heltec.PolyPath(path["points"])
+    v = mph * 0.44704
+    recs, t, s = [], 0.0, 0.0
+    while s < P.length * laps:
+        lat, lon, hd = P.at(s)
+        recs += g.on_gps({"t": "gps", "lat": lat, "lon": lon, "kph": v * 3.6, "heading": hd, "hdop": 1.0, "sats": 10}, t)
+        recs += g.tick(t)
+        t += dt
+        s += v * dt
+    return recs
+
+
+class DemoPath(unittest.TestCase):
+    def course(self):
+        with open(os.path.join(KART, "sim", "zones.course.json")) as f:
+            doc = json.load(f)
+        doc["zones"].append(item_zone(e=-35, n=0) | {"id": "i9"})
+        return doc
+
+    def check(self, doc, mph=15.0):
+        path = kc.demo_path(doc, mph=mph)
+        g = kc.GameEngine(rng=FixedRng(0.1))
+        g.set_zones(dict(doc, enabled=True), 0.0)
+        recs = drive_path(path, g, mph=mph)
+        entered = {r["zone"] for r in recs if r["ev"] == "zone_enter"}
+        areas = {z["id"] for z in doc["zones"] if z["type"] in ("boost", "mud", "item")}
+        self.assertEqual(entered, areas, path)
+        self.assertEqual(len(evs(recs, "lap_start")), 1)
+        self.assertGreaterEqual(len(evs(recs, "lap")), 1, [r for r in recs if r["ev"].startswith("lap")])
+        self.assertEqual(evs(recs, "lap_ignored"), [])                  # the line is crossed once per loop
+        return path
+
+    def test_course_zones(self):
+        p = self.check(self.course())
+        self.assertEqual(p["source"], "zones")
+
+    def test_builtin_demo_course(self):
+        self.check(kc.demo_zones((41.0932, -73.4187)))
+
+    def test_short_course_gets_a_detour(self):
+        doc = zones_doc(boost_zone(e=6, n=6, r=4), mud_zone(x0=-12, x1=-4, y0=2, y1=10), item_zone(e=0, n=14, r=4),
+                        lap_zone(min_lap_s=20))
+        p = self.check(doc)
+        self.assertGreater(p["length_m"], 25 * 15 * 0.44704 - 1)
+
+    def test_uses_the_track(self):
+        doc = dict(zones_doc(boost_zone(e=30, n=0, r=5), lap_zone()), track=square_track())
+        p = kc.demo_path(doc)
+        self.assertEqual(p["source"], "track")
+        self.assertEqual(p["points"], kc.parse_track(doc)["points"])
 
 
 if __name__ == "__main__":

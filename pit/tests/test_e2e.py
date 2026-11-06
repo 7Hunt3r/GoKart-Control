@@ -172,21 +172,28 @@ class EndToEnd(unittest.TestCase):
             zones = json.loads(subprocess.run([sys.executable, "-I", SIM, "--print-zones", "--track-scale", "0.3"],
                                               capture_output=True, text=True, check=True).stdout)
             bad = json.loads(json.dumps(zones))
-            bad["zones"][1]["r_m"] = 5
+            bad["zones"][1]["r_m"] = 2
             code, body, _ = st.request("POST", "/zones", bad)
             self.assertEqual(code, 409, body)
-            self.assertIn("8 m minimum", json.loads(body)["error"])
+            self.assertIn("3 m minimum", json.loads(body)["error"])
             zones.pop("_comment")
+            track = {"points": [z["a"] for z in zones["zones"] if z["type"] == "lapline"]
+                     + [[zones["zones"][1]["lat"], zones["zones"][1]["lon"]], [zones["zones"][2]["lat"], zones["zones"][2]["lon"]]],
+                     "closed": True, "width_m": 6}
+            zones["track"] = track
             code, body, _ = st.request("POST", "/zones", zones)
             self.assertEqual(code, 200, body)
             saved = json.loads(body)["zones"]
             self.assertEqual(saved["version"], v0 + 1)
             self.assertTrue(saved["enabled"])
-            self.assertEqual([z["id"] for z in saved["zones"]], ["lap", "b1", "m1"])
+            self.assertEqual([z["id"] for z in saved["zones"]], ["lap", "b1", "m1", "i1"])
+            self.assertEqual(saved["zones"][3]["type"], "item")
+            self.assertEqual(saved["track"], dict(track, width_m=6.0))
             with open(os.path.join(st.map_dir, "zones.json")) as f:
                 disk = json.load(f)
             self.assertEqual(disk["version"], v0 + 1)
             self.assertIn("_comment", disk)                       # comment kept from the original file
+            self.assertEqual(len(disk["track"]["points"]), 3)
             pkg = json.loads(st.request("GET", "/map/package.json")[1])
             self.assertEqual(pkg["zones_version"], v0 + 1)
 
@@ -196,6 +203,7 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(st.request("POST", "/zones/enable", {"enabled": "yes"})[0], 409)
             code, body, _ = st.request("POST", "/zones/enable", {"enabled": True})
             self.assertEqual(json.loads(body)["version"], v0 + 3)
+            self.assertTrue(json.loads(st.request("GET", "/map/zones.json")[1])["track"]["closed"])   # enable keeps the track
 
             s = st.wait(lambda s: any(r["laps"] >= 1 for r in s["fleet"]["laps"]), timeout=60)
             board = s["fleet"]["laps"]
@@ -219,6 +227,27 @@ class EndToEnd(unittest.TestCase):
             rows = json.loads(st.request("GET", "/api/log/recent?n=200")[1])
             acts = {r.get("action") for r in rows if r.get("kind") == "op"}
             self.assertTrue({"zones_save", "zones_enable", "laps_reset"} <= acts, acts)
+
+            # race start: laps reset, one broadcast `race` command with arg, grid hold, then GO
+            st.wait(lambda s: any(r["laps"] >= 1 for r in s["fleet"]["laps"]), timeout=60)
+            self.assertEqual(st.request("POST", "/race/start", {"secs": 0})[0], 409)
+            n_race = sum(1 for c in st.state()["commands"]["recent"] if c["cmd"] == "race")
+            code, body, _ = st.request("POST", "/race/start", {"secs": 3})
+            self.assertEqual(code, 200, body)
+            rs = json.loads(body)
+            self.assertEqual((rs["secs"], rs["command"]["cmd"], rs["command"]["kart"], rs["command"]["arg"]), (3, "race", 255, 3))
+            s = st.state()
+            self.assertFalse(any(r["laps"] >= 1 for r in s["fleet"]["laps"]))
+            race = s["fleet"]["race"]
+            self.assertTrue(race["started_wall"] and race["go_wall"])
+            self.assertTrue(0 < race["go_in_s"] <= 3.1, race["go_in_s"])
+            self.assertEqual(sum(1 for c in s["commands"]["recent"] if c["cmd"] == "race"), n_race + 1)
+            st.wait(lambda s: sum(1 for k in s["fleet"]["karts"] if k["vesc"].get("scale") == 0.0) >= 6, timeout=4)
+            s = st.wait(lambda s: s["fleet"]["race"]["go_in_s"] < 0 and
+                        all(k["vesc"].get("scale") != 0.0 for k in s["fleet"]["karts"] if k["link"] == "online"), timeout=8)
+            self.assertEqual(s["commands"]["last_fleet"]["cmd"], "race")
+            rows = json.loads(st.request("GET", "/api/log/recent?n=300")[1])
+            self.assertTrue(any(r.get("action") == "race_start" and r.get("secs") == 3 for r in rows))
         finally:
             st.close()
 
@@ -233,6 +262,7 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(st.request("POST", "/zones", {"zones": []})[0], 401)
             self.assertEqual(st.request("POST", "/zones/enable", {"enabled": True})[0], 401)
             self.assertEqual(st.request("POST", "/laps/reset", {})[0], 401)
+            self.assertEqual(st.request("POST", "/race/start", {"secs": 5})[0], 401)
             self.assertEqual(st.request("GET", "/m")[2].get("Location"), "/login?next=/m")
             self.assertEqual(st.request("GET", "/static/manifest.webmanifest")[0], 200)  # iOS fetches it cookie-less
             code, _, h = st.request("POST", "/login", "password=nope&name=x&next=/m",

@@ -331,7 +331,9 @@ class ZoneValidation(unittest.TestCase):
     def test_refused(self):
         circle = {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 12}
         bad = [
-            zdoc(dict(circle, r_m=7.9)),                                      # below 8 m
+            zdoc(dict(circle, r_m=2.9)),                                      # below 3 m
+            zdoc({"id": "i1", "type": "item", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 2}),
+            zdoc({"id": "i1", "type": "item", "shape": "line", "a": at(0, 0), "b": at(0, 9)}),
             zdoc({"id": "m", "type": "mud", "shape": "polygon", "points": [at(0, 0), at(9, 9)]}),
             zdoc(circle, dict(circle)),                                       # duplicate id
             zdoc(dict(circle, id="")),
@@ -349,6 +351,29 @@ class ZoneValidation(unittest.TestCase):
             with self.assertRaises(pc.ZoneError, msg=doc):
                 pc.validate_zones(doc)
         self.assertTrue(issubclass(pc.ZoneError, pc.CommandError))         # -> HTTP 409 like commands
+
+    def test_item_and_small_pads(self):
+        d = pc.validate_zones(zdoc(
+            {"id": "i1", "type": "item", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 4, "scale": 0.2},
+            {"id": "i2", "type": "item", "shape": "polygon", "points": [at(0, 0), at(5, 0), at(2, 4)], "cooldown_s": 9999},
+            {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 3}))
+        i1, i2, b1 = d["zones"]
+        self.assertEqual((i1["name"], i1["cooldown_s"], i1["r_m"]), ("Item box", 15, 4.0))
+        self.assertNotIn("scale", i1)                        # the kart rolls the item; nothing to clamp
+        self.assertEqual(i2["cooldown_s"], 600)
+        self.assertEqual(b1["r_m"], 3.0)
+
+    def test_track(self):
+        tr = {"points": [at(0, 0), at(30, 0), at(30, 20)], "closed": True, "width_m": 6}
+        d = pc.validate_zones(dict(zdoc(), track=tr))
+        self.assertEqual(d["track"], {"points": tr["points"], "closed": True, "width_m": 6.0})
+        self.assertEqual(pc.validate_zones(dict(zdoc(), track={"points": [at(0, 0), at(5, 5)]}))["track"]["width_m"], 6.0)
+        self.assertNotIn("track", pc.validate_zones(dict(zdoc(), track=None)))
+        for bad in ({"points": [at(0, 0)]}, {"points": [at(0, 0)] * 201}, dict(tr, width_m=1.9), dict(tr, width_m=21),
+                    dict(tr, closed="yes"), {"points": [at(0, 0), at(5, 5)], "closed": True}, {"points": [[95, 0], at(0, 0)]},
+                    [at(0, 0), at(5, 5)]):
+            with self.assertRaises(pc.ZoneError, msg=bad):
+                pc.validate_zones(dict(zdoc(), track=bad))
 
     def test_unknown_type_passthrough(self):
         d = pc.validate_zones(zdoc({"id": "o1", "type": "oil", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 9}))
@@ -455,6 +480,11 @@ class BoostCommand(unittest.TestCase):
         self.assertEqual(h.sent[-1]["arg"], 100)                # default full scale
         h.cm.submit("slow", 4, 7, now=h.now)
         self.assertEqual(h.sent[-1]["arg"], 7)
+        h = Harness()                                         # fresh: fleet commands queue behind busy karts
+        h.cm.submit("race", 255, 5, now=h.now)              # 2026-11-06 bug: race went out without arg -> GO in 0 s, rejected
+        self.assertEqual((h.sent[-1]["cmd"], h.sent[-1]["kart"], h.sent[-1]["arg"]), ("race", 255, 5))
+        h.cm.submit("stop", 1, now=h.now)
+        self.assertNotIn("arg", h.sent[-1])
         for bad in (9, 101, "x"):
             with self.assertRaises(pc.CommandError):
                 h.cm.submit("boost", 1, bad, now=h.now)

@@ -424,10 +424,11 @@ class CommandError(ValueError):
 # Game zones (Mario Kart layer) and lap timing. Contract: map/ZONES.md
 # ---------------------------------------------------------------------------
 R_EARTH = 6371000.0
-ZONE_TYPES = ("boost", "mud", "lapline")
-ZONE_SHAPES = {"boost": ("circle", "polygon"), "mud": ("circle", "polygon"), "lapline": ("line",)}
-ZONE_DEFAULT_NAMES = {"boost": "Boost pad", "mud": "Mud", "lapline": "Start / finish"}
-MIN_R_M, MAX_R_M = 8.0, 500.0
+ZONE_TYPES = ("boost", "mud", "item", "lapline")
+ZONE_SHAPES = {"boost": ("circle", "polygon"), "mud": ("circle", "polygon"), "item": ("circle", "polygon"),
+               "lapline": ("line",)}
+ZONE_DEFAULT_NAMES = {"boost": "Boost pad", "mud": "Mud", "item": "Item box", "lapline": "Start / finish"}
+MIN_R_M, MAX_R_M = 3.0, 500.0     # karts fix at 5 Hz; 5 m is a good pad outdoors
 MAX_ZONES = 64
 MAX_POLY_POINTS = 64
 MIN_LINE_M = 4.0
@@ -494,7 +495,7 @@ def validate_zones(doc):
             out.append(dict(z))      # newer zone kind: kept as-is, ignored by timing, drawn greyed (ZONES.md)
             continue
         if typ not in ZONE_TYPES:
-            raise ZoneError(f"zone {zid!r}: type must be boost, mud or lapline")
+            raise ZoneError(f"zone {zid!r}: type must be boost, mud, item or lapline")
         shape = z.get("shape", ZONE_SHAPES[typ][0])
         if shape not in ZONE_SHAPES[typ]:
             raise ZoneError(f"zone {zid!r}: a {typ} zone must be a {' or '.join(ZONE_SHAPES[typ])}")
@@ -526,6 +527,8 @@ def validate_zones(doc):
             n["scale"] = round(_clamp(_num(z, "scale", 1.0), 0.1, 1.0), 2)
             n["secs"] = int(round(_clamp(_num(z, "secs", 5), 1, 30)))
             n["cooldown_s"] = int(round(_clamp(_num(z, "cooldown_s", 20), 0, 600)))
+        elif typ == "item":                  # outcome is rolled on the kart; the pit only stores/draws it
+            n["cooldown_s"] = int(round(_clamp(_num(z, "cooldown_s", 15), 0, 600)))
         elif typ == "mud":
             n["scale"] = round(_clamp(_num(z, "scale", 0.5), 0.1, 1.0), 2)
         else:
@@ -537,7 +540,37 @@ def validate_zones(doc):
     enabled = doc.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ZoneError("enabled must be true or false")
-    return {"enabled": enabled, "zones": out}
+    res = {"enabled": enabled, "zones": out}
+    track = validate_track(doc.get("track"))
+    if track is not None:
+        res["track"] = track
+    return res
+
+
+TRACK_MIN_POINTS, TRACK_MAX_POINTS = 2, 200
+TRACK_WIDTH_M = (2.0, 20.0)
+
+
+def validate_track(t):
+    """Optional course centreline (ZONES.md "Track route"). None/absent = no track. No game effect."""
+    if t is None:
+        return None
+    if not isinstance(t, dict):
+        raise ZoneError("track must be an object")
+    pts = t.get("points")
+    if not isinstance(pts, list) or not TRACK_MIN_POINTS <= len(pts) <= TRACK_MAX_POINTS:
+        raise ZoneError(f"track needs {TRACK_MIN_POINTS}-{TRACK_MAX_POINTS} points")
+    pts = [_point(p, "track", f"point {i + 1}") for i, p in enumerate(pts)]
+    closed = t.get("closed", False)
+    if not isinstance(closed, bool):
+        raise ZoneError("track closed must be true or false")
+    w = t.get("width_m", 6)
+    if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) \
+            or not TRACK_WIDTH_M[0] <= w <= TRACK_WIDTH_M[1]:
+        raise ZoneError("track width_m must be 2-20")
+    if closed and len(pts) < 3:
+        raise ZoneError("a closed track needs at least 3 points")
+    return {"points": pts, "closed": closed, "width_m": round(float(w), 1)}
 
 
 def segment_cross(p1, p2, q1, q2):
@@ -586,6 +619,8 @@ class Game:
         old = self._lapline()
         self.doc = {"version": int(doc.get("version", 0)), "enabled": bool(doc.get("enabled")),
                     "zones": list(doc.get("zones") or [])}
+        if doc.get("track"):
+            self.doc["track"] = doc["track"]
         new = self._lapline()
         key = lambda z: None if z is None else (tuple(z["a"]), tuple(z["b"]), z.get("min_lap_s"))  # noqa: E731
         if key(old) != key(new):
@@ -676,7 +711,7 @@ class Command:
 
     def wire(self, kart=None):
         obj = {"cmd": self.cmd, "kart": self.kart if kart is None else kart, "seq": self.seq}
-        if self.cmd in ("mode", "slow", "boost"):
+        if self.arg is not None:            # mode/slow/boost/race: the base sends arg 0 when it is missing
             obj["arg"] = self.arg
         if self.cmd != "ping":
             obj["ttl"] = self.ttl

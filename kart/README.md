@@ -189,6 +189,24 @@ with a fix, plus a 4 Hz tick):
   `map.zones`; the new `self` GPS fields are under `self.gps` (`hdop_now`,
   `gps_hz`, `fix_age_ms`, `base`).
 
+- **Item boxes** (`type: "item"`, circle or polygon): on entry the kart rolls
+  locally (seedable RNG): 45 % BOOST (`boost 5 1.0`), 15 % SUPER (`boost 8 1.0`),
+  25 % MUD (`boost 3 0.5`), 15 % empty (nothing sent). Same exit/cooldown rules as
+  a boost pad (`cooldown_s`, default 15) and the same gates. Logged as
+  `ev: "item"` with `item: boost|super|mud|empty`.
+- **Race start** (`{"t":"race","event":"countdown","go_in_ms":N,...}` /
+  `{"event":"go"}` from the race firmware): GO = the countdown line's arrival +
+  `go_in_ms`; the go line only confirms it (`game.race.go_confirmed`). Grid hold
+  lasts until GO, or until a STOP/START echo (the firmware clears the hold).
+  During the hold no zone command is sent and lap-line crossings are ignored;
+  laps reset at GO and count from the first crossing after it.
+- **Gates for every zone command**: game on, kart not STOPPED, not in grid hold,
+  a usable GPS sample (hdop <= 4, sats >= 5, not an outlier). Zones may be as
+  small as `r_m` 3 (pads are typically 5 m).
+- **Track route** (`zones.json` `"track": {"points", "closed", "width_m"}`): no
+  game effect; validated (2-200 points, a bad track is ignored and the zones
+  still work) and sent to the page as `game.track`.
+
 **Driver page.** Black speedometer card (0-30 mph arc, GPS mph; wheel mph,
 labelled WHEEL, only when there is no GPS fix), the mode as a gear badge (E / N / S,
 dashed blue while a request is pending), a BOOST meter (the live VESC current
@@ -197,7 +215,23 @@ dashed blue while a request is pending), a BOOST meter (the live VESC current
 last, best) or a small GAME OFF chip, zones on the map (boost = amber with
 chevrons, mud = brown with dots, lap line = checkered; greyed when the game is
 off), and a short full-screen flash + synthesized sound (WebAudio, no files) on
-boost, mud and each lap. `"sound": false` in config.json mutes it. The safety
+boost, mud and each lap. `"sound": false` in config.json mutes it.
+Item boxes show as a blue/white "?" box; entering one plays a ~1.2 s roulette
+(top centre of the map) ending on the result, with a spinning star for SUPER.
+Every zone keeps its true-scale ring but its marker is at least 24 px across, so
+3-5 m pads stay visible at the 70 m follow span. The track is drawn under the
+zones as a translucent cyan band `width_m` wide with a dark edge and white
+direction chevrons every 15 m; in heading-up mode the ~80 m ahead of the kart is
+brighter. Race start: a full-screen set of five red lights, one more each
+second, a beep per light, then green lights + "GO!" with a tone, fading after
+~1.5 s; the GRID banner (checkered, in the STOPPED/SLOW row) shows during the
+hold and the BOOST meter reads GRID.
+**Map orientation**: `map_orientation` defaults to `heading_up` and
+`follow_span_m` to 70: while following, the map turns with the kart (at most
+120 deg/s; the heading is held below 1.5 m/s) and the kart sits ~60 % down the
+map so more of the track ahead is visible. Touch/pinch still pauses following
+(north-up while panning) and FOLLOW resumes it; the round "N" compass at the
+bottom right shows where north is. The safety
 banners (STOPPED, SLOW, connection, SIMULATION) sit above the flash and keep their
 size; while one shows the speedometer shrinks so the mode buttons stay on screen.
 The kiosk runs Chromium with `--autoplay-policy=no-user-gesture-required` so the
@@ -220,6 +254,25 @@ stopped) and its speed follows the scale. It also prints 5 Hz `gps` lines and th
 new `self` GPS fields (`--nogpsline` = self lines only, `--hdop 6` = poor GPS: the
 game ignores every sample). Add `--pit-stop-at 20` to see that a
 stopped kart sends nothing. `tests/test_e2e.py` runs this course with `--warp 3`.
+
+**Demo mode** (config `"demo": true`, default): press and hold the KART badge
+3 s (or `POST /api/demo {"on": true}` from the Pi itself). An in-process copy of
+the simulator (`server/demo.py` + `sim/sim_heltec.py`) replaces the Heltec link
+for the page: it drives a closed loop at ~15 mph along the pit's track if there
+is one, else through the centre of every boost/mud/item zone of the pit's
+current zones (forced on: it is a simulation) and across the lap line (a detour
+is added when a loop would be shorter than `min_lap_s`), or around a built-in
+demo course at the kart's position when the pit has no zones. It starts with
+`race 5`. The SIMULATION banner says DEMO with the time left. While demoing,
+every line the server would send (game commands, mode taps, status polls) goes
+to the simulator and the real Heltec's lines are logged (`ignored: "demo"`) but
+not shown: **nothing is written to the real Heltec**. It ends after `demo_max_s`
+(180 s), on another 3 s hold, or `{"on": false}`, and the page returns to the
+real link without a restart (lap timing starts fresh).
+
+**Simulator race**: `race [secs]` on its console (or `--race-at S`) does what the
+race firmware does (grid hold at zero power, countdown and go lines, STOP/START
+cancel). The driver page never sends `race`.
 
 **Safety notes.** Zones only change the current scale (motor torque limit)
 inside the firmware's own limits and never above 1.0; ECO/NORMAL karts do get up
