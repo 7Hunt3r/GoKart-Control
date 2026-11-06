@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>GoKart Pit</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -17,8 +18,9 @@
   <span id="corrChip" class="chip" title="pit radio fix vs the surveyed pit marker; tap to apply/stop applying">GPS corr off</span>
   <span id="baseChip" class="chip">base GPS ?</span>
   <span id="raceChip" class="chip">race off</span>
-  <button id="gameChip" class="gamechip off">GAME OFF</button>
+  <button id="gameChip" class="chip gamechip off">GAME OFF</button>
   <span class="spacer"></span>
+  <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
   <button id="fOnline" class="toggle">Online only</button>
   <button id="fEntered" class="toggle">Entered only</button>
   <span id="hiddenNote" class="sm"></span>
@@ -41,24 +43,25 @@
     <h3 class="maph">Course map <span id="mapNote" class="note"></span><span class="spacer"></span><button id="zoneEdit" class="zbtn">ZONES</button></h3>
     <div id="zoneBar" class="zonebar hidden">
       <div class="ztools">
-        <button data-ztool="boost" class="zt-boost">BOOST PAD</button>
-        <button data-ztool="mud" class="zt-mud">MUD</button>
-        <button data-ztool="item" class="zt-item">ITEM BOX</button>
-        <button data-ztool="lapline" class="zt-lap">LAP LINE</button>
-        <button data-ztool="track" class="zt-track">TRACK</button>
-        <button data-ztool="select">SELECT / MOVE</button>
-        <button data-ztool="delete">DELETE</button>
+        <div class="zgroup"><span class="zglbl">PLACE</span>
+          <button data-ztool="boost" class="zt-boost">BOOST PAD</button><button data-ztool="mud" class="zt-mud">MUD</button><button data-ztool="item" class="zt-item">ITEM BOX</button></div>
+        <div class="zgroup"><span class="zglbl">COURSE</span>
+          <button data-ztool="lapline" class="zt-lap">LAP LINE</button><button data-ztool="track" class="zt-track">TRACK</button></div>
+        <div class="zgroup"><span class="zglbl">EDIT</span>
+          <button data-ztool="select">SELECT / MOVE</button><button data-ztool="delete" class="zt-del">DELETE</button></div>
         <span class="spacer"></span>
+        <button id="zCancel" class="zcancel">CANCEL</button>
         <button id="zSave" class="zsave">SAVE</button>
-        <button id="zCancel">CANCEL</button>
       </div>
+      <div id="zHint" class="zhint"></div>
       <div class="zprops">
         <span id="zSel" class="zsel">nothing selected</span>
-        <label>Name <input id="zName" maxlength="40" autocomplete="off"></label>
-        <span class="ztrack">Track <button id="tUndo">UNDO POINT</button><button id="tClose">CLOSE LOOP</button><button id="tClear">CLEAR</button></span>
-        <label>Radius <input id="zRadius" type="range" min="3" max="60" step="1" value="5"> <b id="zRadiusVal">--</b></label>
+        <label class="zpname">Name <input id="zName" maxlength="40" autocomplete="off"></label>
+        <label class="zprad">Radius <input id="zRadius" type="range" min="3" max="60" step="1" value="5"> <b id="zRadiusVal" class="zradval">--</b></label>
+        <span class="ztrack zgroup"><span class="zglbl">TRACK</span><button id="tUndo">UNDO POINT</button><button id="tClose">CLOSE LOOP</button><button id="tClear">CLEAR</button></span>
+        <span class="spacer"></span>
+        <span id="zCounts" class="note"></span>
       </div>
-      <div id="zHint" class="note"></div>
     </div>
     <div class="mapwrap">
       <canvas id="map" class="map"></canvas>
@@ -72,6 +75,7 @@
     <div class="panel"><h3>Session log <span class="note">operator actions and events</span></h3><div id="log" class="log"></div></div>
   </div>
 </div>
+<script src="/static/sound.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

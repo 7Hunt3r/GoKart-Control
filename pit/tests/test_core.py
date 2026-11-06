@@ -164,6 +164,18 @@ class Harness:
             self.cm.tick(self.now, "w")
 
 
+class RaceCommandArgs(unittest.TestCase):
+    def test_race_args(self):
+        h = Harness()
+        for arg in (5, 0, 101, 108):
+            self.assertEqual(h.cm.submit("race", 3, arg, now=h.now).arg, arg)
+        for arg in (31, 100, 109, -1):
+            with self.assertRaises(pc.CommandError):
+                h.cm.submit("race", 3, arg, now=h.now)
+        self.assertEqual(pc.race_arg_name(103), "FINISH P3")
+        self.assertEqual(pc.race_arg_name(0), "FINISH")
+
+
 class CommandDelivery(unittest.TestCase):
     def test_fleet_stop_eight_outcomes(self):
         h = Harness()
@@ -451,8 +463,65 @@ class Laps(unittest.TestCase):
         board = self.f.snapshot(self.t)["laps"]
         self.assertEqual([r["kart"] for r in board], [1, 3, 2])
         self.assertEqual([r["pos"] for r in board], [1, 2, 3])
+        # gap to leader: same laps = seconds behind at the line, fewer laps = laps behind
+        self.assertEqual([r["gap_laps"] for r in board], [0, 0, 1])
+        self.assertIsNone(board[0]["gap_s"])
+        self.assertAlmostEqual(board[1]["gap_s"], 1.0, delta=0.6)
+        self.assertIsNone(board[2]["gap_s"])
         self.f.game.reset_laps()
         self.assertEqual(self.f.snapshot(self.t)["laps"], [])
+
+    # -- race session: start -> running -> finish (ZONES.md "Race finish") --------------------
+    def lap_once(self, k, dt=25):
+        self.fix(k, -5, 0, dt=dt)            # back across the line (either direction counts)
+        self.fix(k, 5, 0, dt=dt)
+
+    def test_laps_race_finishes_each_kart_then_ends(self):
+        g = self.f.game
+        g.race_begin(2, self.t)
+        self.assertTrue(g.session.running)
+        for k in (1, 2):
+            self.fix(k, -5, 0)
+        self.fix(1, 5, 0); self.fix(2, 5, 0)                          # both start lap 1
+        self.fix(1, -5, 0, dt=25)                                     # kart 1: lap 1
+        self.fix(1, 5, 0, dt=25)                                      # kart 1: lap 2 -> finished P1
+        self.assertEqual(g.take_finishes(), [(1, 101)])
+        self.assertEqual(g.take_finishes(), [])
+        self.assertFalse(g.check_end([1, 2]))                         # kart 2 still racing
+        self.fix(1, -5, 0, dt=25)                                     # finished kart: laps stop counting
+        self.assertEqual(self.lap(1)["laps"], 2)
+        self.fix(2, -5, 0); self.fix(2, 5, 0, dt=25)                  # kart 2: 2 laps -> P2
+        self.assertEqual(g.take_finishes(), [(2, 102)])
+        self.assertTrue(g.check_end([1, 2]))
+        snap = self.f.snapshot(self.t)["race"]["session"]
+        self.assertEqual((snap["state"], snap["ended_by"]), ("finished", "laps"))
+        self.assertEqual([(r["pos"], r["kart"], r["laps"]) for r in snap["results"]], [(1, 1, 2), (2, 2, 2)])
+        self.assertTrue(all(r["total_s"] > 0 and r["best_s"] for r in snap["results"]))
+        self.fix(2, -5, 0, dt=25)                                     # frozen: final results stay final
+        self.assertEqual(self.lap(2)["laps"], 2)
+        g.reset_laps()                                                # NEW RACE
+        self.assertIsNone(g.session)
+        self.assertIsNone(self.f.snapshot(self.t)["race"]["session"])
+
+    def test_stop_race_places_everyone(self):
+        g = self.f.game
+        g.race_begin(0, self.t)                                       # untimed: only STOP RACE ends it
+        for k in (1, 2, 3):
+            self.fix(k, -5, 0)
+        self.fix(3, 5, 0); self.fix(1, 5, 0); self.fix(2, 5, 0)
+        self.fix(3, -5, 0, dt=25); self.fix(1, -5, 0)                 # 3 then 1 complete lap 1; 2 has none
+        self.assertEqual(g.take_finishes(), [])                       # untimed: nobody finishes by laps
+        self.assertFalse(g.check_end([1, 2, 3]))
+        fin = g.race_stop([1, 2, 3, 5])                               # 5 online but never crossed
+        self.assertEqual(fin[:4], [(3, 101), (1, 102), (2, 103), (5, 104)])
+        self.assertEqual(sorted(fin[4:]), [(4, 0), (6, 0), (7, 0), (8, 0)])
+        res = g.session.snapshot()
+        self.assertEqual((res["state"], res["ended_by"]), ("finished", "stop"))
+        self.assertEqual([r["kart"] for r in res["results"]], [3, 1, 2, 5])
+        self.assertIsNone(res["results"][3]["total_s"])
+        self.assertEqual(g.race_stop([1, 2, 3]), [])                  # already ended: nothing sent twice
+        self.fix(1, 5, 0, dt=25)
+        self.assertEqual(self.lap(1)["laps"], 1)                      # frozen
 
     def test_line_change_clears_laps(self):
         self.fix(1, -5, 0); self.fix(1, 5, 0)

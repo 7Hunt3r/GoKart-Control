@@ -114,7 +114,7 @@ python3 -I pit/tests/test_e2e.py
   `GET /api/state`, `GET /api/log/recent?n=100[&lines=1]`, `POST /cmd`
   `{"cmd":"stop|start|mode|ping|slow|boost","kart":1-8|255,"arg":..}` (mode 0-2, slow mph 1-60, boost percent 10-100), `POST /api/race`
   `{"entered":[...],"mode":0-2,"active":true|false}`, `POST /zones`, `POST /zones/enable`,
-  `POST /laps/reset` (see "Game zones and laps"), `GET /map/package.json`, `GET /map/zones.json`,
+  `POST /laps/reset`, `POST /race/start` `{"secs":1-30,"laps":0-99}`, `POST /race/stop` (see "Game zones and laps"), `GET /map/package.json`, `GET /map/zones.json`,
   `/map/<file>`, `/healthz`. `/map/*` and `/healthz` need no login (kart
   displays fetch the map on the pit Wi-Fi).
 
@@ -130,7 +130,10 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
   at `GET /map/zones.json`; `GET /map/package.json` carries `"zones": "/map/zones.json"` and
   `"zones_version"` so kart Pis re-fetch on change. A hand edit on the Pi is picked up on the next
   request (mtime check); an invalid file is logged (`zones_invalid`) and ignored.
-- **Editing (operator page `/`).** `ZONES` above the map enters edit mode: `BOOST PAD` / `MUD` /
+- **Editing (operator page `/`).** `ZONES` above the map enters edit mode (grouped toolbar: PLACE /
+  COURSE / EDIT, the active tool highlighted with its colour, a one-line hint for it, the name and
+  radius only when a zone is selected, the track buttons only with the TRACK tool; Fit includes the
+  zones and the track): `BOOST PAD` / `MUD` /
   `ITEM BOX` then tap the map (5 m / 6 m / 4 m circle), `TRACK` then tap the course centreline in
   driving order (`UNDO POINT`, `CLOSE LOOP`, `CLEAR`), `LAP LINE` then tap both ends (replaces the old line; one
   per course), `SELECT / MOVE` to pick and drag a zone (drag empty map still pans), `DELETE` then
@@ -145,6 +148,11 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
   Refusals are HTTP 409 with the reason. Unknown zone types are kept as-is (karts ignore them,
   the pit draws them grey). `POST /zones/enable {"enabled":true|false}` flips the master switch.
   Both bump `version`. `POST /laps/reset` clears lap state.
+- **Chips and badges.** Every top-bar chip has one height and font and is coloured only by state;
+  GAME is a toggle (ON = amber with a solid dot, OFF = outlined). Card badges (STOPPED, FAULT, GRID,
+  GO, FINISHED, SLOW, lap) share one size. Kart cards show the wheel speed with a small "wheel" tag
+  (uncalibrated: see the detail sheet / operator note). Every tap shrinks a button to 97 % for 80 ms;
+  hold buttons fill a ring.
 - **GAME ON/OFF.** Chip in the top bar of all three pages; on the kiosk it is the race
   director's kill for the whole game. Off = zones drawn faded, no lap timing, karts ignore zones.
 - **Rendering.** Every pit map draws, from the same map code: boost pads as an amber chevron
@@ -158,15 +166,34 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
   resets all lap timing, sets `race.started_wall`, `race.go_wall` and sends ONE `race` command
   (arg = secs) to all karts on the usual broadcast path with retries; logged as `race_start`.
   `/api/state` carries `fleet.race.go_in_s` (seconds to GO on the server clock, negative after) so
-  every page runs the same countdown: a fixed overlay of 5 red lights going out one per second
-  (or "GO in N s" for longer counts), then GO green for 2 s, with WebAudio beeps (browsers only
-  allow sound after the first touch/click on that page). Kart cards show `GRID` while a kart's
+  every page runs the same countdown: a full-width strip of five 90 px lights (kiosk: over the top
+  of the card area; operator: above the cards; phone: top of the scroll area), one more red light
+  each second like the karts, "GO in N", green at GO for 2 s, and a green "GO!" flash over the
+  whole page. Sounds: a soft tick per second of the hold, a beep on the last three lights, a long
+  higher tone at GO, a low double tone when you STOP ALL (`static/sound.js`, shared with the karts,
+  quieter "pit" profile). The SOUND chip in the top bar mutes (per browser); it reads TAP FOR SOUND
+  until the first touch unlocks audio (the pit kiosk Chromium has no autoplay flag).
+  On the phone, START RACE (hold 1 s) then asks "Start race in 5 s?" with a big GO button. Kart cards show `GRID` while a kart's
   live scale is 0.0 and it is not stopped (the hold) and flash `GO` when it comes back.
+- **Race length and finish.** The start control has a laps chooser (OPEN = untimed, 3, 5, 10):
+  `POST /race/start {"secs":5,"laps":N}`. With N set, a kart that completes N laps is finished with
+  its position at that moment and gets `race` 100 + position at once; when every online kart has
+  finished, the race ends. `POST /race/stop` (login; STOP RACE, hold 1 s, red outline) ends it at
+  any time: laps freeze, every kart not finished yet is placed (laps desc, then earliest last
+  crossing; karts with no completed lap last, by id) and sent `race` 100 + position; karts not in
+  the race get `race 0`; logged `race_stop` (auto finishes: `event race_finish`). A FINAL RESULTS
+  panel (position, kart colour, laps, best, time from GO to the last crossing) replaces the live
+  leaderboard until NEW RACE (= `POST /laps/reset`, which also clears the session). Kart cards show
+  FINISHED P3 (FIN P3 on the kiosk); during a laps race the leaderboard has a "Left" column.
+  State: `fleet.race.session` (`state` running|finished, `laps_target`, `finished` {kart: pos},
+  `ended_by` laps|stop, `results`). Race command args: 1-30 = GO in s, 0 = finish, 101-108 = finish P1-P8.
 - **Laps.** The pit times laps itself from `tele` fixes: a lap counts when the segment previous
   fix -> current fix crosses the lap line (either direction) and `min_lap_s` (default 20) has
   passed since the previous crossing; the first crossing starts the clock. The crossing time is
   interpolated along the segment when the two fixes are under 5 s apart. Ranking: laps desc,
-  then earlier last crossing. Shown as a leaderboard panel (operator side panel, kiosk RACE tab,
+  then earlier last crossing; each row also has the gap to the leader (`gap_laps`, or `gap_s` at
+  the line on the same lap). Shown as a leaderboard panel (big position, kart colour, laps, last,
+  best, gap) (operator side panel, kiosk RACE tab,
   phone KARTS tab), a collapsible overlay on every map, and `P# L# best` on each kart card.
   `/api/state` has `fleet.game`, `fleet.laps` (ranked) and `karts[].lap`. Lap state is memory only
   (server restart clears it) and is also cleared when the lap line moves.
@@ -222,6 +249,14 @@ deploy.sh keeps the Pi's `server/config.json`, `logs/`, map imagery and its edit
 then `ssh pit@gokart-pit.local sudo systemctl restart gokart-pit gokart-kiosk`.
 Change the web password by editing `/opt/gokart-pit/server/config.json` and
 restarting `gokart-pit` (logged-in browsers must log in again).
+
+### Panel speakers (HDMI audio)
+
+`install.sh` now also installs `alsa-utils`, adds the user to `audio` and writes `/etc/asound.conf`
+making the first vc4-hdmi card the ALSA default (`GOKART_HDMI_CARD=vc4hdmi1` if the panel is on
+the Pi 4's second HDMI port). Same recipe as the karts (verified on kart 2). **Not run on the pit
+Pi yet** (the pit was on hold when this was written); the kiosk also has no
+`--autoplay-policy` flag, so sound starts after the first touch.
 
 ### Kiosk approach (untested on hardware; medium confidence)
 

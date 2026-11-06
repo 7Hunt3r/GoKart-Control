@@ -23,6 +23,8 @@ recipe, same first-boot approach that ran on the pit Pi 4 on 2026-11-05).
 | First boot, apt packages, cage + Chromium kiosk, HDMI 1024x600 pin, USB touch **on a Pi 3 B** | **Untested** (the recipe works on the pit Pi 4; Pi 3 B differences: 1 GB RAM, VC4 GPU, 2.4 GHz-only Wi-Fi, single HDMI) |
 | Map redraw cost on a Pi 3 B (3000x3044 JPEG, <=10 fps while moving) | **Untested**; north-up draws only the visible part of the image |
 | SLOW banner | From `slow_mph` in `self` lines (firmware 2026-11-06+), else **inferred** from `cmd` echoes; see "SLOW" below |
+| HDMI panel sound (ALSA default = vc4-hdmi, Chromium WebAudio) | **Verified on kart 2** 2026-11-06: the HDMI PCM runs while the page plays; not listened to |
+| Polish pass UI (race takeover, finish, roulette, dark dash) | **Rendered** headless at 1024x600 locally and against kart 2 in demo mode, zero console errors |
 | Game layer (zones sync, boost/mud commands, laps, HUD) | **Tested on the Mac** (unit tests + simulator course e2e, HUD rendered headless at 1024x600). `boost` against a real VESC **not** exercised from the Pi; real pit zones were `enabled: false` at deploy |
 
 Simulated data is labelled: the simulator announces itself and the page shows a
@@ -119,7 +121,8 @@ python3 -I kart/tests/test_e2e.py
 - **Logs**: `logs/session-YYYYmmdd-HHMMSS.jsonl`, one per server start: every
   serial line received (`rx`) and sent (`tx`), each request (`op`), echoes,
   link and map events. Oldest files are deleted beyond `max_log_mb` (800).
-- **HTTP** (0.0.0.0:8081): `/`, `/events`, `/api/state`, `/map/zones.json`, `POST /cmd`
+- **HTTP** (0.0.0.0:8081): `/`, `/events`, `/api/state`, `/map/zones.json`,
+  `GET /api/sound-test[?alsa=1]` (localhost only), `POST /cmd`
   (`{"cmd":"mode","arg":0-2}`, `slow` [mph], `stop`, `start`, `ping`, `status`;
   localhost only unless `remote_cmd: true`), `POST /api/map/refresh`,
   `/map/package.json`, `/map/<file>`, `/healthz`. Remote browsers can watch the
@@ -207,35 +210,72 @@ with a fix, plus a 4 Hz tick):
   game effect; validated (2-200 points, a bad track is ignored and the zones
   still work) and sent to the page as `game.track`.
 
-**Driver page.** Black speedometer card (0-30 mph arc, GPS mph; wheel mph,
+**Driver page.** Dark racing dash (polish pass 2026-11-06): near-black panels, light-grey labels,
+pure white only for the numbers, solid state colours, no glow. Black speedometer card (0-30 mph arc, GPS mph; wheel mph,
 labelled WHEEL, only when there is no GPS fix), the mode as a gear badge (E / N / S,
 dashed blue while a request is pending), a BOOST meter (the live VESC current
 `scale` against the requested mode's scale, marked: amber "BOOST!" above it, brown
 "MUD" below it, with the seconds left), a lap panel on the map (lap N, current,
 last, best) or a small GAME OFF chip, zones on the map (boost = amber with
 chevrons, mud = brown with dots, lap line = checkered; greyed when the game is
-off), and a short full-screen flash + synthesized sound (WebAudio, no files) on
-boost, mud and each lap. `"sound": false` in config.json mutes it.
+off), a thin LAST | BEST strip under the speedometer while the game is on, the PIT chip
+coloured by how well the kart hears the pit (`base_rssi` > -90 green, > -105 amber, else red),
+and a short full-screen flash (the text pops in) + synthesized sound on boost, mud and each
+lap; the BOOST meter pulses while boosting.
 Item boxes show as a blue/white "?" box; entering one plays a ~1.2 s roulette
-(top centre of the map) ending on the result, with a spinning star for SUPER.
+(a 176 px box at the top centre of the map, each icon popping in) ending on the result, with a
+spinning star for SUPER.
 Every zone keeps its true-scale ring but its marker is at least 24 px across, so
 3-5 m pads stay visible at the 70 m follow span. The track is drawn under the
 zones as a translucent cyan band `width_m` wide with a dark edge and white
 direction chevrons every 15 m; in heading-up mode the ~80 m ahead of the kart is
-brighter. Race start: a full-screen set of five red lights, one more each
-second, a beep per light, then green lights + "GO!" with a tone, fading after
-~1.5 s; the GRID banner (checkered, in the STOPPED/SLOW row) shows during the
-hold and the BOOST meter reads GRID.
+brighter. Race start: a full-screen takeover (HUD dimmed to 20 %): five 140 px lights in a
+full-width dark bar, one more each second, "GO in N" in 120 px type, a soft tick each second
+of the hold and a beep on the last three lights, then the whole screen turns green with
+"GO!" (200 px) and a long higher tone for 1 s, fading back in 0.5 s. The GRID banner
+(checkered, in the STOPPED/SLOW row, same 64 px height) shows during the hold and the BOOST
+meter reads GRID. STOPPED/SLOW/connection banners and a VESC fault stay above the takeover.
+Race finish (`{"t":"race","event":"finish","position":P}` from the firmware when the pit
+sends `race` 0 or 100 + P): a full-screen checkered takeover with "P3" + "FINISH" (or a
+huge "FINISH" when P is 0), the kart's laps and best lap and a fanfare, for 6 s, then a 0.5 s
+fade and a small "FINISHED P3" chip on the map until the next countdown. Laps stop counting
+after the flag (`lap_ignored` why `finished`) and start again with the next countdown.
 **Map orientation**: `map_orientation` defaults to `heading_up` and
 `follow_span_m` to 70: while following, the map turns with the kart (at most
 120 deg/s; the heading is held below 1.5 m/s) and the kart sits ~60 % down the
 map so more of the track ahead is visible. Touch/pinch still pauses following
-(north-up while panning) and FOLLOW resumes it; the round "N" compass at the
-bottom right shows where north is. The safety
+(north-up while panning) and FOLLOW resumes it; the round "N" compass (top right, under
+the slim see-through FOLLOW / + / - / ALL buttons) shows where north is. ALL fits the karts,
+the course, the zones and the track. The own kart is an arrow with a white outline and a
+drop shadow. The safety
 banners (STOPPED, SLOW, connection, SIMULATION) sit above the flash and keep their
 size; while one shows the speedometer shrinks so the mode buttons stay on screen.
-The kiosk runs Chromium with `--autoplay-policy=no-user-gesture-required` so the
-sounds play with no touch first.
+**Sound.** Every sound comes from one WebAudio helper, `static/sound.js` (an identical copy
+is in `pit/server/static/`; `tests/test_core.py` checks they match), synthesized only (no
+samples, no copyrighted melodies): lights = short mid beeps, GO = long higher tone, grid hold
+= soft tick, item box = accelerating ticks then a two-note chime, boost = rising filtered-noise
+whoosh + sawtooth sweep, super = an original 6-note jingle with sparkle, mud = low wet "blub",
+lap = two-note fanfare, best lap = three ascending notes, finish = fanfare, pit STOP = firm low
+double tone. Each is under 1.5 s. The kart profile is louder and fuller than the pit's (an
+octave-down layer and a compressor). Config: `"sound": false` silences it, `"sound_volume"`
+0-1 (default 0.8) is the master. The speaker button at the bottom right of the map mutes
+(remembered per display in localStorage); "TAP TO ENABLE SOUND" shows until audio is unlocked
+(the kiosk runs Chromium with `--autoplay-policy=no-user-gesture-required`, so on the kart it
+never shows). Every button press shrinks to 97 % for 80 ms; press-and-hold buttons show a
+filling ring.
+
+**Panel speakers (HDMI audio).** The L7's speakers are fed by HDMI. `install.sh` installs
+`alsa-utils`, adds the user to `audio` and writes `/etc/asound.conf` making the vc4-hdmi card
+the ALSA default (`plug` over `hdmi:CARD=vc4hdmi,DEV=0`, which converts to the IEC958 frames
+the vc4 driver wants). Debian's Chromium falls back to ALSA when there is no PulseAudio /
+PipeWire, so no sound server is installed. Before this the default was card 0 (the 3.5 mm
+jack), which is why the panel was silent. The HDMI device is exclusive: Chromium holds it for
+about 20 s after the last sound, during which `aplay` reports "busy".
+`GET /api/sound-test` (from the Pi itself) makes the open driver page play three start beeps,
+GO and a boost even when muted; `?alsa=1` instead plays a 1 s tone with `aplay` (no browser).
+**TEST SOUND** shows next to the speaker button while demo mode is on. Verified on kart 2
+(2026-11-06): `/proc/asound/card1/pcm0p/sub0/status` goes `RUNNING` (IEC958_SUBFRAME_LE,
+48 kHz, 2 ch) while the page plays; the 3.5 mm card stays closed. Nobody has listened to it yet.
 
 **Test with the simulator:**
 
@@ -263,14 +303,15 @@ is one, else through the centre of every boost/mud/item zone of the pit's
 current zones (forced on: it is a simulation) and across the lap line (a detour
 is added when a loop would be shorter than `min_lap_s`), or around a built-in
 demo course at the kart's position when the pit has no zones. It starts with
-`race 5`. The SIMULATION banner says DEMO with the time left. While demoing,
+`race 5`, and after 3 laps the simulated pit flags it home in P1 (`race 101`), so the FINISH
+takeover can be seen on the real panel. The SIMULATION banner says DEMO with the time left. While demoing,
 every line the server would send (game commands, mode taps, status polls) goes
 to the simulator and the real Heltec's lines are logged (`ignored: "demo"`) but
 not shown: **nothing is written to the real Heltec**. It ends after `demo_max_s`
 (180 s), on another 3 s hold, or `{"on": false}`, and the page returns to the
 real link without a restart (lap timing starts fresh).
 
-**Simulator race**: `race [secs]` on its console (or `--race-at S`) does what the
+**Simulator race**: `race [secs]` / `finish [P]` on its console (or `--race-at S`) does what the
 race firmware does (grid hold at zero power, countdown and go lines, STOP/START
 cancel). The driver page never sends `race`.
 

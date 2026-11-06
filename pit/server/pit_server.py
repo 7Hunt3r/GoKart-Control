@@ -269,21 +269,48 @@ class App:
         secs = body.get("secs", 5)
         if isinstance(secs, bool) or not isinstance(secs, int) or not 1 <= secs <= 30:
             raise pitcore.CommandError("secs must be a whole number 1-30")
+        laps = body.get("laps", 0) or 0
+        if isinstance(laps, bool) or not isinstance(laps, int) or not 0 <= laps <= 99:
+            raise pitcore.CommandError("laps must be a whole number 0-99 (0 = untimed)")
         if not self.link.connected:
             raise pitcore.CommandError("T-Beam link is down; race start not sent")
         now, t = time.monotonic(), time.time()
         wall = wall_iso(t)
         with self.lock:
             c = self.cmds.submit("race", pitcore.ALL_KARTS, secs, source=f"{who} (race start)", now=now, wall=wall)
-            self.fleet.game.reset_laps()
+            self.fleet.game.race_begin(laps, now + secs, wall_iso(t + secs))   # also resets lap timing
             race = self.fleet.race
-            race.update(started_wall=wall, go_wall=wall_iso(t + secs), go_epoch=t + secs, go_secs=secs,
+            race.update(started_wall=wall, go_wall=wall_iso(t + secs), go_epoch=t + secs, go_secs=secs, laps=laps,
                         start_cmd_id=c.id, by=who, changed_wall=wall)
             d = c.to_dict()
         self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
-        self.log.write("op", who=who, action="race_start", secs=secs, id=d["id"], seq=d["seq"],
+        self.log.write("op", who=who, action="race_start", secs=secs, laps=laps, id=d["id"], seq=d["seq"],
                        go_wall=wall_iso(t + secs))
-        return {"command": d, "go_wall": wall_iso(t + secs), "secs": secs}
+        return {"command": d, "go_wall": wall_iso(t + secs), "secs": secs, "laps": laps}
+
+    def _online(self, now):
+        return [k for k in pitcore.KART_IDS if self.fleet.is_online(k, now)]
+
+    def _send_finishes(self, finishes, who, now, wall):
+        """One `race` command per kart: arg 100 + position, or 0 (finish, no position). Lock held."""
+        out = []
+        for kart, arg in finishes:
+            c = self.cmds.submit("race", kart, arg, source=f"{who} (race finish)", now=now, wall=wall)
+            out.append({"kart": kart, "arg": arg, "id": c.id})
+        return out
+
+    def race_stop(self, who):
+        """STOP RACE: final results, every kart gets its finish command (ZONES.md "Race finish")."""
+        if not self.link.connected:
+            raise pitcore.CommandError("T-Beam link is down; race stop not sent")
+        now, wall = time.monotonic(), wall_iso()
+        with self.lock:
+            fin = self.fleet.game.race_stop(self._online(now), wall)
+            sent = self._send_finishes(fin, who, now, wall)
+            res = self.fleet.game.session.snapshot()
+        self._state_cache = (0.0, b"{}")
+        self.log.write("op", who=who, action="race_stop", sent=sent, results=res["results"])
+        return {"sent": sent, "session": res}
 
     def reset_laps(self, who):
         with self.lock:
@@ -306,10 +333,22 @@ class App:
                 self.fleet.rx_bad += 1
                 return
             k = self.fleet.ingest(msg, now, wall)
+            fin, ended = [], False
             if k is not None:
                 self.cmds.on_tele(k, now, wall)
+                fin = self.fleet.game.take_finishes()        # a kart completed the race length
+                ended = self.fleet.game.check_end(self._online(now), wall)
             elif msg.get("t") == "sent":
                 self.cmds.on_sent(msg)
+            if fin and self.link.connected:
+                sent = self._send_finishes(fin, "pit", now, wall)
+            else:
+                sent = []
+            res = self.fleet.game.session.snapshot() if (fin or ended) and self.fleet.game.session else None
+        if fin or ended:
+            self.log.write("event", what="race_finish", sent=sent, ended=ended,
+                           results=res["results"] if res and ended else None)
+            self._state_cache = (0.0, b"{}")
 
     def _on_link_state(self, connected, desc):
         with self.lock:
@@ -619,6 +658,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **app.enable_zones(body, who)})
             if p == "/race/start":
                 return self._json(200, {"ok": True, **app.race_start(body, who)})
+            if p == "/race/stop":
+                return self._json(200, {"ok": True, **app.race_stop(who)})
             if p == "/laps/reset":
                 return self._json(200, {"ok": True, **app.reset_laps(who)})
             if p == "/gps_correction":

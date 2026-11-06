@@ -40,7 +40,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -76,15 +76,17 @@ DEFAULTS = {
     "gps_correction": False,            # game positions += (pit surveyed - pit radio live fix), if < 25 m
     "demo": True,                       # allow demo mode (hold the KART badge 3 s): simulated kart, real Heltec untouched
     "demo_max_s": 180,                  # demo ends by itself after this
-    "sound": True,                      # driver page: synthesized boost/lap sounds (WebAudio)
+    "sound": True,                      # driver page: synthesized game sounds (WebAudio, static/sound.js)
+    "sound_volume": 0.8,                # master volume of those sounds, 0-1
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".webp": "image/webp", ".svg": "image/svg+xml"}
 SSE_PERIOD_S = 0.2
+DEMO_FINISH_LAPS = 3                    # demo mode: FINISH (P1) after this many laps
 PUBLIC_CFG = ("kart_id", "beginner_mode", "map_orientation", "follow_span_m", "follow_resume_s",
-              "mode_hold_ms", "map_fps", "game", "sound", "demo")
+              "mode_hold_ms", "map_fps", "game", "sound", "sound_volume", "demo")
 
 
 def wall_iso(ts=None):
@@ -126,6 +128,29 @@ class SessionLog:
                 pass                    # a full SD card must not stop the display
 
 
+def play_test_tone(freq=660.0, secs=1.0, rate=48000):
+    """Generate a short stereo sine WAV and play it with aplay on the default ALSA device."""
+    import math
+    import struct
+    import subprocess
+    import tempfile
+    import wave
+    path = os.path.join(tempfile.gettempdir(), "gokart-sound-test.wav")
+    n = int(rate * secs)
+    frames = bytearray()
+    for i in range(n):
+        env = min(1.0, i / 2400, (n - i) / 2400)
+        v = int(12000 * env * math.sin(2 * math.pi * freq * i / rate))
+        frames += struct.pack("<hh", v, v)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate); w.writeframes(bytes(frames))
+    try:
+        r = subprocess.run(["aplay", "-q", path], capture_output=True, text=True, timeout=secs + 5)
+        return {"rc": r.returncode, "stderr": r.stderr.strip()[-300:]}
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"rc": None, "stderr": str(e)}
+
+
 class App:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -135,6 +160,8 @@ class App:
         self.configured_id = int(cid) if cid else None
         self._fresh_state()
         self.demo = None                 # Demo while demoing: it replaces the Heltec for reads AND writes
+        self.sound_test_seq = 0          # GET /api/sound-test bumps it; the page plays a test jingle
+        self.sound_test_mono = None
         self.link = Link(self._on_line, self._on_link_state, port=cfg.get("serial_port"),
                          tcp=cfg.get("tcp"), log=self._console)
         self.maps = MapSync(cfg["pit_urls"], cfg.get("cache_dir") or os.path.join(KART_ROOT, "cache", "map"),
@@ -203,6 +230,23 @@ class App:
         print(f"{wall_iso()} DEMO stop ({why}) by {who}", flush=True)
         return self.demo_info()
 
+    def sound_test(self, alsa=False):
+        """Ask the driver page to play its test sounds (checks Chromium -> ALSA -> HDMI panel).
+        alsa=True instead plays a 1 s 660 Hz tone straight through ALSA with aplay (no browser); the
+        HDMI device is exclusive, so that only works while Chromium is not holding it (~20 s after
+        the page's last sound)."""
+        if alsa:
+            out = {"ok": True, "alsa": play_test_tone()}
+            self.log.write("op", action="sound_test", alsa=out["alsa"])
+            return out
+        with self.lock:
+            self.sound_test_seq += 1
+            self.sound_test_mono = time.monotonic()
+            self._state_cache = (0.0, b"{}")
+        out = {"ok": True, "seq": self.sound_test_seq}
+        self.log.write("op", action="sound_test", seq=self.sound_test_seq, alsa=out.get("alsa"))
+        return out
+
     def demo_info(self):
         d = self.demo
         if not d:
@@ -262,7 +306,13 @@ class App:
                 game = self.game.on_gps(msg, now)
             elif t == "race":
                 game = self.game.on_race(msg, now)
+            d = self.demo
+            demo_finish = (demo and d is not None and not self.game.race["finished"]
+                           and any(r.get("ev") == "lap" and r.get("lap", 0) >= DEMO_FINISH_LAPS for r in game))
         self._game_out(game)
+        if demo_finish:                    # demo: after 3 laps the simulated pit flags the kart home in P1
+            d.write_text("finish 1")
+            self.log.write("event", what="demo_finish", laps=DEMO_FINISH_LAPS, position=1)
 
     def _on_link_state(self, connected, desc):
         if self.demo is not None:
@@ -350,6 +400,8 @@ class App:
                                 "desc": dm.description if dm is not None else self.link.description,
                                 "since": self.link_since}},
             "demo": self.demo_info(),
+            "sound_test": {"seq": self.sound_test_seq,
+                           "age_s": None if self.sound_test_mono is None else round(now - self.sound_test_mono, 1)},
             "config": {k: self.cfg.get(k) for k in PUBLIC_CFG},
             "commands": cmds,
             "map": mp,
@@ -439,6 +491,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, app.state_json(), "application/json")
         if p == "/events":
             return self._events()
+        if p == "/api/sound-test":
+            if not self._local() and not app.cfg.get("remote_cmd"):
+                return self._json(403, {"ok": False, "error": "sound test only from the kart itself"})
+            q = parse_qs(urlparse(self.path).query)
+            return self._json(200, app.sound_test(alsa=q.get("alsa", ["0"])[0] == "1"))
         return self._send(404, "not found")
 
     def _events(self):

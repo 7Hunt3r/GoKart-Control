@@ -699,6 +699,46 @@ class Race(unittest.TestCase):
         g.on_cmd({"t": "cmd", "src": 0, "cmd": 3, "arg": 0, "result": 1}, 31.0)   # START releases early
         self.assertEqual(g.snapshot(31.0)["race"]["how"], "start")
 
+    def test_finish_freezes_laps_until_next_countdown(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(lap_zone(min_lap_s=5)), 0.0)
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 1000, "secs": 1}, 0.0)
+        g.tick(1.5)
+        g.on_self(fix(-2, 0), 2.0); g.on_self(fix(2, 0), 2.2)              # lap 1 starts
+        g.on_self(fix(8, 0), 5.0); g.on_self(fix(2, 0), 8.0)
+        g.on_self(fix(-2, 0), 9.0)                                          # lap 1 done (~6.5 s)
+        self.assertEqual(g.snapshot(9.0)["lap"]["count"], 1)
+        r = g.on_race({"t": "race", "kart": 2, "event": "finish", "position": 3}, 10.0)
+        self.assertEqual(evs(r, "race_finish")[0]["position"], 3)
+        rs = g.snapshot(11.0)["race"]
+        self.assertEqual((rs["finished"], rs["position"], rs["finish_age_s"], rs["hold"]), (True, 3, 1.0, False))
+        self.assertEqual(rs["finish_lap"]["laps"], 1)
+        self.assertIsNotNone(rs["finish_lap"]["best_s"])
+        self.assertFalse(g.snapshot(11.0)["lap"]["running"])
+        g.on_self(fix(-8, 0), 13.0)
+        r = g.on_self(fix(2, 0), 16.0)                                      # crossing after the flag: ignored
+        self.assertEqual(evs(r, "lap_ignored")[0]["why"], "finished")
+        self.assertEqual(g.snapshot(17.0)["lap"]["count"], 1)
+        g.on_race({"t": "race", "event": "finish", "position": 0}, 18.0)    # finish with no position
+        self.assertEqual(g.snapshot(18.0)["race"]["position"], 0)
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 5000, "secs": 5}, 20.0)   # next race clears it
+        rs = g.snapshot(20.0)["race"]
+        self.assertEqual((rs["finished"], rs["position"], rs["hold"]), (False, None, True))
+
+    def test_sim_finish_command(self):
+        """The simulator (and demo mode) mirror the firmware: race 100+P -> a finish line with P."""
+        out = []
+        sim = sim_heltec.Sim(sim_heltec.sim_args(kart=2))
+        sim.out.append(out.append)
+        with sim.lock:
+            sim.handle_line("race 5")
+            sim.handle_line("finish 3")
+            sim.handle_line("finish")
+        msgs = [json.loads(x) for b in out for x in (b.decode() if isinstance(b, bytes) else b).splitlines() if x.startswith("{")]
+        fins = [m for m in msgs if m.get("t") == "race" and m.get("event") == "finish"]
+        self.assertEqual([m["position"] for m in fins], [3, 0])
+        self.assertIsNone(sim.me.race_go)                     # finish releases the grid hold
+
     def test_no_zone_commands_in_grid_hold(self):
         g = kc.GameEngine()
         g.set_zones(zones_doc(boost_zone(r=10), mud_zone(x0=40, x1=60)), 0.0)
@@ -707,6 +747,45 @@ class Race(unittest.TestCase):
         self.assertEqual(lines(r), [])
         self.assertEqual(evs(r, "suppressed")[0]["why"], "grid hold")
         self.assertEqual(g.meter(3.0)["kind"], "grid")
+
+
+class PageHelpers(unittest.TestCase):
+    """Small pure functions of the driver page and the shared sound helper."""
+
+    def test_sound_js_is_shared(self):
+        with open(os.path.join(KART, "server", "static", "sound.js")) as f:
+            kart = f.read()
+        with open(os.path.join(os.path.dirname(KART), "pit", "server", "static", "sound.js")) as f:
+            pit = f.read()
+        self.assertEqual(kart, pit, "kart and pit sound.js must be identical copies")
+
+    def test_js(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not installed")
+        js = "\n".join(js_function(n) for n in ("nul", "pitSignalClass", "lapTime", "finishText"))
+        prog = js + """
+console.log(JSON.stringify([[-60, -89.9, -90, -104, -105, -120, null].map(pitSignalClass),
+  finishText({position: 3, finish_lap: {laps: 5, best_s: 27.61}}), finishText({position: 0, finish_lap: {laps: 1, best_s: null}})]));"""
+        out = json.loads(subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20).stdout)
+        self.assertEqual(out[0], ["ok", "ok", "warn", "warn", "bad", "bad", ""])
+        self.assertEqual(out[1]["pos"], "P3")
+        self.assertIn("5 LAPS", out[1]["stats"]); self.assertIn("0:27.6", out[1]["stats"])
+        self.assertEqual(out[2]["pos"], "")
+        self.assertIn("1 LAP ", out[2]["stats"])
+
+    def test_sound_kinds_cover_the_brief(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not installed")
+        with open(os.path.join(KART, "server", "static", "sound.js")) as f:
+            src = f.read()
+        prog = "const window = {addEventListener(){}}; const localStorage = {getItem(){return null}};\n" + src \
+            + "\nconsole.log(JSON.stringify([GKSound.KINDS, GKSound.play('go')]));"
+        kinds, played = json.loads(subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20).stdout)
+        for k in ("light", "go", "grid", "roulette", "item", "boost", "super", "mud", "lap", "best", "finish", "stop"):
+            self.assertIn(k, kinds)
+        self.assertFalse(played)                                  # no AudioContext in node: plays nothing, no throw
 
 
 class Items(unittest.TestCase):

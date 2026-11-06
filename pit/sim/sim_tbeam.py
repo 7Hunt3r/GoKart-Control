@@ -222,6 +222,8 @@ class SimKart:
             self.stopped, self.cmd_result = False, 2
             self.boost_scale, self.slow_mph = None, 0   # firmware: START clears SLOW and BOOST
             self.grid_until = None                      # START releases a grid hold early
+        elif cmd == "race" and msg.get("arg") in (0, 101, 102, 103, 104, 105, 106, 107, 108):
+            self.grid_until, self.cmd_result = None, 2      # finish: release any grid hold (race firmware)
         elif cmd == "race":
             arg = msg.get("arg")
             secs = arg if isinstance(arg, int) and 1 <= arg <= 30 else 5

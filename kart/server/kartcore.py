@@ -955,7 +955,8 @@ class GameEngine:
         self.local_enabled = bool(local_enabled)
         self.rng = rng or random.Random()
         self.race = {"hold": False, "go_at": None, "secs": None, "rx": None, "go_mono": None,
-                     "go_confirmed": False, "how": None, "go_utc": None}
+                     "go_confirmed": False, "how": None, "go_utc": None,
+                     "finished": False, "position": None, "finish_mono": None, "finish_lap": None}
         self.filter = GpsFilter()
         self.corr = BaseCorrection(gps_correction)
         self.gps_line_mono = None   # last {"t":"gps"} line
@@ -1185,6 +1186,9 @@ class GameEngine:
         L = self.lapline
         lap = self.lap
         go = self.race["go_mono"]
+        if self.race["finished"]:
+            self._rec(recs, "lap_ignored", now, zone=L.id, why="finished")    # laps stop counting after the flag
+            return
         if self.race["hold"] or (go is not None and t_cross < go):
             self._rec(recs, "lap_ignored", now, zone=L.id, why="before GO")
             return
@@ -1218,7 +1222,7 @@ class GameEngine:
             go_in = msg.get("go_in_ms")
             go_in = max(0.0, float(go_in) / 1000.0) if _num(go_in) else float(msg.get("secs") or 5)
             r.update(hold=True, go_at=now + go_in, secs=msg.get("secs"), rx=now, go_confirmed=False, how=None,
-                     go_utc=msg.get("go_utc"))
+                     go_utc=msg.get("go_utc"), finished=False, position=None, finish_mono=None, finish_lap=None)
             self._rec(recs, "race_countdown", now, go_in_s=round(go_in, 2), secs=msg.get("secs"))
             if go_in <= 0:
                 self._go(now, now, "clock", recs)
@@ -1227,6 +1231,16 @@ class GameEngine:
                 self._go(now, now, "line", recs)
             r["go_confirmed"] = True
             self._rec(recs, "race_go_line", now)
+        elif ev == "finish":
+            # the pit's race finish (arg 0 / 100 + position): the firmware releases any hold; the HUD
+            # shows the FINISH takeover and the laps freeze until the next countdown
+            pos = msg.get("position")
+            pos = int(pos) if _num(pos) and 0 < int(pos) <= 8 else 0
+            lap = self.lap
+            r.update(hold=False, finished=True, position=pos, finish_mono=now,
+                     finish_lap={"laps": lap["count"], "best_s": lap["best_s"], "last_s": lap["last_s"]})
+            lap.update(running=False)
+            self._rec(recs, "race_finish", now, position=pos, laps=lap["count"], best_s=lap["best_s"])
         return recs
 
     def _go(self, t_go, now, how, recs):
@@ -1283,6 +1297,10 @@ class GameEngine:
                "go_in_s": round(r["go_at"] - now, 2) if r["hold"] and r["go_at"] is not None else None,
                "go_age_s": round(now - r["go_mono"], 2) if r["go_mono"] is not None else None}
         out["lights"] = race_lights(out["go_in_s"]) if r["hold"] else (5 if out["go_age_s"] is not None and out["go_age_s"] < 0 else 0)
+        out["finished"] = r["finished"]
+        out["position"] = r["position"]
+        out["finish_age_s"] = round(now - r["finish_mono"], 2) if r["finish_mono"] is not None else None
+        out["finish_lap"] = r["finish_lap"]
         return out
 
     def snapshot(self, now):

@@ -86,3 +86,13 @@ brighter ahead of the kart in heading-up mode. The pit editor has a "Track" tool
 Clear). The kart's demo mode drives along the track when one exists (falling back to a loop through
 the zones). The track has no game effect and is ignored by old builds. Version bumps on every save
 like the zones.
+
+## Race finish (added 2026-11-06 night)
+
+Command `race` with arg 0 (finish, no position) or 100 + position (101-108). The Heltec releases any
+grid hold and prints `{"t":"race","kart":N,"event":"finish","position":P}` (P = 0 when unknown). The
+pit sends it per kart: automatically when a kart completes the race length (`POST /race/start`
+`"laps": N`), and to every kart on STOP RACE (`POST /race/stop`: positions by laps desc, then earliest
+last crossing, karts with no completed lap last by id; `race 0` to karts not in the race). After a
+finish the pit freezes lap timing (final results) until the next race start or lap reset, and the
+kart display shows the checkered FINISH takeover and stops counting laps until the next countdown.

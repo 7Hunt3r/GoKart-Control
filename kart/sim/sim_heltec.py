@@ -295,6 +295,10 @@ class Sim:
                 self.log(f"boost: scale {arg / 100.0:.2f} for {secs} s")
                 self.log(f"vesc write scale {arg / 100.0:.3f}")
             self.boost_secs = 0
+        elif cmd == 7 and (arg == 0 or 101 <= arg <= 108):  # race finish (0 = no position, 100 + P)
+            k.race_go = None
+            self.emit({"t": "race", "kart": k.k, "event": "finish", "position": 0 if arg == 0 else arg - 100})
+            self.log(f"race: finish P{0 if arg == 0 else arg - 100}")
         elif cmd == 7:                                       # race: grid hold, GO arg seconds later
             if arg < 1 or arg > 30:
                 res = 4
@@ -370,6 +374,8 @@ class Sim:
             self.command(254, 1, arg)
         elif word == "race":
             self.command(254, 7, arg if rest else 5)
+        elif word == "finish":                               # SIMULATION: as if the pit sent race 100+P
+            self.command(254, 7, 100 + arg if rest and arg else 0)
         elif word in ("stop", "start", "ping", "slow"):
             self.command(254, {"stop": 2, "start": 3, "ping": 4, "slow": 5}[word], arg)
         elif word == "help":

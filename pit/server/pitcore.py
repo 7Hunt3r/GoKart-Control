@@ -276,6 +276,8 @@ class Fleet:
             ks = self.karts[k]
             prev = (ks.fix.get("lat"), ks.fix.get("lon"), ks.last_fix_mono) if ks.fix else None
             ks.ingest_tele(msg, now, wall)
+            if self.game.session is not None and self.game.session.running:
+                self.game.session.seen.add(k)
             if prev is not None and ks.last_fix_mono == now:
                 cur = (ks.fix["lat"], ks.fix["lon"])
                 if cur != prev[:2]:
@@ -382,7 +384,7 @@ class Fleet:
             "stat": dict(self.stat, age_s=_age(self.stat_mono, now)) if self.stat else None,
             "repeater": dict(self.repeater, age_s=_age(self.repeater_mono, now)) if self.repeater else None,
             "simulation": self.simulation,
-            "race": dict(self.race),
+            "race": dict(self.race, session=None if self.game.session is None else self.game.session.snapshot()),
             "game": self.game.status(),
             "laps": laps,
             "origin": self.current_origin(),
@@ -605,12 +607,54 @@ class LapState:
                 "last_cross_wall": self.started_wall, "running": self.started_mono is not None}
 
 
+RACE_FINISH_BASE = 100        # race command arg 100 + position = finish with that position; arg 0 = finish, no position
+
+
+def race_arg_name(arg):
+    if arg == 0:
+        return "FINISH"
+    if arg is not None and arg > RACE_FINISH_BASE:
+        return f"FINISH P{arg - RACE_FINISH_BASE}"
+    return f"GO in {arg or 5} s"
+
+
+class RaceSession:
+    """One race from START RACE to its end (ZONES.md "Race finish"): optional length in laps,
+    finishing order, final results. Ends when every online kart has finished the set laps, or on STOP RACE."""
+
+    def __init__(self, laps_target, go_mono, go_wall):
+        self.laps_target = int(laps_target or 0)     # 0 = untimed (ends only on STOP RACE)
+        self.go_mono, self.go_wall = go_mono, go_wall
+        self.finished = {}                           # kart -> {"pos", "total_s", "laps"}
+        self.seen = set()                            # karts heard during the race
+        self.pending = []                            # (kart, arg) finish commands to send
+        self.ended_by = None                         # None while running, "laps" | "stop"
+        self.finished_wall = None
+        self.results = None
+
+    @property
+    def running(self):
+        return self.ended_by is None
+
+    def finish(self, kart, at, laps):
+        pos = len(self.finished) + 1
+        self.finished[kart] = {"pos": pos, "total_s": round(at - self.go_mono, 2), "laps": laps}
+        self.pending.append((kart, RACE_FINISH_BASE + pos))
+        return pos
+
+    def snapshot(self):
+        return {"state": "running" if self.running else "finished", "laps_target": self.laps_target,
+                "go_wall": self.go_wall, "finished": {str(k): v["pos"] for k, v in self.finished.items()},
+                "ended_by": self.ended_by, "finished_wall": self.finished_wall, "results": self.results}
+
+
 class Game:
     """Zones document + per-kart lap timing from telemetry fixes."""
 
     def __init__(self):
         self.doc = dict(EMPTY_ZONES)
         self.laps = {}                       # kart -> LapState
+        self.session = None                  # RaceSession from START RACE until NEW RACE / reset
         self._line = None                    # (a_en, b_en, project, min_lap_s) or None
 
     def set_doc(self, doc):
@@ -640,13 +684,82 @@ class Game:
         return self.doc["enabled"] and self._line is not None
 
     def reset_laps(self):
+        """Clear lap timing and any race session (RESET LAPS / NEW RACE)."""
         self.laps = {}
+        self.session = None
+
+    # -- race session ---------------------------------------------------------
+    def race_begin(self, laps_target, go_mono, go_wall=None):
+        self.reset_laps()
+        self.session = RaceSession(laps_target, go_mono, go_wall)
+        return self.session
+
+    @property
+    def frozen(self):
+        """Final results are showing: no more lap counting until the next start / reset."""
+        return self.session is not None and not self.session.running
+
+    def take_finishes(self):
+        """Finish commands waiting to be sent: [(kart, arg)]."""
+        if self.session is None:
+            return []
+        out, self.session.pending = self.session.pending, []
+        return out
+
+    def _end(self, by, wall):
+        ses = self.session
+        ses.ended_by, ses.finished_wall = by, wall
+        rows = []
+        for k, f in sorted(ses.finished.items(), key=lambda kv: kv[1]["pos"]):
+            st = self.laps.get(k)
+            rows.append({"pos": f["pos"], "kart": k, "laps": f["laps"], "total_s": f["total_s"],
+                         "best_s": None if st is None or st.best_s is None else round(st.best_s, 2)})
+        ses.results = rows
+
+    def check_end(self, online, wall=None):
+        """Laps race: ends once every online kart has finished. Returns True when it ended now."""
+        ses = self.session
+        if ses is None or not ses.running or not ses.laps_target or not ses.finished:
+            return False
+        if all(k in ses.finished for k in online):
+            self._end("laps", wall)
+            return True
+        return False
+
+    def race_stop(self, online, wall=None, all_karts=range(1, 9)):
+        """STOP RACE: freeze laps, place every kart not finished yet (laps desc, then earliest last
+        crossing; karts with no completed lap last, by id) and return the finish commands
+        [(kart, arg)]: 100 + position for karts in the race, 0 for the rest."""
+        ses = self.session
+        if ses is None:
+            ses = self.session = RaceSession(0, None, None)
+        if not ses.running:
+            return []
+        field = (set(online) | ses.seen | set(self.laps)) - set(ses.finished)
+        done = [k for k in field if k in self.laps and self.laps[k].laps > 0]
+        done.sort(key=lambda k: (-self.laps[k].laps, self.laps[k].started_mono, k))
+        rest = sorted(k for k in field if k not in done)
+        for k in done + rest:
+            st = self.laps.get(k)
+            at = st.started_mono if st is not None and st.laps > 0 else None
+            pos = len(ses.finished) + 1
+            ses.finished[k] = {"pos": pos, "laps": st.laps if st else 0,
+                               "total_s": None if at is None or ses.go_mono is None else round(at - ses.go_mono, 2)}
+            ses.pending.append((k, RACE_FINISH_BASE + pos))
+        for k in all_karts:
+            if k not in ses.finished:
+                ses.pending.append((k, 0))
+        self._end("stop", wall)
+        return self.take_finishes()
 
     def on_move(self, kart, prev, cur, now, wall=None):
         """prev = (lat, lon, mono_of_that_fix), cur = (lat, lon) received at `now`.
         Returns True when the move crossed the lap line and counted."""
-        if not self.active:
+        if not self.active or self.frozen:
             return False
+        ses = self.session
+        if ses is not None and kart in ses.finished:
+            return False                     # this kart has finished: its laps stop counting
         a, b, proj, min_lap = self._line
         t = segment_cross(proj(prev[0], prev[1]), proj(cur[0], cur[1]), a, b)
         if t is None:
@@ -663,6 +776,8 @@ class Game:
             st.best_s = lap if st.best_s is None else min(st.best_s, lap)
         st.started_mono, st.started_wall = at, wall
         st.crossings += 1
+        if ses is not None and ses.laps_target and st.laps >= ses.laps_target:
+            ses.finish(kart, at, st.laps)    # reached the race length: finished with its position now
         return True
 
     def board(self, now):
@@ -672,9 +787,14 @@ class Game:
         rows = [(k, st) for k, st in self.laps.items() if st.started_mono is not None]
         rows.sort(key=lambda r: (-r[1].laps, r[1].started_mono, r[0]))
         out = []
+        lead = rows[0][1] if rows else None
         for pos, (k, st) in enumerate(rows, 1):
             d = st.to_dict(k, now)
             d["pos"] = pos
+            # gap to the leader: whole laps behind, or (same laps) seconds behind at the line
+            d["gap_laps"] = lead.laps - st.laps
+            d["gap_s"] = (round(st.started_mono - lead.started_mono, 2)
+                          if pos > 1 and st.laps == lead.laps else None)
             out.append(d)
         return out
 
@@ -721,7 +841,7 @@ class Command:
         return {
             "id": self.id, "seq": self.seq, "cmd": self.cmd, "kart": self.kart, "arg": self.arg,
             "arg_name": (MODE_NAMES.get(self.arg) if self.cmd == "mode" else (f"{self.arg or 5} mph" if self.cmd == "slow"
-                         else (f"{self.arg}%" if self.cmd == "boost" else (f"GO in {self.arg or 5} s" if self.cmd == "race" else None)))),
+                         else (f"{self.arg}%" if self.cmd == "boost" else (race_arg_name(self.arg) if self.cmd == "race" else None)))),
             "ttl": self.ttl, "source": self.source, "state": self.state,
             "created_wall": self.created_wall, "first_tx_wall": self.first_tx_wall,
             "tx_count": self.tx_count, "radio_sent": self.radio_sent,
@@ -783,12 +903,13 @@ class CommandManager:
             if not BOOST_MIN_PCT <= arg <= BOOST_MAX_PCT:
                 raise CommandError("boost: scale percent must be 10-100")
         elif cmd == "race":
+            # 1-30 = grid hold, GO in arg s; 0 = finish (no position); 101-108 = finish in position arg-100
             try:
                 arg = 5 if arg in (None, "") else int(arg)
             except (TypeError, ValueError):
-                raise CommandError("race: seconds until GO must be 1-30")
-            if not 1 <= arg <= 30:
-                raise CommandError("race: seconds until GO must be 1-30")
+                raise CommandError("race: arg must be 1-30 (GO in s), 0 or 101-108 (finish)")
+            if not (1 <= arg <= 30 or arg == 0 or RACE_FINISH_BASE + 1 <= arg <= RACE_FINISH_BASE + 8):
+                raise CommandError("race: arg must be 1-30 (GO in s), 0 or 101-108 (finish)")
         else:
             arg = None
         c = Command(None, cmd, kart, arg, self.ttl, source, now, wall)

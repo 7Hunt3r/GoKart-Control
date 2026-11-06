@@ -248,6 +248,21 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(s["commands"]["last_fleet"]["cmd"], "race")
             rows = json.loads(st.request("GET", "/api/log/recent?n=300")[1])
             self.assertTrue(any(r.get("action") == "race_start" and r.get("secs") == 3 for r in rows))
+
+            # STOP RACE: final results, one finish command per kart (100 + position, 0 for offline karts)
+            code, body, _ = st.request("POST", "/race/stop", {})
+            self.assertEqual(code, 200, body)
+            rs = json.loads(body)
+            placed = [x for x in rs["sent"] if x["arg"] > 100]
+            self.assertGreaterEqual(len(placed), 6)
+            self.assertEqual(sorted(x["arg"] for x in placed), list(range(101, 101 + len(placed))))
+            ses = st.state()["fleet"]["race"]["session"]
+            self.assertEqual((ses["state"], ses["ended_by"]), ("finished", "stop"))
+            self.assertEqual(len(ses["results"]), len(placed))
+            self.assertEqual(st.request("POST", "/laps/reset", {})[0], 200)            # NEW RACE
+            self.assertIsNone(st.state()["fleet"]["race"]["session"])
+            rows = json.loads(st.request("GET", "/api/log/recent?n=300")[1])
+            self.assertTrue(any(r.get("action") == "race_stop" for r in rows))
         finally:
             st.close()
 

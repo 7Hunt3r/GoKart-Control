@@ -50,6 +50,32 @@ for g in dialout video render input; do
   getent group "$g" >/dev/null && usermod -aG "$g" "$PIT_USER"
 done
 
+echo "--- sound: ALSA default = the pit panel's HDMI speakers (vc4-hdmi); Chromium falls back to ALSA (no PipeWire/Pulse)"
+apt-get install -y --no-install-recommends alsa-utils || warn "alsa-utils failed"
+getent group audio >/dev/null && usermod -aG audio "$PIT_USER"
+# vc4-hdmi wants IEC958 frames: the "hdmi" pcm converts, "plug" fixes rate/format. Exclusive (no dmix):
+# while Chromium plays, `aplay` waits for the device. GOKART_HDMI_CARD overrides the card (Pi 4: vc4hdmi0 / vc4hdmi1).
+HDMI_CARD="${GOKART_HDMI_CARD:-}"
+if [ -z "$HDMI_CARD" ]; then
+  for c in vc4hdmi vc4hdmi0 vc4hdmi1; do [ -e "/proc/asound/$c" ] && { HDMI_CARD="$c"; break; }; done
+fi
+if [ -n "$HDMI_CARD" ]; then
+  cat > /etc/asound.conf <<EOF
+# Written by GoKart install.sh: game sounds out of the HDMI panel's speakers ($HDMI_CARD).
+pcm.!default {
+  type plug
+  slave.pcm "hdmi:CARD=$HDMI_CARD,DEV=0"
+}
+ctl.!default {
+  type hw
+  card $HDMI_CARD
+}
+EOF
+  echo "/etc/asound.conf -> $HDMI_CARD (test: speaker-test -c2 -t sine -l1)"
+else
+  warn "no vc4-hdmi sound card found (/proc/asound); game sounds go to the default ALSA device"
+fi
+
 echo "--- udev: /dev/tbeam"
 install -m 644 "$DEST/udev/99-gokart-tbeam.rules" /etc/udev/rules.d/99-gokart-tbeam.rules
 udevadm control --reload-rules && udevadm trigger --subsystem-match=tty || true

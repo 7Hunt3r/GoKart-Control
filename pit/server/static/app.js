@@ -136,13 +136,12 @@ function buildCards() {
     el.innerHTML = `
       <div class="hdr"><div class="swatch" data-f="sw">${k}</div><span class="chip" data-f="link">--</span>
         <span class="sm" data-f="age"></span><div class="badges" data-f="badges"></div></div>
-      <div class="row">
+      <div class="row bigrow">
         <span><span class="big val" data-f="batt">--</span> <span class="sm val" data-f="volts"></span></span>
-        <span><span class="big val" data-f="wheel">--</span><span class="lbl"> mph wheel*</span></span></div>
-      <div class="row sm"><span class="faultline" data-f="fault"></span><span class="val" data-f="esc"></span></div>
-      <div class="row sm"><span data-f="mode"></span></div>
-      <div class="row sm"><span class="val" data-f="gpsmph"></span><span class="val" data-f="gps"></span>
-        <span class="val" data-f="rssi"></span><span class="outcome" data-f="out"></span></div>
+        <span class="spd"><span class="big val" data-f="wheel">--</span><span class="unit">mph</span><span class="wtag">wheel</span></span></div>
+      <div class="stat"><span class="faultline" data-f="fault"></span><span class="val r" data-f="esc"></span></div>
+      <div class="stat"><span data-f="mode"></span><span class="outcome r" data-f="out"></span></div>
+      <div class="stat"><span><span class="val" data-f="gpsmph"></span> &middot; <span class="val" data-f="gps"></span></span><span class="val r" data-f="rssi"></span></div>
       ${KIOSK ? "" : kartButtons(k)}`;
     const f = {};
     el.querySelectorAll("[data-f]").forEach((n) => { f[n.dataset.f] = n; });
@@ -199,7 +198,7 @@ function updateCards() {
     c.f.wheel.textContent = nul(d.wheel_mph) ? "--" : Math.abs(d.wheel_mph).toFixed(0);
     c.f.batt.classList.toggle("old", !k.vesc_fresh);
     c.f.wheel.classList.toggle("old", !k.vesc_fresh);
-    c.f.gpsmph.textContent = g.fix_fresh && !nul(d.gps_mph) ? `GPS ${d.gps_mph.toFixed(0)} mph` : "GPS -- mph";
+    c.f.gpsmph.textContent = g.fix_fresh && !nul(d.gps_mph) ? `GPS ${d.gps_mph.toFixed(0)} mph` : "GPS --";
     c.f.mode.innerHTML = modeText(k);
     c.f.esc.textContent = "ESC " + fmt(v.esc_c, 0, "°C");
     const fi = faultInfo(k);
@@ -212,6 +211,8 @@ function updateCards() {
     if (MOBILE) {   // rssi/snr = how the pit hears the kart; base_rssi = how the kart hears the pit
       c.f.rssi.textContent = `pit hears ${fmt(st.rssi, 0)}/${fmt(st.snr, 1, " dB")}${loss}`
         + (nul(st.base_rssi) ? "" : ` · kart hears ${fmt(st.base_rssi, 0)}`);
+    } else if (KIOSK) {     // short: the detail sheet has SNR and the rest
+      c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")}` + (nul(k.loss_pct_1m) ? "" : ` · ${k.loss_pct_1m}% loss`) + (k.via_repeater ? " · rep" : "");
     } else {
       c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}` + loss
         + (st.base_rssi ? ` · pit↑${fmt(st.base_rssi, 0, "")}` : "");
@@ -219,17 +220,19 @@ function updateCards() {
     c.f.out.innerHTML = outcomeText(k.id) || (MOBILE ? '<span class="note">none this session</span>' : "");
     const b = [];
     if (st.stopped === true) b.push('<span class="badge stopped">STOPPED</span>');
+    if (fi.bad) b.push('<span class="badge fault">FAULT</span>');
     const onGrid = k.link === "online" && k.vesc_fresh && v.scale === 0 && st.stopped === false;   // race grid hold
     if (gridSeen[k.id] && !onGrid && k.link === "online") goFlash[k.id] = Date.now() + 2500;
     gridSeen[k.id] = onGrid;
-    if (onGrid) b.push('<span class="badge grid">GRID</span>');
+    const ses = session(), fp = ses && ses.finished && ses.finished[String(k.id)];
+    if (fp) b.push(`<span class="badge finished">${KIOSK ? "FIN" : "FINISHED"} P${fp}</span>`);   // the flag beats GRID/GO
+    else if (onGrid) b.push('<span class="badge grid">GRID</span>');
     else if ((goFlash[k.id] || 0) > Date.now()) b.push('<span class="badge go">GO</span>');
     if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph} MPH</span>`);
-    if (fi.bad) b.push('<span class="badge fault">FAULT</span>');
     if (st.vesc_link === false) b.push('<span class="badge unknown">VESC LINK DOWN</span>');
     if (st.writes === false) b.push('<span class="badge grey">WRITES OFF</span>');
     if (entered.includes(k.id)) b.push('<span class="badge entered">ENTERED</span>');
-    if (gameTiming() && k.lap) b.push(`<span class="badge lap">P${k.lap.pos} L${k.lap.laps}${nul(k.lap.best_s) ? "" : " · " + fmtLap(k.lap.best_s)}</span>`);
+    if (gameTiming() && k.lap && !fp) b.push(`<span class="badge lap">P${k.lap.pos} L${k.lap.laps}${nul(k.lap.best_s) || KIOSK ? "" : " · " + fmtLap(k.lap.best_s)}</span>`);
     c.f.badges.innerHTML = b.join("");
     c.el.querySelectorAll("[data-c]").forEach((btn) => {
       btn.disabled = !linkUp;
@@ -247,19 +250,19 @@ function updateTop() {
   chip("linkChip", L.connected ? (COMPACT ? "T-Beam OK" : "T-Beam " + L.desc) : "T-BEAM DOWN", L.connected ? "ok" : "bad");
   if (st) {
     const staleStat = (st.age_s || 0) > 5;
-    chip("radioChip", (MOBILE ? `radio ${st.radio}` : `radio ${st.radio} rx ${st.rx} tx ${st.tx}` + (st.rx_bad ? ` bad ${st.rx_bad}` : "")),
+    chip("radioChip", (MOBILE ? `radio ${st.radio}` : KIOSK ? `${st.radio} rx ${st.rx}` : `radio ${st.radio} rx ${st.rx} tx ${st.tx}` + (st.rx_bad ? ` bad ${st.rx_bad}` : "")),
       st.radio === "none" ? "bad" : (staleStat ? "stale" : "ok"));
   } else chip("radioChip", "radio: no stat", "stale");
   if (base) chip("baseChip", base.fix ? `base GPS ${fmt(base.sats)} sats` : "base GPS no fix", base.fix ? "ok" : "warn");
   const gcorr = S.fleet.gps_correction;
   if ($("corrChip")) {
     if (!gcorr || !gcorr.marker) chip("corrChip", "GPS corr: no pit marker", "");
-    else if (!gcorr.samples || gcorr.age_s === null || gcorr.age_s > 10) chip("corrChip", gcorr.enabled ? "GPS corr: waiting for base fix" : "GPS corr off", "");
+    else if (!gcorr.samples || gcorr.age_s === null || gcorr.age_s > 10) chip("corrChip", gcorr.enabled ? (KIOSK ? "corr: wait" : "GPS corr: waiting for base fix") : (KIOSK ? "corr off" : "GPS corr off"), "");
     else chip("corrChip", `GPS corr ${gcorr.magnitude_m.toFixed(1)} m` + (gcorr.applied ? " ON" : (gcorr.enabled ? " (hold)" : " off")), gcorr.applied ? "ok" : (gcorr.magnitude_m >= 25 ? "warn" : ""));
     $("corrChip").onclick = () => { if (gcorr) post("/gps_correction", { enabled: !gcorr.enabled }); };
   }
   const rp = S.fleet.repeater;
-  if (!rp) chip("repChip", "no repeater", "");
+  if (!rp) chip("repChip", KIOSK ? "no rep" : "no repeater", "");
   else if (rp.age_s > 20) chip("repChip", `REPEATER LOST ${ageText(rp.age_s)}`, "bad");
   else {
     const batt = rp.batt_v > 0.5 ? ` ${rp.batt_v.toFixed(2)} V` : " USB";
@@ -280,7 +283,7 @@ function updateTop() {
   const gc = $("gameChip");
   if (gc) {
     gc.textContent = Z.enabled ? (COMPACT ? "GAME ON" : `GAME ON · ${Z.zones.length} zone${Z.zones.length === 1 ? "" : "s"}`) : "GAME OFF";
-    gc.className = "gamechip " + (Z.enabled ? "on" : "off");
+    gc.className = "chip gamechip " + (Z.enabled ? "on" : "off");     // a toggle: ON = amber with a dot, OFF = outlined
   }
   document.querySelectorAll("[data-allmode]").forEach((b) => { b.disabled = !L.connected; });
   $("fOnline").classList.toggle("sel", filters.online);
@@ -333,16 +336,23 @@ function buildRace() {
     <div class="racestart">
       <div class="racesecs">${[3, 5, 10].map((n) => `<button data-racesecs="${n}">${n} s</button>`).join("")}</div>
       <button id="raceStart" class="hold racestartbtn">START RACE<small>hold 1 s · resets laps</small></button></div>
+    <div class="racestart">
+      <div class="racesecs racelaps">${[0, 3, 5, 10].map((n) => `<button data-racelaps="${n}">${n ? n : "OPEN"}<small>${n ? "laps" : "untimed"}</small></button>`).join("")}</div>
+      <button id="raceStop" class="hold racestopbtn">STOP RACE<small>hold 1 s · final results</small></button></div>
     <p class="note">START RACE sends one "race" command to all karts: each holds at zero power, then all launch
       together when the lights go out. STOP still wins during the hold; START releases a kart early.</p>
     <p class="note">RACE ON sends the selected mode + START to entered karts and STOP to karts not entered,
       with per-kart outcomes in CMDS. RACE OFF only clears the race flag; it sends nothing.
       Entry and filters never remove a kart from telemetry or fleet commands.</p>`;
-  holdButton($("raceStart"), 1000, () => {
-    audioUnlock();
-    const secs = store.get("gk_racesecs", 5);
-    post("/race/start", { secs }).then((j) => { if (j && j.ok) toast(`Race start sent: GO in ${j.secs} s (laps reset)`); });
-  });
+  const startRace = () => {
+    const secs = store.get("gk_racesecs", 5), laps = store.get("gk_racelaps", 0);
+    post("/race/start", { secs, laps }).then((j) => { if (j && j.ok) toast(`Race start sent: GO in ${j.secs} s${j.laps ? ", " + j.laps + " laps" : ""} (laps reset)`); });
+  };
+  holdButton($("raceStop"), 1000, () => post("/race/stop", {}).then((j) => {
+    if (j && j.ok) toast(`Race stopped: ${j.sent.filter((x) => x.arg > 100).length} karts placed, finish sent`);
+  }));
+  // phone: hold 1 s, then a confirm sheet with a big GO button (a pocket tap must never start a race)
+  holdButton($("raceStart"), 1000, () => { GKSound.ensure(); if (MOBILE) confirmRace(startRace); else startRace(); });
   holdButton($("raceOn"), 1000, () => post("/api/race", { active: true }).then((j) => { if (j && j.ok) toast(`Race on: ${j.race.issued.length} commands queued`); }));
   raceBuilt = true;
 }
@@ -359,8 +369,27 @@ function updateRace() {
   document.querySelectorAll("[data-racemode]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.racemode) === race.mode));
   $("raceOn").disabled = !S.server.link.connected;
   $("raceStart").disabled = !S.server.link.connected;
-  const rs = store.get("gk_racesecs", 5);
+  const rs = store.get("gk_racesecs", 5), rl = store.get("gk_racelaps", 0);
   document.querySelectorAll("[data-racesecs]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.racesecs) === rs));
+  document.querySelectorAll("[data-racelaps]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.racelaps) === rl));
+  const ses = race.session;
+  $("raceStop").disabled = !S.server.link.connected || !ses || ses.state !== "running";
+}
+
+function confirmRace(go) {
+  let c = $("raceConfirm");
+  if (!c) {
+    c = document.createElement("div"); c.id = "raceConfirm"; c.className = "confirm hidden";
+    c.innerHTML = `<div class="cbox"><div class="ctitle" id="rcTitle"></div>
+      <p class="note">Every kart holds at zero power, then all launch together on GO. Laps reset.</p>
+      <button id="rcGo" class="cgo">GO</button><button id="rcCancel" class="ccancel">CANCEL</button></div>`;
+    document.body.appendChild(c);
+    c.addEventListener("click", (e) => { if (e.target === c || e.target.id === "rcCancel") c.classList.add("hidden"); });
+  }
+  const nl = store.get("gk_racelaps", 0);
+  $("rcTitle").textContent = `Start race in ${store.get("gk_racesecs", 5)} s?` + (nl ? ` (${nl} laps)` : "");
+  $("rcGo").onclick = () => { c.classList.add("hidden"); go(); };
+  c.classList.remove("hidden");
 }
 
 /* -------------------------------------------------------------------- log */
@@ -828,11 +857,11 @@ function zoneEdit(on) {
   if (S) { drawMap(); updateZoneBar(); }
 }
 const ZONE_HINT = {
-  boost: "Tap the map to drop a boost pad (5 m).", mud: "Tap the map to drop a mud patch (6 m).",
-  track: "Tap the course centreline point by point in driving order (direction = order), then CLOSE LOOP.",
-  item: "Tap the map to drop an item box (4 m); the kart rolls boost / super / mud / empty.",
-  lapline: "Tap one end of the start/finish line, then the other end.", delete: "Tap a zone to delete it.",
-  select: "Tap a zone to select it; drag it to move. Drag empty map to pan.",
+  boost: "Tap the map to place a boost pad (5 m)", mud: "Tap the map to place a mud patch (6 m)",
+  track: "Tap points along the centreline in driving order, then CLOSE LOOP",
+  item: "Tap the map to place an item box (4 m)",
+  lapline: "Tap one end of the start/finish line, then the other end", delete: "Tap a zone to delete it",
+  select: "Tap a zone to select it, drag it to move; drag empty map to pan",
 };
 function updateZoneBar() {
   if (!zed.on || !$("zoneBar")) return;
@@ -849,10 +878,13 @@ function updateZoneBar() {
   $("zRadiusVal").textContent = z && z.shape === "circle" ? `${Math.round(z.r_m)} m` : "--";
   $("zSel").textContent = z ? `${z.type.toUpperCase()} ${z.id}` : "nothing selected";
   const counts = ["boost", "mud", "lapline", "item"].map((t) => zed.draft.filter((q) => q.type === t).length);
-  $("zHint").textContent = (zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line." : ZONE_HINT[zed.tool])
-    + ` ${counts[0]} boost, ${counts[1]} mud, ${counts[3]} item, ${counts[2] ? "lap line set" : "no lap line"}, `
+  $("zHint").textContent = zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line" : ZONE_HINT[zed.tool];
+  $("zHint").dataset.tool = zed.tool;
+  $("zCounts").textContent = `${counts[0]} boost · ${counts[1]} mud · ${counts[3]} item · ${counts[2] ? "lap line" : "no lap line"} · `
     + (zed.track && zed.track.points.length ? `track ${zed.track.points.length} pts${zed.track.closed ? " closed" : ""}` : "no track")
-    + `${zed.dirty ? " (unsaved)" : ""}.`;
+    + (zed.dirty ? " · UNSAVED" : "");
+  $("zoneBar").classList.toggle("tooltrack", zed.tool === "track");
+  $("zoneBar").classList.toggle("hassel", !!z);
 }
 function saveZones() {
   if (zonesDoc().version !== zed.baseVersion && !confirm("Zones were changed elsewhere since you started editing. Overwrite them?")) return;
@@ -876,12 +908,29 @@ function setupZoneEditor() {
 
 /* ---- leaderboard ---- */
 let lapsBuilt = false;
+function gapText(r) {                      // gap to the leader (pitcore Game.board: gap_laps / gap_s)
+  if (r.pos === 1) return "LEADER";
+  if (r.gap_laps > 0) return `+${r.gap_laps} lap${r.gap_laps > 1 ? "s" : ""}`;
+  return nul(r.gap_s) ? "--" : `+${r.gap_s.toFixed(1)}`;
+}
+function session() { return (S && S.fleet.race && S.fleet.race.session) || null; }
+function resultsTable(rows) {
+  return `<div class="results"><div class="reshead"><span>FINAL RESULTS</span></div><table class="laps res"><tr><th>P</th><th>Kart</th><th>Laps</th><th>Best</th><th>Time</th></tr>` +
+    rows.map((r) => {
+      const k = S.fleet.karts[r.kart - 1];
+      return `<tr${r.pos === 1 ? ' class="lead"' : ""}><td class="pos">${r.pos}</td><td><span class="lsw" style="background:${k.color}">${r.kart}</span></td>
+        <td class="n">${r.laps}</td><td class="n">${fmtLap(r.best_s)}</td><td class="n">${nul(r.total_s) ? "--" : fmtLap(r.total_s)}</td></tr>`;
+    }).join("") + `</table><button id="newRace" class="newrace">NEW RACE</button></div>`;
+}
 function lapsTable(board, compact) {
-  return `<table class="laps"><tr><th>P</th><th>Kart</th><th>Laps</th><th>Last</th><th>Best</th>${compact ? "" : "<th>Now</th>"}</tr>` +
+  const ses = session(), target = ses && ses.state === "running" ? ses.laps_target : 0;
+  const best = board.reduce((a, r) => (nul(r.best_s) ? a : Math.min(a, r.best_s)), Infinity);
+  return `<table class="laps"><tr><th>P</th><th>Kart</th><th>Laps</th><th>Last</th><th>Best</th><th>Gap</th>${target ? "<th>Left</th>" : ""}${compact ? "" : "<th>Now</th>"}</tr>` +
     board.map((r) => {
       const k = S.fleet.karts[r.kart - 1];
-      return `<tr><td class="pos">${r.pos}</td><td><span class="lsw" style="background:${k.color}">${r.kart}</span></td>
-        <td class="n">${r.laps}</td><td class="n">${fmtLap(r.last_s)}</td><td class="n">${fmtLap(r.best_s)}</td>${compact ? "" : `<td class="n">${fmtLap(r.current_s)}</td>`}</tr>`;
+      return `<tr${r.pos === 1 ? ' class="lead"' : ""}><td class="pos">${r.pos}</td><td><span class="lsw" style="background:${k.color}">${r.kart}</span></td>
+        <td class="n">${r.laps}</td><td class="n">${fmtLap(r.last_s)}</td><td class="n${r.best_s === best ? " fast" : ""}">${fmtLap(r.best_s)}</td>
+        <td class="n gap">${gapText(r)}</td>${target ? `<td class="n left">${ses.finished[String(r.kart)] ? "P" + ses.finished[String(r.kart)] : Math.max(0, target - r.laps)}</td>` : ""}${compact ? "" : `<td class="n">${fmtLap(r.current_s)}</td>`}</tr>`;
     }).join("") + "</table>";
 }
 function lapsStatus() {
@@ -901,11 +950,14 @@ function updateLaps() {
       holdButton($("lapsReset"), 1000, () => post("/laps/reset", {}).then((j) => { if (j && j.ok) toast("Laps reset"); }));
       lapsBuilt = true;
     }
-    const msg = lapsStatus(), board = S.fleet.laps || [];
-    const key = JSON.stringify([msg, board.map((r) => [r.kart, r.laps, r.last_s, r.best_s, MOBILE ? 0 : Math.floor(r.current_s || 0)])]);
+    const msg = lapsStatus(), board = S.fleet.laps || [], ses = session();
+    const fin = ses && ses.state === "finished" ? ses.results || [] : null;
+    const key = JSON.stringify([msg, fin, ses && ses.finished, ses && ses.laps_target, board.map((r) => [r.kart, r.laps, r.last_s, r.best_s, r.gap_laps, r.gap_s, MOBILE ? 0 : Math.floor(r.current_s || 0)])]);
     if (box.dataset.key !== key) {
       box.dataset.key = key;
-      $("lapsBody").innerHTML = (msg ? `<p class="note lapmsg">${esc(msg)}</p>` : "") + (board.length ? lapsTable(board, MOBILE) : "");
+      $("lapsBody").innerHTML = fin ? resultsTable(fin)       // final results replace the live board until NEW RACE
+        : (msg ? `<p class="note lapmsg">${esc(msg)}</p>` : "") + (ses && ses.laps_target ? `<p class="note lapmsg"><b>${ses.laps_target}-lap race</b> running</p>` : "")
+          + (board.length ? lapsTable(board, MOBILE) : "");
     }
   }
   // compact overlay on every map: top positions, collapsible per viewer
@@ -930,34 +982,53 @@ function updateLaps() {
   }
 }
 
+/* ------------------------------------------------- sound (static/sound.js, shared with the karts) */
+// Pit profile: quieter than the karts. Mute is per browser (localStorage); the first touch unlocks
+// audio and "TAP FOR SOUND" shows until then (the pit kiosk Chromium has no autoplay flag).
+let sndShown = null;
+function sndUi() {
+  const b = $("sndBtn"); if (!b) return;
+  const key = [GKSound.muted, GKSound.unlocked()].join();
+  if (key === sndShown) return;
+  sndShown = key;
+  // one chip: TAP FOR SOUND (amber) until the first touch unlocks audio, then SOUND / MUTED
+  const locked = !GKSound.muted && !GKSound.unlocked();
+  b.textContent = GKSound.muted ? "MUTED" : locked ? "TAP FOR SOUND" : "SOUND";
+  b.className = "chip sndchip " + (GKSound.muted ? "bad" : locked ? "warn" : "");
+}
+GKSound.init({ profile: "pit", volume: 0.8, onchange: sndUi });
+document.addEventListener("pointerdown", () => setTimeout(sndUi, 50), { capture: true });
+if ($("sndBtn")) $("sndBtn").addEventListener("click", () => { GKSound.ensure(); GKSound.setMuted(!GKSound.muted); });
+
 /* ------------------------------------------------- race start countdown (ZONES.md "Race start") */
 // GO time comes from the server as race.go_in_s (server clock), turned into a local target once per
-// race start so every pit page shows the same lights. 5 red lights go out one per second, GO green 2 s.
-let audioCtx = null;
-function audioUnlock() {
-  try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === "suspended") audioCtx.resume();
-  } catch (e) { audioCtx = null; }
+// race start so every pit page shows the same lights: a full-width strip at the top of the card area
+// (kiosk), above the cards (operator) or at the top of the scroll area (phone). One red light comes on
+// each second (same as the karts), a beep on the last three; at GO the lights turn green and the whole
+// page flashes green with GO! once.
+function raceLights(goInS, n = 5) {         // same as kart/server/static/app.js raceLights
+  if (nul(goInS)) return 0;
+  if (goInS <= 0) return n;
+  return Math.max(0, Math.min(n, n + 1 - Math.ceil(goInS - 1e-9)));
 }
-document.addEventListener("pointerdown", audioUnlock, { passive: true });
-function beep(freq, ms) {
-  if (!audioCtx || audioCtx.state !== "running") return;
-  try {
-    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime;
-    o.type = "square"; o.frequency.value = freq;
-    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
-    o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + ms / 1000 + 0.05);
-  } catch (e) { /* audio is a nicety */ }
+const cdn = { key: null, goAt: 0, lit: -1, went: false, sec: null };
+function cdBuild() {
+  let ov = $("countdown");
+  if (ov) return ov;
+  ov = document.createElement("div"); ov.id = "countdown"; ov.className = "countdown hidden";
+  ov.innerHTML = '<div class="cdlabel">RACE<br>START</div><div class="cdlights">' + [0, 1, 2, 3, 4].map(() => '<span class="cdl"></span>').join("")
+    + '</div><div class="cdtext"></div>';
+  const host = KIOSK ? document.querySelector(".main") : MOBILE ? document.querySelector(".mmain") : null;
+  if (host) host.prepend(ov); else $("cards").before(ov);
+  const go = document.createElement("div"); go.id = "goFlash"; go.className = "goflash hidden"; go.innerHTML = "<span>GO!</span>";
+  document.body.appendChild(go);
+  return ov;
 }
-const cdn = { key: null, goAt: 0, lit: -1, went: false };
 function updateCountdown() {
   const race = S.fleet.race || {};
-  let ov = $("countdown");
-  if (nul(race.go_in_s) || !race.go_wall) { if (ov) ov.classList.add("hidden"); return; }
+  if (nul(race.go_in_s) || !race.go_wall) { if ($("countdown")) $("countdown").classList.add("hidden"); cdn.key = null; return; }
   if (cdn.key !== race.go_wall) {           // new race start: fix the local target once
-    cdn.key = race.go_wall; cdn.goAt = Date.now() + race.go_in_s * 1000; cdn.lit = -1; cdn.went = race.go_in_s <= -2;
+    cdn.key = race.go_wall; cdn.goAt = Date.now() + race.go_in_s * 1000; cdn.lit = -1; cdn.sec = null; cdn.went = race.go_in_s <= -2;
   } else {                                   // drift correction only if way off (tab slept etc.)
     const t = Date.now() + race.go_in_s * 1000;
     if (Math.abs(t - cdn.goAt) > 400) cdn.goAt = t;
@@ -966,27 +1037,28 @@ function updateCountdown() {
 }
 function tickCountdown() {
   if (!cdn.key) return;
-  let ov = $("countdown");
+  const ov = cdBuild();
   const r = (cdn.goAt - Date.now()) / 1000;
-  if (r <= -2) { if (ov) ov.classList.add("hidden"); return; }
-  if (!ov) {
-    ov = document.createElement("div"); ov.id = "countdown"; ov.className = "countdown hidden";
-    ov.innerHTML = '<div class="cdlights">' + [0, 1, 2, 3, 4].map(() => '<span class="cdl"></span>').join("") + '</div><div class="cdtext"></div>';
-    document.body.appendChild(ov);
-  }
+  if (r <= -2) { ov.classList.add("hidden"); return; }
   ov.classList.remove("hidden");
   const lights = ov.querySelectorAll(".cdl"), txt = ov.querySelector(".cdtext");
   if (r > 0) {
-    const lit = Math.min(5, Math.ceil(r));
+    const lit = raceLights(r), sec = Math.ceil(r);
     ov.classList.remove("go");
     lights.forEach((l, i) => l.classList.toggle("on", i < lit));
-    txt.textContent = r > 5 ? `GRID · GO in ${Math.ceil(r)} s` : "";
-    if (lit !== cdn.lit) { if (cdn.lit !== -1 || r <= 5.05) beep(r > 5 ? 440 : 660, 160); cdn.lit = lit; }
+    txt.textContent = `GO in ${sec}`;
+    if (cdn.lit !== -1 && lit > cdn.lit) GKSound.play(lit >= 3 ? "light" : "grid");
+    else if (cdn.sec !== null && sec !== cdn.sec && lit === 0) GKSound.play("grid");
+    cdn.lit = lit; cdn.sec = sec;
   } else {
     ov.classList.add("go");
     lights.forEach((l) => l.classList.remove("on"));
-    txt.textContent = "GO";
-    if (!cdn.went) { cdn.went = true; beep(1320, 600); }
+    txt.textContent = "GO!";
+    if (!cdn.went) {
+      cdn.went = true; GKSound.play("go");
+      const g = $("goFlash"); g.classList.remove("hidden", "run"); void g.offsetWidth; g.classList.add("run");
+      setTimeout(() => g.classList.add("hidden"), 1300);
+    }
   }
 }
 setInterval(tickCountdown, 50);
@@ -1053,6 +1125,7 @@ function render() {
   updateSheet();
   updateZoneBar();
   updateCountdown();
+  sndUi();
 }
 
 document.addEventListener("click", (e) => {
@@ -1080,6 +1153,8 @@ document.addEventListener("click", (e) => {
   } else if (ds.racemode !== undefined) post("/api/race", { mode: Number(ds.racemode) });
   else if (ds.ztool) setZoneTool(ds.ztool);
   else if (ds.racesecs) { store.set("gk_racesecs", Number(ds.racesecs)); if (S) updateRace(); }
+  else if (ds.racelaps !== undefined) { store.set("gk_racelaps", Number(ds.racelaps)); if (S) updateRace(); }
+  else if (b.id === "newRace") post("/laps/reset", {}).then((j) => { if (j && j.ok) toast("Results cleared: ready for a new race"); });
   else if (b.id === "zoneEdit") { if (zed.on && zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(!zed.on); }
   else if (b.id === "zSave") saveZones();
   else if (b.id === "tUndo" || b.id === "tClose" || b.id === "tClear") {
@@ -1129,7 +1204,7 @@ function watchdog() {
 
 buildCards();
 setupMapInput();
-holdButton($("stopAll"), 1000, () => sendCmd("stop", 255));
+holdButton($("stopAll"), 1000, () => { GKSound.play("stop"); sendCmd("stop", 255); });
 holdButton($("slowAll"), 1000, () => sendCmd("slow", 255, 5));
 holdButton($("startAll"), 1000, () => sendCmd("start", 255));
 if ($("boostAll")) holdButton($("boostAll"), 1000, () => sendCmd("boost", 255, 100));

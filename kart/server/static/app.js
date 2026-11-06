@@ -14,7 +14,7 @@ const MODES = ["ECO", "NORMAL", "SPORT"];
 const RESULT_TEXT = { none: "no result", accepted: "accepted", applied: "applied", no_vesc: "NO VESC", rejected: "REJECTED", unknown: "not confirmed" };
 const CMD_TEXT = { mode: "mode", stop: "STOP", start: "START", ping: "ping", slow: "SLOW", status: "status" };
 const $ = (id) => document.getElementById(id);
-let S = null, lastMsg = 0;
+let S = null, lastMsg = 0, wasStopped = null;
 
 function nul(v) { return v === null || v === undefined || (typeof v === "number" && Number.isNaN(v)); }
 function ageText(a) {
@@ -26,6 +26,11 @@ function ageText(a) {
 function setChip(id, text, cls) { const e = $(id); e.textContent = text; e.className = "chip " + (cls || ""); }
 function show(id, on) { $(id).classList.toggle("hidden", !on); }
 function cfg(k, d) { return S && S.config && !nul(S.config[k]) ? S.config[k] : d; }
+/* pit chip colour from how well the kart hears the pit (base_rssi, dBm): > -90 green, > -105 amber, else red */
+function pitSignalClass(rssi) {
+  if (nul(rssi)) return "";
+  return rssi > -90 ? "ok" : rssi > -105 ? "warn" : "bad";
+}
 
 /* ------------------------------------------------------------ dashboard */
 function render() {
@@ -46,6 +51,8 @@ function render() {
 
   // STOPPED (authoritative telemetry flag) and SLOW (inferred from command echoes)
   show("stopBanner", st.stopped === true);
+  if (st.stopped === true && fresh && wasStopped === false) Snd.play("stop");   // pit STOP: firm low double tone
+  wasStopped = fresh ? st.stopped === true : wasStopped;
   $("stopBanner").textContent = fresh ? "STOPPED" : "STOPPED (last known)";
   const slow = S.slow || {};
   show("slowBanner", slow.active === true);
@@ -59,7 +66,7 @@ function render() {
   const id = me.heltec_id !== null ? me.heltec_id : me.configured_id;
   setChip("kartChip", `KART ${nul(id) ? "?" : id}${me.id_mismatch ? "?" : ""}`, "id" + (me.id_mismatch ? " bad" : ""));
   const pl = S.pit_link || {};
-  if (pl.state === "ok") setChip("pitChip", `PIT ${pl.rssi}`, "ok");
+  if (pl.state === "ok") setChip("pitChip", `PIT ${pl.rssi}`, pitSignalClass(pl.rssi));
   else if (pl.state === "lost") setChip("pitChip", "NO PIT", "warn");
   else setChip("pitChip", "PIT ?", "");
   if (!fresh) setChip("vescChip", "VESC ?", "");
@@ -139,6 +146,8 @@ function render() {
 
   renderGame(game, fresh, st);
   renderRace((game && game.race) || {});
+  sndConfig(); sndUi(); soundTest(S.sound_test);
+  show("sndTest", !!dm.active);
   drawMap();
 }
 
@@ -195,14 +204,19 @@ function renderGame(game, fresh, st) {
   const on = game.on === true;
   show("lapPanel", on);
   show("gameChip", !on);
+  show("lapStrip", on);
   if (!on) $("gameChip").textContent = "GAME OFF";
   else {
     const lap = game.lap || {};
+    const finished = !!(game.race && game.race.finished);
     $("lapPanel").classList.toggle("idle", !lap.running);
-    $("lapNum").textContent = lap.running ? String(lap.count + 1) : "-";
-    $("lapCur").textContent = lap.running ? lapTime(lap.current_s) : "CROSS THE LINE";
+    $("lapNum").textContent = lap.running ? String(lap.count + 1) : finished ? String(lap.count) : "-";
+    $("lapCur").textContent = lap.running ? lapTime(lap.current_s) : finished ? "FINISHED" : "CROSS THE LINE";
     $("lapLast").textContent = lapTime(lap.last_s);
     $("lapBest").textContent = lapTime(lap.best_s);
+    $("lsLast").textContent = lapTime(lap.last_s);
+    $("lsBest").textContent = lapTime(lap.best_s);
+    $("lsBest").classList.toggle("best", !nul(lap.best_s));
   }
   gameEvents(game);
 }
@@ -217,39 +231,61 @@ function gameEvents(game) {
   fresh.forEach((e) => {
     if (e.ev === "item") itemRoulette(e.item);
     else if (e.ev === "boost" && itemZones.has(e.zone)) { /* shown by the roulette */ }
-    else if (e.ev === "boost") { flash("BOOST!", "boost"); sound("boost"); }
-    else if (e.ev === "mud") { flash("MUD", "mud"); sound("mud"); }
-    else if (e.ev === "lap") { flash(`LAP ${e.lap}  ${lapTime(e.lap_s)}${e.best ? "  BEST" : ""}`, "lap"); sound(e.best ? "best" : "lap"); }
-    else if (e.ev === "lap_start") sound("go");
+    else if (e.ev === "boost") { flash("BOOST!", "boost"); Snd.play("boost"); }
+    else if (e.ev === "mud") { flash("MUD", "mud"); Snd.play("mud"); }
+    else if (e.ev === "lap") { flash(`LAP ${e.lap}  ${lapTime(e.lap_s)}${e.best ? "  BEST" : ""}`, "lap", e.best ? "fbest" : ""); Snd.play(e.best ? "best" : "lap"); }
+    else if (e.ev === "lap_start") Snd.play("lap");
   });
   lastEvSeq = top;
 }
-/* item box roulette: ~1.2 s of cycling icons, then the result (the command went out at entry) */
-const ITEM_GLYPH = { boost: "\u00bb", super: "\u2605", mud: "\u25cf", empty: "\u2715" };
+/* item box roulette: ~1.2 s of cycling icons (each pops in with a tick), then the result
+   (the command already went out at entry) */
+const ITEM_SVG = {
+  boost: '<svg viewBox="0 0 100 100"><g fill="none" stroke="#000" stroke-width="20" stroke-linejoin="miter"><path d="M18 50 L50 22 L82 50"/><path d="M18 76 L50 48 L82 76"/></g>'
+    + '<g fill="none" stroke="currentColor" stroke-width="11" stroke-linejoin="miter"><path d="M18 50 L50 22 L82 50"/><path d="M18 76 L50 48 L82 76"/></g></svg>',
+  super: '<svg viewBox="0 0 100 100"><path d="M50 4 L62 37 L97 38 L69 59 L79 93 L50 73 L21 93 L31 59 L3 38 L38 37 Z" fill="currentColor" stroke="#000" stroke-width="6" stroke-linejoin="round"/></svg>',
+  mud: '<svg viewBox="0 0 100 100"><g fill="currentColor" stroke="#000" stroke-width="5" stroke-linejoin="round">'
+    + '<path d="M50 28 C64 24 68 40 80 42 C93 45 92 62 80 65 C72 67 76 82 61 79 C51 77 47 88 35 81 C23 74 31 64 19 60 C7 55 12 41 25 42 C35 43 37 31 50 28 Z"/>'
+    + '<circle cx="84" cy="22" r="7"/><circle cx="16" cy="84" r="6"/><circle cx="20" cy="24" r="4.5"/></g></svg>',
+  empty: '<svg viewBox="0 0 100 100"><g stroke-linecap="square"><path d="M22 22 L78 78 M78 22 L22 78" stroke="#000" stroke-width="24"/>'
+    + '<path d="M22 22 L78 78 M78 22 L22 78" stroke="currentColor" stroke-width="13"/></g></svg>',
+};
+const ITEM_COLOR = { boost: "#ffb000", super: "#ffd400", mud: "#c58a4e", empty: "#d0d0d0" };
 const ITEM_NAME = { boost: "BOOST", super: "SUPER!", mud: "MUD", empty: "EMPTY" };
 let itemTimer = null;
+function itemGlyph(k, color) {
+  const g = $("itemGlyph");
+  g.innerHTML = ITEM_SVG[k] || "?";
+  g.style.color = color || "";
+  g.classList.remove("pop"); void g.offsetWidth; g.classList.add("pop");
+}
 function itemRoulette(result) {
   const box = $("itemBox"), order = ["boost", "mud", "super", "empty"];
-  clearInterval(itemTimer);
+  clearInterval(itemTimer); clearTimeout(itemTimer);
   let i = 0;
   const t0 = performance.now();
   box.className = "itembox"; $("itemName").textContent = "";
+  Snd.play("roulette");                        // accelerating ticks for the whole spin
   itemTimer = setInterval(() => {
     if (performance.now() - t0 < 1200) {
       const k = order[i++ % order.length];
-      $("itemGlyph").textContent = ITEM_GLYPH[k]; sound("tick");
+      itemGlyph(k, ITEM_COLOR[k]);
       return;
     }
     clearInterval(itemTimer);
-    box.className = "itembox r-" + result;
-    $("itemGlyph").textContent = ITEM_GLYPH[result] || "?";
+    box.className = "itembox done r-" + result;
+    itemGlyph(result, { mud: "#e2b07a", empty: "#bbb", super: "#ff2a1a", boost: "#fff" }[result] || "#fff");
     $("itemName").textContent = ITEM_NAME[result] || result;
-    if (result === "super") { flash("\u2605", "star"); sound("super"); }
-    else if (result === "boost") { flash("BOOST!", "boost"); sound("boost"); }
-    else if (result === "mud") { flash("MUD", "mud"); sound("mud"); }
-    else sound("empty");
+    if (result === "empty") Snd.play("empty");
+    else {
+      Snd.play("item");                        // bright two-note chime, then the item's own sound
+      setTimeout(() => Snd.play(result), 260);
+      if (result === "super") flash("\u2605", "star");
+      else if (result === "boost") flash("BOOST!", "boost");
+      else if (result === "mud") flash("MUD", "mud");
+    }
     itemTimer = setTimeout(() => { box.className = "itembox hidden"; }, 1500);
-  }, 80);
+  }, 90);
 }
 
 /* race start: lights from the countdown line's GO instant (server: arrival + go_in_ms) */
@@ -258,6 +294,7 @@ function raceLights(goInS, n = 5) {         // mirrors kartcore.race_lights
   if (goInS <= 0) return n;
   return Math.max(0, Math.min(n, n + 1 - Math.ceil(goInS - 1e-9)));
 }
+const RACE_GO_HOLD_MS = 1000, RACE_FADE_MS = 500;     // GO! full screen, then a 0.5 s fade back to the HUD
 const raceUi = { goAt: null, lit: 0, goShownAt: null, active: false };
 function renderRace(race) {
   const now = performance.now();
@@ -271,77 +308,120 @@ function renderRace(race) {
     raceUi.active = true; raceUi.goAt = now - race.go_age_s * 1000; raceUi.lit = 5; raceUi.goShownAt = null;
     requestAnimationFrame(raceTick);           // page loaded right at GO
   }
-  if (race.hold === false && race.how === "stop" && raceUi.active) { raceUi.active = false; show("raceOv", false); }
+  if (race.hold === false && race.how === "stop" && raceUi.active) raceEnd();
+  renderFinish(race);
+}
+
+/* race finish (pit STOP RACE or the race length reached): checkered takeover for 6 s, then a
+   0.5 s fade to the HUD and a small FINISHED chip until the next countdown */
+const FINISH_SHOW_MS = 6000;
+const finUi = { shown: false, t0: 0, timer: null };
+function finishText(race) {
+  const p = race.position || 0, fl = race.finish_lap || {};
+  return { pos: p > 0 ? "P" + p : "", stats: `${nul(fl.laps) ? "-" : fl.laps} LAP${fl.laps === 1 ? "" : "S"}  ·  BEST <b>${lapTime(fl.best_s)}</b>` };
+}
+function renderFinish(race) {
+  const fin = race.finished === true;
+  show("finChip", fin && !race.hold);
+  if (fin) $("finChip").textContent = race.position > 0 ? `FINISHED P${race.position}` : "FINISHED";
+  if (!fin) { finUi.shown = false; if (!$("finishOv").classList.contains("hidden")) $("finishOv").className = "finishov hidden"; return; }
+  if (finUi.shown || nul(race.finish_age_s) || race.finish_age_s * 1000 > FINISH_SHOW_MS) return;
+  finUi.shown = true;                               // once per finish (a reload within 6 s shows the rest)
+  const ov = $("finishOv"), t = finishText(race);
+  $("finPos").textContent = t.pos;
+  $("finStats").innerHTML = t.stats;
+  ov.className = "finishov" + (t.pos ? "" : " nopos");
+  if (race.finish_age_s < 1) Snd.play("finish");
+  const left = FINISH_SHOW_MS - race.finish_age_s * 1000;
+  clearTimeout(finUi.timer);
+  finUi.timer = setTimeout(() => { ov.classList.add("fade"); finUi.timer = setTimeout(() => { ov.className = "finishov hidden"; }, 500); }, left);
+}
+function raceEnd() {
+  raceUi.active = false; raceUi.goAt = null;
+  const ov = $("raceOv");
+  ov.className = "raceov hidden";
+  document.body.classList.remove("racing");
 }
 function raceTick() {
   if (!raceUi.active) return;
   const ov = $("raceOv"), now = performance.now(), rem = (raceUi.goAt - now) / 1000;
   ov.classList.remove("hidden");
-  const lights = ov.querySelector(".lights");
+  document.body.classList.add("racing");
   if (rem > 0) {
     const lit = raceLights(rem);
-    if (lit > raceUi.lit) sound("light");
-    raceUi.lit = lit;
+    // three beeps on the last three lights, a soft idle tick each second before that (grid hold)
+    if (lit > raceUi.lit) Snd.play(lit >= 3 ? "light" : "grid");
+    else if (lit === 0 && Math.ceil(rem) !== raceUi.sec) Snd.play("grid");
+    raceUi.lit = lit; raceUi.sec = Math.ceil(rem);
     ov.querySelectorAll(".lights i").forEach((el, i) => el.classList.toggle("on", i < lit));
-    lights.classList.remove("go"); show("raceGo", false); ov.classList.remove("fade");
+    ov.classList.remove("go", "fade"); show("raceGo", false);
     $("raceMsg").textContent = `GO in ${Math.ceil(rem)}`;
   } else {
-    if (raceUi.goShownAt === null) { raceUi.goShownAt = now; sound("racego"); }
-    lights.classList.add("go"); ov.querySelectorAll(".lights i").forEach((el) => el.classList.remove("on"));
-    show("raceGo", true); $("raceMsg").textContent = "";
-    if (now - raceUi.goShownAt > 1000) ov.classList.add("fade");
-    if (now - raceUi.goShownAt > 1600) { raceUi.active = false; ov.classList.add("hidden"); ov.classList.remove("fade"); return; }
+    if (raceUi.goShownAt === null) { raceUi.goShownAt = now; Snd.play("go"); show("raceGo", true); }
+    ov.classList.add("go"); $("raceMsg").textContent = "";
+    if (now - raceUi.goShownAt > RACE_GO_HOLD_MS) ov.classList.add("fade");
+    if (now - raceUi.goShownAt > RACE_GO_HOLD_MS + RACE_FADE_MS) { raceEnd(); return; }
   }
   requestAnimationFrame(raceTick);
 }
 
 let flashTimer = null;
-function flash(text, cls) {
+function flash(text, cls, extra) {
   const f = $("flash");
   f.className = "flash hidden"; void f.offsetWidth;     // restart the animation
   $("flashText").textContent = text;
-  f.className = "flash f" + cls;
+  f.className = "flash f" + cls + (extra ? " " + extra : "");
   clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => { f.className = "flash hidden"; }, cls === "lap" || cls === "star" ? 1300 : 800);
+  flashTimer = setTimeout(() => { f.className = "flash hidden"; }, cls === "lap" || cls === "star" ? 1300 : 850);
 }
 
-/* synthesized sounds (no audio files). The kiosk runs Chromium with
-   --autoplay-policy=no-user-gesture-required; elsewhere audio starts after the first touch. */
-let actx = null;
-function audio() {
-  if (!cfg("sound", true)) return null;
-  try {
-    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === "suspended") actx.resume();
-  } catch (e) { return null; }
-  return actx;
+/* ---------------------------------------------------------------- sound
+   All sounds come from the shared GKSound helper (static/sound.js, same file on the pit). The kart
+   kiosk runs Chromium with --autoplay-policy=no-user-gesture-required so audio runs at once; anywhere
+   else the first touch unlocks it and "TAP TO ENABLE SOUND" shows until then. Mute is remembered per
+   display; "sound": false in config.json silences it; "sound_volume" 0-1 (default 0.8) is the master. */
+const Snd = GKSound;
+let sndCfgKey = null;
+function sndConfig() {
+  const key = [cfg("sound", true), cfg("sound_volume", 0.8)].join();
+  if (key === sndCfgKey) return;
+  sndCfgKey = key;
+  GKSound.init({ enabled: cfg("sound", true) !== false, volume: cfg("sound_volume", 0.8), profile: "kart", onchange: () => sndUi() });
 }
-window.addEventListener("pointerdown", () => { if (cfg("sound", true)) audio(); }, { capture: true });
-function tone(ctx, t0, dur, type, f0, f1, vol) {
-  const o = ctx.createOscillator(), g = ctx.createGain();
-  o.type = type;
-  o.frequency.setValueAtTime(f0, t0);
-  if (f1) o.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
-  g.gain.setValueAtTime(0.0001, t0);
-  g.gain.exponentialRampToValueAtTime(vol, t0 + 0.02);
-  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-  o.connect(g); g.connect(ctx.destination);
-  o.start(t0); o.stop(t0 + dur + 0.05);
+const SND_ICON = (muted) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round">'
+  + '<path d="M3 9h4l5-4v14l-5-4H3z" fill="currentColor"/>'
+  + (muted ? '<path d="M16 9l5 6M21 9l-5 6" stroke-linecap="round"/>' : '<path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke-linecap="round"/>')
+  + "</svg>";
+let sndShown = null;
+function sndUi() {
+  const on = Snd.enabled;
+  const key = [on, Snd.muted, Snd.unlocked()].join();
+  if (key === sndShown) return;
+  sndShown = key;
+  const b = $("sndBtn");
+  b.classList.toggle("hidden", !on);
+  b.classList.toggle("muted", Snd.muted);
+  b.innerHTML = SND_ICON(Snd.muted);
+  show("sndHint", on && !Snd.muted && !Snd.unlocked());
 }
-function sound(kind) {
-  const ctx = audio(); if (!ctx || ctx.state !== "running") return;
-  const t = ctx.currentTime + 0.01;
-  if (kind === "boost") { tone(ctx, t, 0.55, "sawtooth", 180, 900, 0.22); tone(ctx, t + 0.05, 0.5, "square", 360, 1500, 0.08); tone(ctx, t + 0.55, 0.25, "square", 1320, 0, 0.12); }
-  else if (kind === "mud") { tone(ctx, t, 0.45, "square", 140, 60, 0.2); tone(ctx, t + 0.12, 0.35, "triangle", 90, 50, 0.25); }
-  else if (kind === "lap") { tone(ctx, t, 0.14, "square", 880, 0, 0.14); tone(ctx, t + 0.18, 0.3, "square", 1320, 0, 0.14); }
-  else if (kind === "best") { [880, 1109, 1319, 1760].forEach((f, i) => tone(ctx, t + i * 0.13, 0.2, "square", f, 0, 0.13)); }
-  else if (kind === "go") tone(ctx, t, 0.25, "square", 1046, 0, 0.12);
-  else if (kind === "light") tone(ctx, t, 0.22, "square", 440, 0, 0.16);
-  else if (kind === "racego") { tone(ctx, t, 0.7, "square", 880, 0, 0.18); tone(ctx, t, 0.7, "sawtooth", 1760, 0, 0.05); }
-  else if (kind === "tick") tone(ctx, t, 0.04, "square", 1500, 0, 0.05);
-  else if (kind === "super") { [523, 659, 784, 1046, 1318, 1568].forEach((f, i) => tone(ctx, t + i * 0.07, 0.12, "square", f, 0, 0.12)); tone(ctx, t + 0.42, 0.6, "sawtooth", 300, 1400, 0.14); }
-  else if (kind === "empty") tone(ctx, t, 0.3, "triangle", 300, 150, 0.15);
+window.addEventListener("pointerdown", () => setTimeout(sndUi, 50), { capture: true });
+$("sndBtn").addEventListener("click", () => { Snd.ensure(); Snd.setMuted(!Snd.muted); });
+/* sound test: GET /api/sound-test (TEST SOUND shows in demo mode) -> every open driver page plays
+   the three start beeps, GO, then a boost, even when muted (it is an explicit test) */
+let soundTestSeq = null;
+function soundTest(st) {
+  if (!st) return;
+  if (soundTestSeq === null || st.seq < soundTestSeq) { soundTestSeq = st.seq; return; }
+  if (st.seq === soundTestSeq) return;
+  soundTestSeq = st.seq;
+  if (nul(st.age_s) || st.age_s > 5) return;
+  const was = Snd.muted;
+  if (was) Snd.setMuted(false);
+  ["light", "light", "light", "go"].forEach((k, i) => setTimeout(() => Snd.play(k), i * 600));
+  setTimeout(() => { Snd.play("boost"); if (was) setTimeout(() => Snd.setMuted(true), 1200); }, 3200);
+  $("cmdNote").textContent = Snd.unlocked() ? "sound test: playing" : "sound test: audio is locked (tap the screen once)";
 }
+$("sndTest").addEventListener("click", () => fetch("/api/sound-test").catch(() => {}));
 
 /* ---------------------------------------------- game: zones on the map */
 function drawZones(ctx, en, px) {
@@ -435,13 +515,13 @@ function drawTrack(ctx, en, px, mePos, headingUp) {
     for (let i = k + 1; i < seq.length && acc < 80; i++) { acc += Math.hypot(seq[i][0] - seq[i - 1][0], seq[i][1] - seq[i - 1][1]); ahead.push(seq[i]); }
     if (ahead.length > 1) { pathOf(ahead, false); ctx.strokeStyle = "rgba(0,240,255,.75)"; ctx.lineWidth = w; ctx.stroke(); }
   }
-  const cs = Math.max(4, Math.min(12, w * 0.35));
+  const cs = Math.max(5, Math.min(15, w * 0.42));     // direction chevrons, a little larger than the band edge
   trackChevrons(t.points, t.closed, en, 15).forEach(([e, n, hd]) => {
     const q = px([e, n]);
     ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd - view.rot);
     ctx.beginPath(); ctx.moveTo(-cs, cs * 0.6); ctx.lineTo(0, -cs * 0.5); ctx.lineTo(cs, cs * 0.6);
-    ctx.strokeStyle = "rgba(0,40,60,.9)"; ctx.lineWidth = 5; ctx.stroke();
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.strokeStyle = "rgba(0,40,60,.9)"; ctx.lineWidth = 6; ctx.stroke();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
     ctx.restore();
   });
   ctx.restore();
@@ -588,7 +668,7 @@ function drawMap() {
   if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = "#d9d9d4"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#33363a"; ctx.fillRect(0, 0, W, H);
   const msg = $("mapMsg");
   const en = projection();
   const pkg = (S.map && S.map.package) || null;
@@ -672,13 +752,16 @@ function drawMap() {
     const p = px(mePos);
     const hd = nul(mf.heading) ? null : mf.heading * Math.PI / 180 - view.rot;
     ctx.save(); ctx.translate(p[0], p[1]);
-    if (hd !== null && (mf.gps_kph || 0) > 1) {
+    if (hd !== null && (mf.gps_kph || 0) > 1) {        // clear arrow: white outline, kart colour, drop shadow
       ctx.rotate(hd);
-      ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(19, 20); ctx.lineTo(0, 10); ctx.lineTo(-19, 20); ctx.closePath();
+      ctx.beginPath(); ctx.moveTo(0, -34); ctx.lineTo(22, 22); ctx.lineTo(0, 11); ctx.lineTo(-22, 22); ctx.closePath();
     } else { ctx.beginPath(); ctx.arc(0, 0, 18, 0, 2 * Math.PI); }
-    ctx.lineWidth = 8; ctx.strokeStyle = "#fff"; ctx.stroke();
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.65)"; ctx.shadowBlur = 10; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 4;
+    ctx.lineJoin = "round"; ctx.lineWidth = 9; ctx.strokeStyle = "#f2f2f2"; ctx.stroke();
+    ctx.restore();
     ctx.fillStyle = meGood ? me.color : "#999"; ctx.fill();
-    ctx.lineWidth = 3; ctx.strokeStyle = "#000"; if (!meGood) ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
+    ctx.lineJoin = "round"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; if (!meGood) ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
     ctx.restore();
     if (!meFresh) label(ctx, `last fix ${ageText(me.gps.fix_age_s)}`, p[0] + 24, p[1] - 14);
     else if (!meGood) label(ctx, mf.quality === "outlier" ? "GPS jump ignored" : "weak GPS: zones paused", p[0] + 24, p[1] - 14);
@@ -689,13 +772,18 @@ function drawMap() {
 
   // scale bar + north arrow
   const step = niceStep(90 / view.scale), len = step * view.scale;
-  ctx.fillStyle = "rgba(255,255,255,.9)"; ctx.fillRect(6, H - 46, len + 70, 26);
-  ctx.strokeStyle = "#000"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(12, H - 28); ctx.lineTo(12 + len, H - 28); ctx.stroke();
-  ctx.fillStyle = "#000"; ctx.font = "bold 14px sans-serif"; ctx.fillText(`${step} m`, 18 + len, H - 24);
-  ctx.save(); ctx.translate(W - 120, H - 50); ctx.rotate(-view.rot);
-  ctx.fillStyle = "rgba(255,255,255,.9)"; ctx.beginPath(); ctx.arc(0, 0, 20, 0, 2 * Math.PI); ctx.fill();
-  ctx.fillStyle = "#000"; ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(8, 6); ctx.lineTo(-8, 6); ctx.closePath(); ctx.fill();
-  ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText("N", 0, 17); ctx.textAlign = "left";
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(6, H - 46, len + 70, 26);
+  ctx.strokeStyle = "#e6e6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(12, H - 28); ctx.lineTo(12 + len, H - 28); ctx.stroke();
+  ctx.fillStyle = "#e6e6e6"; ctx.font = "bold 14px sans-serif"; ctx.fillText(`${step} m`, 18 + len, H - 24);
+  // north compass: top-right, under the map buttons, 1.5x the old size (r 30)
+  const ctl = document.querySelector(".mapctl");
+  const ccx = ctl ? ctl.offsetLeft + ctl.offsetWidth / 2 : W - 41, ccy = ctl ? ctl.offsetTop + ctl.offsetHeight + 40 : 240;
+  ctx.save(); ctx.translate(ccx, ccy); ctx.rotate(-view.rot);
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 0, 30, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#ff3030"; ctx.beginPath(); ctx.moveTo(0, -25); ctx.lineTo(10, 2); ctx.lineTo(-10, 2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#e6e6e6"; ctx.beginPath(); ctx.moveTo(0, 13); ctx.lineTo(7, 2); ctx.lineTo(-7, 2); ctx.closePath(); ctx.fill();
+  ctx.font = "900 15px sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.fillText("N", 0, 27); ctx.textAlign = "left";
   ctx.restore();
   $("mapNote").textContent = mapNoteText();
 }
@@ -747,6 +835,13 @@ function fitAll(en, pkg, W, H) {
     k.trail.forEach((p) => pts.push(en(p[0], p[1])));
   });
   if (pkg && pkg.course) pkg.course.forEach((p) => pts.push(en(p[0], p[1])));
+  const zd = S.map && S.map.zones, trk = S.game && S.game.track;           // the course: zones + track route
+  if (zd && Array.isArray(zd.zones)) zd.zones.forEach((z) => {
+    if (z.shape === "circle" && !nul(z.lat)) pts.push(en(z.lat, z.lon));
+    else if (z.shape === "polygon" && Array.isArray(z.points)) z.points.forEach((p) => pts.push(en(p[0], p[1])));
+    else if (z.shape === "line" && z.a && z.b) pts.push(en(z.a[0], z.a[1]), en(z.b[0], z.b[1]));
+  });
+  if (trk && Array.isArray(trk.points)) trk.points.forEach((p) => pts.push(en(p[0], p[1])));
   if (pts.length < 2 && pkg && pkg.bounds) pts.push(en(pkg.bounds.north, pkg.bounds.west), en(pkg.bounds.south, pkg.bounds.east));
   if (!pts.length) pts.push([0, 0]);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
@@ -868,4 +963,5 @@ let lastAnim = 0;
   if (moving(S.self) || S.fleet.some(moving) || (userFollow && !view.follow) || view.slewing) drawMap();
 })(0);
 window.addEventListener("resize", requestDraw);
+sndConfig(); Snd.ensure(); sndUi();
 connect();
