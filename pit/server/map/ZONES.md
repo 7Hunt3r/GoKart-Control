@@ -54,3 +54,24 @@ Rules every implementation follows:
 Zone ids are short strings unique within the file; the editor generates them. Unknown `type`
 values are ignored by karts and shown greyed by the pit so an old kart build never misreads a new
 zone kind.
+
+## Race start (added 2026-11-06 evening)
+
+Command `race` (GK_CMD_RACE = 7, arg = seconds until GO, 1-30, default 5) to all karts. Each Heltec
+holds its kart at zero power at once (no brake) and releases at `issued_utc + arg` on the shared
+GPS/beacon clock, so every kart launches on the same instant; a kart without time releases `arg`
+seconds after receipt. The Heltec prints `{"t":"race","kart":N,"event":"countdown","go_in_ms":N,
+"secs":S,"go_utc":U}` on receipt and `{"t":"race","kart":N,"event":"go"}` at release; the kart display
+shows the countdown lights from these and resets its laps at GO. A pit STOP during the hold keeps the
+kart stopped (GO releases nothing until START); START releases early. The pit resets all lap timing
+when it sends `race`, and laps count from the first lap-line crossing after GO.
+
+## Item boxes (added 2026-11-06 evening)
+
+Zone `type: "item"` (circle or polygon, same sizes as boost). On entry the KART rolls a random item
+locally and applies it at once, showing a short roulette on the HUD: 45 % BOOST (`boost 5 1.0`),
+15 % SUPER (`boost 8 1.0`, star animation), 25 % MUD (`boost 3 0.5`), 15 % nothing ("empty box").
+Same cooldown/exit rules as boost pads (`cooldown_s`, default 15). The pit draws item boxes as a
+blue/white "?" box and never evaluates their outcome; the kart logs `{"kind":"game","event":"item",
+"item":"boost|super|mud|empty"}` to its session log. Items never raise the scale above 1.0 and are
+ignored while STOPPED, in grid hold, or with the game off.

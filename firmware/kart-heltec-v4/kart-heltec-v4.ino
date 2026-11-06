@@ -133,6 +133,9 @@ float    preStopScale = -1.0f;
 bool     slowActive = false; float slowErpm = 0; uint8_t slowMph = 0;
 // Timed scale override for the game zones (boost pad / mud): auto-reverts, cleared by STOP/START, never above 1.0.
 bool     ovActive = false; float ovScale = 1.0f; uint32_t ovUntilMs = 0;
+// Race start: grid hold at zero power until GO. GO is issued_utc + arg when the kart has GPS/beacon time (all
+// karts release together), else arg seconds after receipt. STOP keeps the kart stopped; START releases early.
+bool     raceHold = false; uint32_t raceGoMs = 0; uint32_t raceGoUnix = 0;
 // Limits as first read from this controller after link-up: everything we write echoes these
 // (not the capture constants), so each kart keeps its own configuration.
 VescActiveLimits origLimits; bool origValid = false;
@@ -242,7 +245,7 @@ static void fillTelemetry(GkTelemetry& t) {
 
 // ---------------------------------------------------------------- vesc writes
 static float scaleTarget() {
-  if (stopActive) return 0.0f;
+  if (stopActive || raceHold) return 0.0f;
   if (ovActive) return ovScale;
   if (modeReq != GK_MODE_UNKNOWN) return MODES[modeReq].currentMaxScale;
   return origValid ? origLimits.currentMaxScale : 1.0f;
@@ -283,6 +286,12 @@ static bool startWrite(float scale) {
 
 static void serviceWrites() {
   uint32_t now = millis();
+  if (raceHold && (int32_t)(now - raceGoMs) >= 0) {
+    raceHold = false;
+    Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"go\"}\n", kartId);
+    logf("race: GO");
+    if (!stopActive && vescUp() && origValid) startWrite(scaleTarget());
+  }
   if (ovActive && (int32_t)(now - ovUntilMs) >= 0) {
     ovActive = false; logf("boost over, back to %.2f", scaleTarget());
     if (!stopActive && vescUp() && origValid) startWrite(scaleTarget());
@@ -342,16 +351,31 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
       if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
       if (!vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
       if (!stopActive) preStopScale = origValid ? origLimits.currentMaxScale : -1.0f;
-      stopActive = true; modeConfirmed = false; ovActive = false;
+      stopActive = true; modeConfirmed = false; ovActive = false; raceHold = false;
       requestBrake();                                   // regen via the VESC script, if present
       rampIdx = 0; rampNextMs = millis();
       break;
     case GK_CMD_START: {
       if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      stopActive = false; slowActive = false; ovActive = false; rampIdx = -1;
+      stopActive = false; slowActive = false; ovActive = false; raceHold = false; rampIdx = -1;
       float s = scaleTarget();
       if (!origValid) { cmdResult = GK_RES_NO_VESC; break; }
       if (!startWrite(s)) cmdResult = GK_RES_NO_VESC;
+      break;
+    }
+    case GK_CMD_RACE: {                                    // arg = seconds until GO
+      if (arg < 1 || arg > 30) { cmdResult = GK_RES_REJECTED; break; }
+      uint32_t nowU = gpsUnix(); uint32_t goInMs;
+      if (issued && nowU && issued + arg > nowU) goInMs = (issued + arg - nowU) * 1000UL;   // shared clock: same instant on every kart
+      else if (issued && nowU) goInMs = 0;                                                 // arrived after GO: release now
+      else goInMs = (uint32_t)arg * 1000UL;
+      raceHold = true; raceGoMs = millis() + goInMs; raceGoUnix = issued ? issued + arg : 0; ovActive = false;
+      Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"countdown\",\"go_in_ms\":%lu,\"secs\":%u,\"go_utc\":%lu}\n", kartId, (unsigned long)goInMs, arg, (unsigned long)raceGoUnix);
+      logf("race: grid hold, GO in %lu ms", (unsigned long)goInMs);
+      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+      if (stopActive) break;                                 // already stopped: GO releases nothing until START
+      if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
+      if (!startWrite(0.0f)) cmdResult = GK_RES_NO_VESC;
       break;
     }
     case GK_CMD_BOOST: {                                   // arg = scale percent; duration from boostSecs (USB) or 5 s
@@ -694,6 +718,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "start")) handleCommand(0xFE, ++usbSeq, GK_CMD_START, 0, 0, 0);
   else if (!strcmp(line, "ping"))  handleCommand(0xFE, ++usbSeq, GK_CMD_PING, 0, 0, 0);
   else if (!strcmp(line, "slow"))  handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, arg ? atoi(arg) : 0, 0, 0);
+  else if (!strcmp(line, "race"))  handleCommand(0xFE, ++usbSeq, GK_CMD_RACE, arg ? atoi(arg) : 5, 0, 0);
   else if (!strcmp(line, "boost")) {                      // boost SECS SCALE   e.g. "boost 5 1.0" or "boost 4 0.5" (mud)
     int secs = 5; float sc = 1.0f;
     if (arg) { secs = atoi(arg); char* a2 = strchr(arg, ' '); if (a2) sc = atof(a2 + 1); }
@@ -725,7 +750,7 @@ static void usbCommand(char* line) {
 #endif
   else if (!strcmp(line, "gpsline") && arg) { gpsLineOn = !strcmp(arg, "on"); prefs.putBool("gpsline", gpsLineOn); logf("gps fix line %s", gpsLineOn ? "on" : "off"); }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -750,6 +775,7 @@ static void serviceOled() {
   snprintf(l, sizeof l, "K%u %s%s", kartId, ma != GK_MODE_UNKNOWN ? MODES[ma].name : (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].name : "----"), modeConfirmed ? "*" : "");
   oled.drawStr(0, 9, l);
   if (stopActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
+  else if (raceHold) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "GRID"); oled.setDrawColor(1); }
   else if (ovActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(96, 9, ovScale >= (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].currentMaxScale : 1.0f) ? "BOOST" : "MUD"); oled.setDrawColor(1); }
   else if (slowActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "SLOW"); oled.setDrawColor(1); }
   else if (!writesEnabled()) oled.drawStr(100, 9, "RO");

@@ -412,7 +412,7 @@ HISTORY = 40
 ECHOED = {"received", "accepted", "applied", "no_vesc", "rejected", "unknown"}
 FINAL = {"applied", "no_vesc", "rejected", "unknown", "no_ack", "offline",
          "superseded", "cancelled", "link_lost"}
-VALID_CMDS = {"mode", "stop", "start", "ping", "slow", "boost"}
+VALID_CMDS = {"mode", "stop", "start", "ping", "slow", "boost", "race"}
 BOOST_MIN_PCT, BOOST_MAX_PCT = 10, 100   # firmware GK_CMD_BOOST: scale percent, lasts 5 s
 
 
@@ -686,7 +686,7 @@ class Command:
         return {
             "id": self.id, "seq": self.seq, "cmd": self.cmd, "kart": self.kart, "arg": self.arg,
             "arg_name": (MODE_NAMES.get(self.arg) if self.cmd == "mode" else (f"{self.arg or 5} mph" if self.cmd == "slow"
-                         else (f"{self.arg}%" if self.cmd == "boost" else None))),
+                         else (f"{self.arg}%" if self.cmd == "boost" else (f"GO in {self.arg or 5} s" if self.cmd == "race" else None)))),
             "ttl": self.ttl, "source": self.source, "state": self.state,
             "created_wall": self.created_wall, "first_tx_wall": self.first_tx_wall,
             "tx_count": self.tx_count, "radio_sent": self.radio_sent,
@@ -747,6 +747,13 @@ class CommandManager:
                 raise CommandError("boost: scale percent must be 10-100")
             if not BOOST_MIN_PCT <= arg <= BOOST_MAX_PCT:
                 raise CommandError("boost: scale percent must be 10-100")
+        elif cmd == "race":
+            try:
+                arg = 5 if arg in (None, "") else int(arg)
+            except (TypeError, ValueError):
+                raise CommandError("race: seconds until GO must be 1-30")
+            if not 1 <= arg <= 30:
+                raise CommandError("race: seconds until GO must be 1-30")
         else:
             arg = None
         c = Command(None, cmd, kart, arg, self.ttl, source, now, wall)
