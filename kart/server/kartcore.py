@@ -245,6 +245,12 @@ class KartDisplay:
                     self._slow_set(False, None, wall, "Heltec booted recently, no SLOW since")
                 self.last_uptime = up
             self.slow_first_self = False
+            sm = msg.get("slow_mph")
+            if isinstance(sm, int):          # firmware from 2026-11-06 reports SLOW in telemetry: no inference needed
+                if (sm > 0) != (self.slow.get("active") is True) or (sm > 0 and sm != self.slow.get("mph")):
+                    self._slow_set(sm > 0, sm or None, wall, "from Heltec telemetry (slow_mph)")
+                elif self.slow.get("basis") != "from Heltec telemetry (slow_mph)":
+                    self.slow["basis"] = "from Heltec telemetry (slow_mph)"
             self.me.ingest(msg, now, wall)
         elif t == "fleet":
             k = msg.get("kart")

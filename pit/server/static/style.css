@@ -58,6 +58,7 @@ button:disabled { opacity: .45; }
 .badge { font-size: 12px; font-weight: 800; padding: 2px 6px; border-radius: 4px; border: 2px solid; }
 .badge.stopped { background: var(--bad); color: #fff; border-color: var(--bad); }
 .badge.fault { background: var(--bad); color: #fff; border-color: var(--bad); }
+.badge.slow { background: #ff8c00; color: #000; border-color: #b36200; }
 .badge.unknown { background: #ffb000; color: #000; border-color: #b36b00; }
 .badge.grey { background: #ddd; color: #333; border-color: #999; }
 .badge.entered { background: var(--info); color: #fff; border-color: var(--info); }

@@ -16,6 +16,12 @@
 #define GK_MAX_KARTS       8
 #define GK_ADDR_BASE       0      // pit base station
 #define GK_ADDR_ALL        0xFF   // broadcast
+// A repeater re-sends a packet it heard with this bit set in the version byte. Receivers
+// treat it like the original (dedupe by src+seq); repeaters never relay a relayed packet.
+#define GK_HDR_RELAY_BIT   0x80
+// Relay timing: a repeater transmits a copy GK_RELAY_DELAY_MS after the end of reception.
+// A kart's 22 ms packet plus 25 ms plus a 22 ms copy fits inside its 50 ms slot.
+#define GK_RELAY_DELAY_MS  25
 
 // ---- Radio parameters (identical on both ends) ----------------------------
 // US ISM band. These match Colin's installed Heltec bench transmitter
@@ -136,6 +142,7 @@ struct GkTelemetry {
   int8_t   base_rssi;     // RSSI of the last base packet heard, dBm (0 = none)
   uint8_t  gps_age_s;     // seconds since last valid fix (255 = never)
   uint16_t scale_x1000;   // live l_current_max_scale read back from the VESC * 1000 (65535 = unknown)
+  uint8_t  slow_mph;      // SLOW cap in mph while active, 0 = no SLOW (added 2026-11-06; 46-byte packets lack it)
 };
 
 struct GkCommandMsg {
@@ -158,7 +165,8 @@ struct GkBaseInfo {       // pit beacon, once per second at GK_BEACON_PHASE_MS i
 #pragma pack(pop)
 
 static_assert(sizeof(GkHeader) == 6, "header size");
-static_assert(sizeof(GkTelemetry) == 46, "telemetry size changed; update airtime budget and host decoder");
+static_assert(sizeof(GkTelemetry) == 47, "telemetry size changed; update airtime budget and host decoder");
+#define GK_TELEMETRY_LEN_V0 46   // packets from firmware before slow_mph; still accepted, slow_mph reads as 0
 static_assert(sizeof(GkCommandMsg) == 14, "command size");
 static_assert(sizeof(GkBaseInfo) == 22, "base info size");
 
@@ -171,13 +179,20 @@ static inline void gkFillHeader(GkHeader& h, uint8_t type, uint8_t src, uint8_t 
 static inline uint8_t gkValidate(const uint8_t* buf, size_t len) {
   if (len < sizeof(GkHeader)) return 0;
   const GkHeader* h = (const GkHeader*)buf;
-  if (h->version != GK_PROTO_VERSION || h->fleet != GK_FLEET_ID) return 0;
+  if ((h->version & 0x7F) != GK_PROTO_VERSION || h->fleet != GK_FLEET_ID) return 0;
   switch (h->type) {
-    case GK_MSG_TELEMETRY: return len == sizeof(GkTelemetry) ? h->type : 0;
+    case GK_MSG_TELEMETRY: return (len == sizeof(GkTelemetry) || len == GK_TELEMETRY_LEN_V0) ? h->type : 0;
     case GK_MSG_COMMAND:   return len == sizeof(GkCommandMsg) ? h->type : 0;
     case GK_MSG_BASE_INFO: return len == sizeof(GkBaseInfo) ? h->type : 0;
   }
   return 0;
+}
+
+static inline bool gkIsRelayed(const GkHeader& h) { return (h.version & GK_HDR_RELAY_BIT) != 0; }
+
+// Copy a validated telemetry packet (46 or 47 bytes) into t; fields a short packet lacks read as 0.
+static inline void gkCopyTelemetry(GkTelemetry& t, const uint8_t* buf, size_t len) {
+  memset(&t, 0, sizeof t); memcpy(&t, buf, len < sizeof t ? len : sizeof t);
 }
 
 static inline bool gkAddressedToMe(const GkHeader& h, uint8_t me) {
@@ -204,14 +219,14 @@ static inline int gkTelemetryToJson(char* out, size_t n, const GkTelemetry& t, c
     "\"duty\":%.2f,\"esc_c\":%.1f,\"fault\":%u,\"mode_req\":%s,\"mode_actual\":%s,\"scale\":%s,"
     "\"stopped\":%s,\"vesc_link\":%s,\"mode_confirmed\":%s,\"pps\":%s,\"wifi\":%s,\"writes\":%s,"
     "\"last_cmd_seq\":%u,\"cmd_result\":%u,\"ah\":%.2f,\"uptime_s\":%u,\"base_rssi\":%d,"
-    "\"rssi\":%.0f,\"snr\":%.1f,\"rx_ms\":%lu}",
+    "\"slow_mph\":%u,\"rssi\":%.0f,\"snr\":%.1f,\"rx_ms\":%lu,\"relayed\":%s}",
     type, t.h.src, t.h.seq, lat, lon, gkBool(fix), t.gps_age_s, t.sats,
     t.gps_kph_x10 / 10.0, t.heading_x10 / 10.0, t.volts_x10 / 10.0, t.motor_a_x10 / 10.0, t.batt_a_x10 / 10.0, (long)t.erpm,
     t.duty_pct / 100.0, t.esc_temp_x10 / 10.0, t.fault, mreq, mact, scale,
     gkBool(t.flags & GK_FLAG_STOPPED), gkBool(t.flags & GK_FLAG_VESC_LINK), gkBool(t.flags & GK_FLAG_MODE_CONFIRMED),
     gkBool(t.flags & GK_FLAG_PPS), gkBool(t.flags & GK_FLAG_WIFI), gkBool(t.flags & GK_FLAG_WRITES_ENABLED),
     t.last_cmd_seq, t.cmd_result, t.ah_x100 / 100.0, t.uptime_s, t.base_rssi,
-    (double)rssi, (double)snr, (unsigned long)rxMs);
+    t.slow_mph, (double)rssi, (double)snr, (unsigned long)rxMs, gkBool(gkIsRelayed(t.h)));
 }
 
 // Unix time from a civil UTC date/time (for GPS). Returns 0 if the date is implausible.

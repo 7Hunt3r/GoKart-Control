@@ -42,7 +42,7 @@ volatile uint32_t loraIrqMicros = 0;
 void IRAM_ATTR onLoraIrq() { loraIrq = true; loraIrqMicros = micros(); }
 bool     radioOk = false;
 int      radioStatus = -999;
-uint32_t loraTx = 0, loraRx = 0, loraRxBad = 0;
+uint32_t loraTx = 0, loraRx = 0, loraRxBad = 0, relayRx = 0;
 uint8_t  txSeq = 0;
 
 // ---------------------------------------------------------------- gps
@@ -191,11 +191,13 @@ static void serviceLoraRx() {
   }
   uint8_t type = gkValidate(buf, len);
   if (!type) { loraRxBad++; return; }
-  loraRx++;
   const GkHeader* h = (const GkHeader*)buf;
+  if (h->src == GK_ADDR_BASE) return;                       // our own beacon/command coming back via a repeater
+  loraRx++;
+  if (gkIsRelayed(*h)) relayRx++;
   if (type == GK_MSG_TELEMETRY && h->src >= 1 && h->src <= GK_MAX_KARTS) {
-    memcpy(&fleet[h->src], buf, len); fleetMs[h->src] = millis(); fleetRssi[h->src] = rssi;
-    if (!ppsFreshB()) {
+    gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); fleetRssi[h->src] = rssi;
+    if (!ppsFreshB() && !gkIsRelayed(*h)) {
       // Kart slots start (k-1)*100 ms after the edge; a 2 Hz kart's second-round packet lands
       // 500 ms later, so ignore candidates that sit ~500 ms from the current estimate.
       uint32_t cand = loraIrqMicros - ((uint32_t)(h->src - 1) * GK_SLOT_MS + GK_TELE_AIRTIME_MS) * 1000UL;
@@ -328,10 +330,10 @@ static void serviceHost() {
     char wifi[24] = "null";
     if (WiFi.status() == WL_CONNECTED) snprintf(wifi, sizeof wifi, "\"%s\"", WiFi.localIP().toString().c_str());
     char benchAge[12] = "null"; if (benchMs) snprintf(benchAge, sizeof benchAge, "%lu", (unsigned long)((millis() - benchMs) / 1000));
-    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s,\"beacon_tx\":%lu,\"sync\":\"%s\"}\n",
+    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s,\"beacon_tx\":%lu,\"sync\":\"%s\",\"relay_rx\":%lu}\n",
                   FW_VERSION, radioOk ? "sx1262" : "none", (unsigned long)loraRx, (unsigned long)loraTx, (unsigned long)loraRxBad,
                   (unsigned long)(millis() / 1000), (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, wifi, kartsOnline(),
-                  (unsigned long)benchRx, benchAge, (unsigned long)beaconTx, ppsFreshB() ? "pps" : (edgeSetMs && millis() - edgeSetMs < 5000 ? "karts" : "free"));
+                  (unsigned long)benchRx, benchAge, (unsigned long)beaconTx, ppsFreshB() ? "pps" : (edgeSetMs && millis() - edgeSetMs < 5000 ? "karts" : "free"), (unsigned long)relayRx);
   }
 }
 

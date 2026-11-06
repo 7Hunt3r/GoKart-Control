@@ -205,7 +205,8 @@ function updateCards() {
     c.f.fault.className = fi.cls;
     c.f.gps.textContent = (g.fix_now === true ? `${fmt(g.sats_now)} sats` : (g.fix_now === false ? "NO FIX" : "fix --"))
       + (g.last_fix && !g.fix_fresh ? ` (last ${ageText(g.fix_age_s)})` : "");
-    const loss = k.loss_pct_1m === null || k.loss_pct_1m === undefined ? "" : ` · loss ${k.loss_pct_1m}%`;
+    const loss = (k.loss_pct_1m === null || k.loss_pct_1m === undefined ? "" : ` · loss ${k.loss_pct_1m}%`)
+      + (k.via_repeater ? " · via repeater" : "");
     if (MOBILE) {   // rssi/snr = how the pit hears the kart; base_rssi = how the kart hears the pit
       c.f.rssi.textContent = `pit hears ${fmt(st.rssi, 0)}/${fmt(st.snr, 1, " dB")}${loss}`
         + (nul(st.base_rssi) ? "" : ` · kart hears ${fmt(st.base_rssi, 0)}`);
@@ -216,6 +217,7 @@ function updateCards() {
     c.f.out.innerHTML = outcomeText(k.id) || (MOBILE ? '<span class="note">none this session</span>' : "");
     const b = [];
     if (st.stopped === true) b.push('<span class="badge stopped">STOPPED</span>');
+    if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph} MPH</span>`);
     if (fi.bad) b.push('<span class="badge fault">FAULT</span>');
     if (st.vesc_link === false) b.push('<span class="badge unknown">VESC LINK DOWN</span>');
     if (st.writes === false) b.push('<span class="badge grey">WRITES OFF</span>');

@@ -142,7 +142,7 @@ class SimKart:
             "pps": fix, "wifi": False, "writes": True,
             "last_cmd_seq": self.last_cmd_seq, "cmd_result": self.cmd_result,
             "ah": round(self.ah, 3), "uptime_s": int(time.monotonic() - self.boot),
-            "base_rssi": random.randint(-95, -70), "rssi": random.randint(-98, -72),
+            "base_rssi": random.randint(-95, -70), "rssi": random.randint(-98, -72), "slow_mph": 0, "relayed": False,
             "snr": round(random.uniform(2.0, 9.5), 1), "rx_ms": rx_ms,
         }
 

@@ -3,6 +3,7 @@
 #
 #   ./build.sh kart                      compile kart-heltec-v4 (VESC over BLE, fleet default)
 #   ./build.sh base                      compile base-tbeam-s3
+#   ./build.sh repeater                  compile repeater-tbeam-s3 (plug-anywhere LoRa repeater)
 #   ./build.sh kart-uart                 compile the kart with the wired UART VESC transport instead
 #   ./build.sh kart upload /dev/cu.usbmodemXXXX
 #   ./build.sh base upload /dev/cu.usbmodemXXXX
@@ -15,8 +16,9 @@ TARGET="${1:-kart}"; ACTION="${2:-compile}"; PORT="${3:-}"; OTAPW="${4:-}"; EXTR
 case "$TARGET" in
   kart)      SKETCH=kart-heltec-v4; FQBN="esp32:esp32:heltec_wifi_lora_32_V4:CDCOnBoot=cdc,PSRAM=disabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB" ;;
   kart-uart) SKETCH=kart-heltec-v4; FQBN="esp32:esp32:heltec_wifi_lora_32_V4:CDCOnBoot=cdc,PSRAM=disabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB"; EXTRA="--build-property compiler.cpp.extra_flags=-DVESC_TRANSPORT_UART=1"; BUILD_SUFFIX="-uart" ;;
+  repeater) SKETCH=repeater-tbeam-s3; FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=default_8MB,PSRAM=disabled,FlashMode=qio,USBMode=hwcdc" ;;
   base) SKETCH=base-tbeam-s3;  FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=default_8MB,PSRAM=disabled,FlashMode=qio,USBMode=hwcdc" ;;
-  *) echo "target must be kart, kart-uart or base"; exit 2 ;;
+  *) echo "target must be kart, kart-uart, base or repeater"; exit 2 ;;
 esac
 BUILD="build/$SKETCH$BUILD_SUFFIX"
 mkdir -p "$BUILD"

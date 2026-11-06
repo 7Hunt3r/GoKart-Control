@@ -111,7 +111,7 @@ def _age(last_mono, now):
 # Fleet state
 # ---------------------------------------------------------------------------
 VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "ah", "scale")
-STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "vesc_link",
+STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "slow_mph", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
                  "base_rssi", "rssi", "snr", "rx_ms")
 TRAIL_POINTS = 30
@@ -135,10 +135,20 @@ class KartState:
         self.seq_gaps = 0               # tele packets missed, from the kart's own seq counter
         self.rx_count = 0               # tele packets received
         self.recent = deque(maxlen=600)   # (mono, received, gap) for a rolling loss figure
+        self.via_repeater = False       # last counted packet came through the LoRa repeater
+        self.relay_only = 0             # packets that only arrived via the repeater (direct copy lost)
+        self.relay_dupes = 0            # repeater copies dropped because the direct copy was already counted
 
     def ingest_tele(self, msg, now, wall):
         seq = msg.get("seq")
         prev = self.status.get("seq")
+        relayed = msg.get("relayed") is True
+        if relayed and seq == prev and self.last_tele_mono is not None and now - self.last_tele_mono < 0.4:
+            self.relay_dupes += 1       # repeater copy of a packet the pit heard directly 25 ms earlier
+            return
+        if relayed:
+            self.relay_only += 1
+        self.via_repeater = relayed
         self.rx_count += 1
         gap_now = 0
         if isinstance(seq, int) and isinstance(prev, int):
@@ -193,6 +203,9 @@ class KartState:
             "seq_gaps": self.seq_gaps,
             "rx_count": self.rx_count,
             "loss_pct_1m": self._loss_pct(now, 60.0),
+            "via_repeater": self.via_repeater,
+            "relay_only": self.relay_only,
+            "relay_dupes": self.relay_dupes,
             "status": dict(self.status),
             "mode_req_name": MODE_NAMES.get(mr) if mr is not None else None,
             "mode_actual_name": MODE_NAMES.get(ma) if ma is not None else None,

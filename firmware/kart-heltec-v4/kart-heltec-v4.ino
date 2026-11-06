@@ -128,7 +128,7 @@ static const char* NUS_RX      = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
-bool     slowActive = false; float slowErpm = 0;
+bool     slowActive = false; float slowErpm = 0; uint8_t slowMph = 0;
 // Limits as first read from this controller after link-up: everything we write echoes these
 // (not the capture constants), so each kart keeps its own configuration.
 VescActiveLimits origLimits; bool origValid = false;
@@ -225,6 +225,7 @@ static void fillTelemetry(GkTelemetry& t) {
   t.mode_req = modeReq;
   t.mode_actual = ma;
   t.scale_x1000 = (scale < 0) ? 65535 : (uint16_t)(scale * 1000);
+  t.slow_mph = slowActive ? slowMph : 0;
   t.last_cmd_seq = lastCmdSeq;
   t.cmd_result = cmdResult;
   t.uptime_s = (uint16_t)(now / 1000);
@@ -348,7 +349,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
       float mph = arg ? (float)arg : (float)SLOW_DEFAULT_MPH;
       float e = mphToErpm(mph);
       if (e < 100) { cmdResult = GK_RES_REJECTED; logf("slow: drivetrain numbers unavailable"); break; }
-      slowActive = true; slowErpm = e;
+      slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
       logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
       if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC;
       break;
@@ -512,7 +513,7 @@ static void serviceLoraRxOne() {
   if (h->src == GK_ADDR_BASE) { baseRssi = (int8_t)rssi; baseHeardMs = millis(); }
   switch (type) {
     case GK_MSG_TELEMETRY:
-      if (h->src >= 1 && h->src <= GK_MAX_KARTS && h->src != kartId) { memcpy(&fleet[h->src], buf, len); fleetMs[h->src] = millis(); emitFleet(h->src, rssi, snr); }
+      if (h->src >= 1 && h->src <= GK_MAX_KARTS && h->src != kartId) { gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); emitFleet(h->src, rssi, snr); }
       break;
     case GK_MSG_COMMAND: {
       GkCommandMsg c; memcpy(&c, buf, len);
@@ -521,8 +522,15 @@ static void serviceLoraRxOne() {
     }
     case GK_MSG_BASE_INFO: {
       GkBaseInfo b; memcpy(&b, buf, len);
-      syncEdgeMicros = loraIrqMicros - ((uint32_t)b.phase_ms + GK_BEACON_AIRTIME_MS) * 1000UL;
-      syncMs = millis(); baseSyncSrc = b.sync_src; pitKartsOnline = b.karts_online;
+      static uint32_t directBeaconMs = 0;
+      bool relayed = gkIsRelayed(b.h);
+      if (!relayed) directBeaconMs = millis();
+      if (!relayed || !directBeaconMs || millis() - directBeaconMs > 1500) {   // sync from the repeater only when the pit itself is out of reach
+        uint32_t extra = relayed ? (GK_RELAY_DELAY_MS + GK_BEACON_AIRTIME_MS) : 0;   // one extra hop
+        syncEdgeMicros = loraIrqMicros - ((uint32_t)b.phase_ms + GK_BEACON_AIRTIME_MS + extra) * 1000UL;
+        syncMs = millis();
+      }
+      baseSyncSrc = b.sync_src; pitKartsOnline = b.karts_online;
       if (b.utc_s) { baseUtc = b.utc_s; baseUtcMs = millis(); }
       break;
     }
