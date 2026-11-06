@@ -29,8 +29,8 @@ Rules every implementation follows:
 
 - **Coordinates** are WGS84 decimal degrees (same as telemetry). Distances in metres on the local
   tangent plane (use the existing `projection()` / `R_EARTH` helpers, cos(lat) scaling for lon).
-- **Minimum sizes**: circle `r_m` >= 8, polygon with >= 3 points; the editor refuses smaller. GPS is a
-  few metres off, so zones under ~10 m feel random.
+- **Minimum sizes**: circle `r_m` >= 3 (5 is a good pad outdoors), polygon with >= 3 points; the editor
+  refuses smaller. Karts fix at 5 Hz; GPS is still a few metres off, so very small zones can feel random.
 - **boost**: on entry the kart Pi sends the Heltec `boost <secs> <scale>` over USB (firmware
   2026-11-06+: `scale` 0.10-1.00, `secs` 1-30; the Heltec auto-reverts to the mode scale when the
   time is up, and STOP/START cancel it). `scale` is clamped to 1.0 (never above SPORT or above the
@@ -75,3 +75,14 @@ Same cooldown/exit rules as boost pads (`cooldown_s`, default 15). The pit draws
 blue/white "?" box and never evaluates their outcome; the kart logs `{"kind":"game","event":"item",
 "item":"boost|super|mud|empty"}` to its session log. Items never raise the scale above 1.0 and are
 ignored while STOPPED, in grid hold, or with the game off.
+
+## Track route (added 2026-11-06 evening)
+
+`zones.json` may carry a course centreline the driver should follow:
+`"track": {"points": [[lat, lon], ...], "closed": true, "width_m": 6}` (2 to 200 points; `closed`
+joins the last point to the first). Drawn on the pit as a thin line and on the KART display as a
+highlighted route band `width_m` wide with direction chevrons every ~15 m (direction = point order),
+brighter ahead of the kart in heading-up mode. The pit editor has a "Track" tool (tap points, Close,
+Clear). The kart's demo mode drives along the track when one exists (falling back to a loop through
+the zones). The track has no game effect and is ignored by old builds. Version bumps on every save
+like the zones.
