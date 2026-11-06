@@ -194,6 +194,14 @@ static void serviceLoraRx() {
   const GkHeader* h = (const GkHeader*)buf;
   if (h->src == GK_ADDR_BASE) return;                       // our own beacon/command coming back via a repeater
   loraRx++;
+  if (type == GK_MSG_REPEATER_INFO) {
+    GkRepeaterInfo r; memcpy(&r, buf, sizeof r);
+    char karts[40] = ""; size_t n = 0;
+    for (int k = 1; k <= GK_MAX_KARTS; k++) if (r.karts_mask & (1 << (k - 1))) n += snprintf(karts + n, sizeof karts - n, "%s%d", n ? "," : "", k);
+    Serial.printf("{\"t\":\"repeater\",\"id\":%u,\"seq\":%u,\"heard\":%u,\"relayed\":%u,\"batt_v\":%.2f,\"pit_rssi\":%d,\"rssi\":%.0f,\"snr\":%.1f,\"uptime_min\":%u,\"karts\":[%s]}\n",
+                  (unsigned)(h->src - GK_ADDR_REPEATER + 1), h->seq, r.heard, r.relayed, r.batt_mv / 1000.0, r.pit_rssi, (double)rssi, (double)snr, r.uptime_min, karts);
+    return;
+  }
   if (gkIsRelayed(*h)) relayRx++;
   if (type == GK_MSG_TELEMETRY && h->src >= 1 && h->src <= GK_MAX_KARTS) {
     gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); fleetRssi[h->src] = rssi;

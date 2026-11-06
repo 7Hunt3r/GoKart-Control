@@ -110,6 +110,9 @@ DTR (`python3 -c 'import serial,time; s=serial.Serial(PORT,1200); s.dtr=False; t
 wait for the new ROM-bootloader port to appear and upload to that one. Boards already on our
 firmware upload normally.
 
+Every 5 s, right behind its copy of the pit beacon, it sends a 16-byte heartbeat (counters, battery, how it
+hears the pit, which karts it heard); the pit pages show it as a `repeater` chip and flag it LOST after 20 s.
+
 OLED: `heard n relayed n`, pit RSSI and age, and per-kart RSSI. The screen's I2C address is picked at boot:
 on the second T-Beam the QMC6310 compass sits at 0x3C (register 0 reads 0x80) and the screen at 0x3D, so a
 fixed 0x3C drives the compass and the screen stays dark. The boot log says which address and driver were

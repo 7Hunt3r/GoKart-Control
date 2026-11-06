@@ -16,6 +16,7 @@
 #define GK_MAX_KARTS       8
 #define GK_ADDR_BASE       0      // pit base station
 #define GK_ADDR_ALL        0xFF   // broadcast
+#define GK_ADDR_REPEATER   0xF0   // first repeater (0xF0..0xF7); heartbeats only, never addressed
 // A repeater re-sends a packet it heard with this bit set in the version byte. Receivers
 // treat it like the original (dedupe by src+seq); repeaters never relay a relayed packet.
 #define GK_HDR_RELAY_BIT   0x80
@@ -68,6 +69,7 @@ enum GkMsgType : uint8_t {
   GK_MSG_TELEMETRY = 0x01,   // kart -> everyone, once per second
   GK_MSG_COMMAND   = 0x02,   // base -> one kart or all
   GK_MSG_BASE_INFO = 0x03,   // base -> everyone (base position, time), optional
+  GK_MSG_REPEATER_INFO = 0x04, // repeater -> base heartbeat every 5 s, right after it relays a beacon
 };
 
 // ---- Commands --------------------------------------------------------------
@@ -162,6 +164,16 @@ struct GkBaseInfo {       // pit beacon, once per second at GK_BEACON_PHASE_MS i
   uint8_t  sync_src;      // 0 free-running, 1 GPS PPS, 2 derived from kart slot timing
   uint8_t  karts_online;  // how many karts the pit heard in the last 5 s
 };
+
+struct GkRepeaterInfo {   // repeater heartbeat; sent with GK_HDR_RELAY_BIT already set so no repeater relays it
+  GkHeader h;
+  uint16_t heard;         // packets heard since boot (wraps)
+  uint16_t relayed;       // packets relayed since boot (wraps)
+  uint16_t batt_mv;       // battery millivolts (0 = none / USB only)
+  int8_t   pit_rssi;      // how the repeater hears the pit beacon, dBm
+  uint8_t  karts_mask;    // bit k-1 set when kart k was heard in the last 10 s
+  uint16_t uptime_min;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(GkHeader) == 6, "header size");
@@ -169,6 +181,7 @@ static_assert(sizeof(GkTelemetry) == 47, "telemetry size changed; update airtime
 #define GK_TELEMETRY_LEN_V0 46   // packets from firmware before slow_mph; still accepted, slow_mph reads as 0
 static_assert(sizeof(GkCommandMsg) == 14, "command size");
 static_assert(sizeof(GkBaseInfo) == 22, "base info size");
+static_assert(sizeof(GkRepeaterInfo) == 16, "repeater info size");
 
 // ---- Helpers ---------------------------------------------------------------
 static inline void gkFillHeader(GkHeader& h, uint8_t type, uint8_t src, uint8_t dst, uint8_t seq) {
@@ -184,6 +197,7 @@ static inline uint8_t gkValidate(const uint8_t* buf, size_t len) {
     case GK_MSG_TELEMETRY: return (len == sizeof(GkTelemetry) || len == GK_TELEMETRY_LEN_V0) ? h->type : 0;
     case GK_MSG_COMMAND:   return len == sizeof(GkCommandMsg) ? h->type : 0;
     case GK_MSG_BASE_INFO: return len == sizeof(GkBaseInfo) ? h->type : 0;
+    case GK_MSG_REPEATER_INFO: return len == sizeof(GkRepeaterInfo) ? h->type : 0;
   }
   return 0;
 }

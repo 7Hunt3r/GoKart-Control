@@ -34,6 +34,7 @@ uint32_t heardKart[GK_MAX_KARTS + 1] = {0}, relayedKart[GK_MAX_KARTS + 1] = {0};
 uint32_t kartMs[GK_MAX_KARTS + 1] = {0};
 float    kartRssi[GK_MAX_KARTS + 1] = {0};
 uint32_t baseHeardMs = 0; float baseRssi = 0;
+uint32_t hbMs = 0, hbTx = 0; uint8_t hbSeq = 0;
 
 struct Pending { uint8_t buf[64]; uint8_t len; uint32_t dueMicros; bool used; };
 Pending queue[RELAY_QUEUE_LEN]; int qHead = 0, qTail = 0;
@@ -130,7 +131,24 @@ static void serviceTx() {
   loraIrq = false; radio.startReceive();
   GkHeader* h = (GkHeader*)p.buf;
   if (st == RADIOLIB_ERR_NONE) { relayed++; if (h->src >= 1 && h->src <= GK_MAX_KARTS) relayedKart[h->src]++; }
+  bool wasBeacon = (h->src == GK_ADDR_BASE && h->type == GK_MSG_BASE_INFO);
   p.used = false; qHead = (qHead + 1) % RELAY_QUEUE_LEN;
+  // Heartbeat to the pit every 5 s, right behind the beacon copy: still inside the pit's own window
+  // (beacon 905 + 12 ms, copy at ~945-957, heartbeat ~960-970 ms, karts start at 1000).
+  if (wasBeacon && st == RADIOLIB_ERR_NONE && millis() - hbMs >= 5000) {
+    hbMs = millis();
+    GkRepeaterInfo r; memset(&r, 0, sizeof r);
+    gkFillHeader(r.h, GK_MSG_REPEATER_INFO, GK_ADDR_REPEATER, GK_ADDR_BASE, hbSeq++);
+    r.h.version |= GK_HDR_RELAY_BIT;                      // never relayed by another repeater
+    r.heard = (uint16_t)heard; r.relayed = (uint16_t)relayed;
+    r.batt_mv = (pmuOk && pmu) ? (uint16_t)pmu->getBattVoltage() : 0;
+    r.pit_rssi = (int8_t)baseRssi;
+    for (int k = 1; k <= GK_MAX_KARTS; k++) if (kartMs[k] && millis() - kartMs[k] < 10000) r.karts_mask |= (1 << (k - 1));
+    r.uptime_min = (uint16_t)(millis() / 60000UL);
+    delay(2);
+    if (radio.transmit((uint8_t*)&r, sizeof r) == RADIOLIB_ERR_NONE) hbTx++;
+    loraIrq = false; radio.startReceive();
+  }
 }
 
 static void serviceUsb() {
@@ -157,8 +175,8 @@ static void serviceStat() {
   if (millis() - statMs < 1000) return; statMs = millis();
   char karts[160] = ""; size_t n = 0;
   for (int k = 1; k <= GK_MAX_KARTS; k++) if (kartMs[k] && millis() - kartMs[k] < 10000) n += snprintf(karts + n, sizeof karts - n, "%s{\"kart\":%d,\"rssi\":%.0f,\"heard\":%lu,\"relayed\":%lu}", n ? "," : "", k, kartRssi[k], (unsigned long)heardKart[k], (unsigned long)relayedKart[k]);
-  Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":%s,\"heard\":%lu,\"relayed\":%lu,\"dupes\":%lu,\"dropped\":%lu,\"rx_bad\":%lu,\"pit_rssi\":%s,\"pit_age_s\":%s,\"batt_v\":%.2f,\"uptime_s\":%lu,\"oled\":%s,\"oled_drv\":\"%s\",\"oled_addr\":\"0x%02x\",\"id3c\":\"0x%02x\",\"i2c\":\"%s\",\"karts\":[%s]}\n",
-                FW_VERSION, gkBool(radioOk), (unsigned long)heard, (unsigned long)relayed, (unsigned long)dupes, (unsigned long)dropped, (unsigned long)rxBad,
+  Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":%s,\"heard\":%lu,\"relayed\":%lu,\"hb_tx\":%lu,\"dupes\":%lu,\"dropped\":%lu,\"rx_bad\":%lu,\"pit_rssi\":%s,\"pit_age_s\":%s,\"batt_v\":%.2f,\"uptime_s\":%lu,\"oled\":%s,\"oled_drv\":\"%s\",\"oled_addr\":\"0x%02x\",\"id3c\":\"0x%02x\",\"i2c\":\"%s\",\"karts\":[%s]}\n",
+                FW_VERSION, gkBool(radioOk), (unsigned long)heard, (unsigned long)relayed, (unsigned long)hbTx, (unsigned long)dupes, (unsigned long)dropped, (unsigned long)rxBad,
                 baseHeardMs ? String((int)baseRssi).c_str() : "null", baseHeardMs ? String((unsigned long)((millis() - baseHeardMs) / 1000)).c_str() : "null",
                 (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, (unsigned long)(millis() / 1000), gkBool(oledOk), oledDrv.c_str(), oledAddr, id3c, i2cFound, karts);
 }

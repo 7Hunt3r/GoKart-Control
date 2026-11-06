@@ -243,6 +243,14 @@ function updateTop() {
       st.radio === "none" ? "bad" : (staleStat ? "stale" : "ok"));
   } else chip("radioChip", "radio: no stat", "stale");
   if (base) chip("baseChip", base.fix ? `base GPS ${fmt(base.sats)} sats` : "base GPS no fix", base.fix ? "ok" : "warn");
+  const rp = S.fleet.repeater;
+  if (!rp) chip("repChip", "no repeater", "");
+  else if (rp.age_s > 20) chip("repChip", `REPEATER LOST ${ageText(rp.age_s)}`, "bad");
+  else {
+    const batt = rp.batt_v > 0.5 ? ` ${rp.batt_v.toFixed(2)} V` : " USB";
+    const ks = rp.karts && rp.karts.length ? ` · K${rp.karts.join(" K")}` : "";
+    chip("repChip", (COMPACT ? "rep" : "repeater") + ` ${fmt(rp.rssi, 0)} dBm${batt}${ks}`, rp.batt_v > 0.5 && rp.batt_v < 3.5 ? "warn" : "ok");
+  }
   if ($("kartsChip")) {
     const on = S.fleet.karts.filter((k) => k.link === "online").length;
     chip("kartsChip", `karts ${on}/${S.fleet.karts.length}`, on ? (on === S.fleet.karts.length ? "ok" : "warn") : "bad");

@@ -239,6 +239,8 @@ class Fleet:
         self.karts = {k: KartState(k) for k in KART_IDS}
         self.base = {}
         self.base_mono = None
+        self.repeater = {}
+        self.repeater_mono = None
         self.stat = {}
         self.stat_mono = None
         self.simulation = False
@@ -264,6 +266,9 @@ class Fleet:
             self.base = dict(msg)
             self.base_mono = now
             self._maybe_origin("base", msg.get("lat"), msg.get("lon"), msg.get("fix"))
+        elif t == "repeater":
+            self.repeater = dict(msg)
+            self.repeater_mono = now
         elif t == "stat":
             self.stat = dict(msg)
             self.stat_mono = now
@@ -301,6 +306,7 @@ class Fleet:
             "karts": [self.karts[k].snapshot(now) for k in KART_IDS],
             "base": dict(self.base, age_s=base_age) if self.base else None,
             "stat": dict(self.stat, age_s=_age(self.stat_mono, now)) if self.stat else None,
+            "repeater": dict(self.repeater, age_s=_age(self.repeater_mono, now)) if self.repeater else None,
             "simulation": self.simulation,
             "race": dict(self.race),
             "origin": self.current_origin(),
