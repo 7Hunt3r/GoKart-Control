@@ -43,7 +43,18 @@ One JSON object per line:
 {"cmd":"stop","kart":255,"seq":18,"ttl":10}
 {"cmd":"start","kart":255,"seq":19,"ttl":10}
 {"cmd":"ping","kart":1,"seq":20}
+{"cmd":"slow","kart":2,"arg":5,"seq":21,"ttl":10}
+{"cmd":"boost","kart":3,"arg":100,"seq":22,"ttl":10}
 ```
+
+| `cmd` | `arg` | Effect on the kart |
+| --- | --- | --- |
+| `mode` | 0 ECO, 1 NORMAL, 2 SPORT | Writes the mode's current scale to the VESC (confirmed by re-read) |
+| `stop` | - | Ramps to stop and holds until START; cancels BOOST (SLOW stays) |
+| `start` | - | Releases STOP; clears SLOW and BOOST |
+| `ping` | - | Echo only (`cmd_result` applied), no VESC write |
+| `slow` | mph 1-60 (0/absent = 5) | ERPM cap at that speed until START (firmware 2026-11-06+) |
+| `boost` | scale percent 10-100 | Timed current-scale override for 5 s, then auto-reverts to the mode scale; never above 1.0; rejected while stopped; STOP/START cancel it (firmware 2026-11-06+). The USB form `boost SECS SCALE` on the kart sets other durations (game zones) |
 
 - `kart`: 1-8 or 255 for all karts.
 - `seq`: 1-255, assigned by the host, rolling. The kart echoes it in

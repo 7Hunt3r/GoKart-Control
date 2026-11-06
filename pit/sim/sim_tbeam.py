@@ -208,7 +208,7 @@ class SimKart:
             self.slow_mph = int(msg.get("arg") or 5); self.cmd_result = 2
         elif cmd == "start":
             self.stopped, self.cmd_result = False, 2
-            self.boost_scale = None
+            self.boost_scale, self.slow_mph = None, 0   # firmware: START clears SLOW and BOOST
         elif cmd == "boost":
             arg = msg.get("arg")
             if self.stopped or not isinstance(arg, int) or not 10 <= arg <= 100:

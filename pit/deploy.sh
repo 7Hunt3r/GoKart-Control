@@ -2,7 +2,7 @@
 # Push this pit/ folder to a running pit Pi and restart the services.
 #   pit/deploy.sh [host] [--install]
 # --install also re-runs install.sh (apt, units, udev); otherwise just restarts.
-# Keeps the Pi's server/config.json, logs/ and any map imagery. Used against the real pit Pi on 2026-11-05.
+# Keeps the Pi's server/config.json, logs/, any map imagery and its edited map/zones.json. Used against the real pit Pi on 2026-11-05.
 set -euo pipefail
 cd "$(dirname "$0")"
 HOST="${1:-gokart-pit.local}"
@@ -11,7 +11,10 @@ rsync -av --delete \
   --exclude 'logs/' --exclude 'server/config.json' --exclude 'server/map/' --exclude 'config.json' --exclude 'map/' \
   --exclude 'sdcard/secrets.env' --exclude 'sdcard/build/' --exclude '__pycache__/' --exclude '.DS_Store' \
   ./ "$U@$HOST:/opt/gokart-pit/"
-rsync -av --exclude '.DS_Store' server/map/ "$U@$HOST:/opt/gokart-pit/server/map/"
+# Map folder: map.json presets, README/ZONES.md and imagery are pushed (never deleted on the Pi).
+# zones.json is edited live on the Pi (operator page ZONES) so it is only copied when the Pi has none.
+rsync -av --exclude '.DS_Store' --exclude 'zones.json' --exclude '*.tmp' server/map/ "$U@$HOST:/opt/gokart-pit/server/map/"
+rsync -av --ignore-existing server/map/zones.json "$U@$HOST:/opt/gokart-pit/server/map/zones.json"
 if [ "${2:-}" = "--install" ]; then
   ssh -t "$U@$HOST" "sudo bash /opt/gokart-pit/install.sh $U"
 else

@@ -246,3 +246,4 @@ body.mobile .mstrip .gamechip { min-height: 32px; font-size: 13px; padding: 2px 
 body.mobile .mfleet .boostall, body.mobile .mfleet .slowall { font-size: 16px; }
 body.mobile .kexp .kbtns .b-slow, body.mobile .kexp .kbtns .b-boost { grid-column: span 3; }
 body.mobile table.laps { font-size: 16px; }
+table.laps th:nth-child(n+3) { text-align: right; }

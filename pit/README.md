@@ -112,10 +112,64 @@ python3 -I pit/tests/test_e2e.py
   the operator page or `GET /api/log/download`.
 - **HTTP.** `/` operator UI, `/kiosk`, `/events` (SSE, ~4 Hz full state),
   `GET /api/state`, `GET /api/log/recent?n=100[&lines=1]`, `POST /cmd`
-  `{"cmd":"stop|start|mode|ping","kart":1-8|255,"arg":0-2}`, `POST /api/race`
-  `{"entered":[...],"mode":0-2,"active":true|false}`, `GET /map/package.json`,
+  `{"cmd":"stop|start|mode|ping|slow|boost","kart":1-8|255,"arg":..}` (mode 0-2, slow mph 1-60, boost percent 10-100), `POST /api/race`
+  `{"entered":[...],"mode":0-2,"active":true|false}`, `POST /zones`, `POST /zones/enable`,
+  `POST /laps/reset` (see "Game zones and laps"), `GET /map/package.json`, `GET /map/zones.json`,
   `/map/<file>`, `/healthz`. `/map/*` and `/healthz` need no login (kart
   displays fetch the map on the pit Wi-Fi).
+
+## Game zones and laps
+
+The "Mario Kart" layer. Contract: [`server/map/ZONES.md`](server/map/ZONES.md). Status: **tested
+on the Mac against the simulator** (unit + e2e tests, headless Chrome screenshots of all three
+pages, the editor driven with real mouse events). Not yet tried with real karts.
+
+- **Zones file.** `server/map/zones.json` (next to `map.json`): `version`, `enabled` (master
+  switch) and `zones` (`boost` / `mud` circles or polygons, one `lapline`). Served without login
+  at `GET /map/zones.json`; `GET /map/package.json` carries `"zones": "/map/zones.json"` and
+  `"zones_version"` so kart Pis re-fetch on change. A hand edit on the Pi is picked up on the next
+  request (mtime check); an invalid file is logged (`zones_invalid`) and ignored.
+- **Editing (operator page `/`).** `ZONES` above the map enters edit mode: `BOOST PAD` / `MUD`
+  then tap the map (12 m / 15 m circle), `LAP LINE` then tap both ends (replaces the old line; one
+  per course), `SELECT / MOVE` to pick and drag a zone (drag empty map still pans), `DELETE` then
+  tap a zone. The selected zone gets a name field and a radius slider (8-60 m). `SAVE` posts the
+  whole document; `CANCEL` drops the draft. Saving warns if someone else saved meanwhile.
+  Polygons are not drawn by the editor but are rendered, moved and deleted if present in the file.
+- **API (login like `/cmd`, logged as `op` with who).** `POST /zones` `{"zones":[...]}` replaces
+  the zone list (`enabled` kept unless given) after validation: types boost/mud/lapline, circle
+  `r_m` 8-500, polygon 3-64 points, lap line >= 4 m, unique ids (1-16 of `A-Za-z0-9_-`), at most
+  one lap line; `scale` clamped 0.1-1.0, boost `secs` 1-30, `cooldown_s` 0-600, `min_lap_s` 5-600.
+  Refusals are HTTP 409 with the reason. Unknown zone types are kept as-is (karts ignore them,
+  the pit draws them grey). `POST /zones/enable {"enabled":true|false}` flips the master switch.
+  Both bump `version`. `POST /laps/reset` clears lap state.
+- **GAME ON/OFF.** Chip in the top bar of all three pages; on the kiosk it is the race
+  director's kill for the whole game. Off = zones drawn faded, no lap timing, karts ignore zones.
+- **Rendering.** Every pit map draws boost pads (amber, chevrons), mud (brown) and the lap line
+  (checkered, flag at end a) from the same map code.
+- **Laps.** The pit times laps itself from `tele` fixes: a lap counts when the segment previous
+  fix -> current fix crosses the lap line (either direction) and `min_lap_s` (default 20) has
+  passed since the previous crossing; the first crossing starts the clock. The crossing time is
+  interpolated along the segment when the two fixes are under 5 s apart. Ranking: laps desc,
+  then earlier last crossing. Shown as a leaderboard panel (operator side panel, kiosk RACE tab,
+  phone KARTS tab), a collapsible overlay on every map, and `P# L# best` on each kart card.
+  `/api/state` has `fleet.game`, `fleet.laps` (ranked) and `karts[].lap`. Lap state is memory only
+  (server restart clears it) and is also cleared when the lap line moves.
+- **BOOST.** Per-kart `BOOST` (next to SLOW) and `BOOST ALL` (hold 1 s) send `cmd "boost"`
+  with `arg` 100 (full scale for 5 s; firmware auto-reverts, STOP/START cancel it, never above
+  1.0). `POST /cmd {"cmd":"boost","kart":1-8|255,"arg":10-100}`.
+- **Simulator.** `sim_tbeam.py` honours `boost` (scale echoed for 5 s, kart speeds up).
+  `--print-zones` prints a zones document for its oval (lap line on the bottom straight, boost on
+  the top straight, mud on the east bend); `--track-scale 0.3` gives ~15 s laps. To see it:
+
+  ```sh
+  python3 pit/sim/sim_tbeam.py --tcp 7878 &
+  python3 pit/server/pit_server.py --tcp 127.0.0.1:7878 --map-dir /tmp/pitmap   # copy map/ there first
+  python3 pit/sim/sim_tbeam.py --print-zones | curl -s -H 'Content-Type: application/json' -d @- localhost:8080/zones
+  ```
+
+  Use a scratch `--map-dir` locally: saving zones rewrites `zones.json` in the map folder.
+- **Deploy.** `deploy.sh` copies `zones.json` only when the Pi has none, so zones edited on the
+  Pi survive later deploys. `ZONES.md` and the rest of `map/` are pushed as before.
 
 ## On the Pi
 
@@ -145,7 +199,7 @@ pit/deploy.sh                    # rsync pit/ -> pit@gokart-pit.local:/opt/gokar
 pit/deploy.sh gokart-pit.local --install   # also re-run install.sh (packages, units, udev)
 ```
 
-deploy.sh keeps the Pi's `server/config.json`, `logs/` and map imagery. By hand:
+deploy.sh keeps the Pi's `server/config.json`, `logs/`, map imagery and its edited `map/zones.json`. By hand:
 `rsync -av --exclude logs/ --exclude server/config.json pit/ pit@gokart-pit.local:/opt/gokart-pit/`
 then `ssh pit@gokart-pit.local sudo systemctl restart gokart-pit gokart-kiosk`.
 Change the web password by editing `/opt/gokart-pit/server/config.json` and

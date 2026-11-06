@@ -68,7 +68,9 @@ struct GpsCfg { uint32_t baud; bool swap; };
 static const GpsCfg GPS_CFGS[] = { {9600,false}, {9600,true}, {115200,false}, {115200,true}, {38400,false}, {38400,true} };
 static const int GPS_CFG_N = sizeof(GPS_CFGS) / sizeof(GPS_CFGS[0]);
 int      gpsCfgIdx = 0;
-bool     gpsLocked = false;
+bool     gpsLocked = false, gpsConfigured = false; uint32_t gpsLockedMs = 0, gpsFixCount = 0, gpsLineMs = 0;
+bool     gpsLineOn = true;                 // {"t":"gps"} USB line on every new fix (up to 5 Hz) for the kart Pi
+double   baseLat = 0, baseLon = 0; uint32_t baseFixMs = 0;   // pit radio's own fix from the beacon (for position-domain correction)
 uint32_t gpsCfgStartMs = 0, gpsGoodAtStart = 0, gpsLastCharMs = 0;
 volatile uint32_t ppsMicros = 0, ppsCount = 0;
 void IRAM_ATTR onPps() { ppsMicros = micros(); ppsCount++; }
@@ -493,14 +495,42 @@ static void gpsApplyCfg(int idx) {
   gpsCfgIdx = idx; gpsCfgStartMs = millis(); gpsGoodAtStart = gps.passedChecksum();
 }
 
+// Quectel L76K (CASIC): send a $PCAS sentence with its checksum.
+static void gpsSend(const char* body) {
+  uint8_t cs = 0; for (const char* p = body; *p; p++) cs ^= (uint8_t)*p;
+  gpsSerial.printf("$%s*%02X\r\n", body, cs); delay(30);
+}
+// Once the module answers: all three constellations it can track, GGA+RMC only, 5 Hz, 115200 baud.
+// Config is re-sent after every (re)detection, so a module that lost power comes back the same way.
+static void gpsConfigure() {
+  gpsSend("PCAS04,7");                          // GPS + BDS + GLONASS (default is GPS + BDS)
+  gpsSend("PCAS03,1,0,0,0,1,0,0,0,0,0,,,0,0");  // GGA and RMC only (no GSV/GSA/VTG/GLL chatter)
+  gpsSend("PCAS02,200");                        // 5 Hz position updates
+  if (GPS_CFGS[gpsCfgIdx].baud != 115200) {
+    gpsSend("PCAS01,5");                        // 115200 baud; 5 Hz GGA+RMC does not fit in 9600
+    delay(50); gpsSerial.end();
+    gpsSerial.begin(115200, SERIAL_8N1, GPS_CFGS[gpsCfgIdx].swap ? PIN_GNSS_TX : PIN_GNSS_RX, GPS_CFGS[gpsCfgIdx].swap ? PIN_GNSS_RX : PIN_GNSS_TX);
+    for (int i = 0; i < GPS_CFG_N; i++) if (GPS_CFGS[i].baud == 115200 && GPS_CFGS[i].swap == GPS_CFGS[gpsCfgIdx].swap) gpsCfgIdx = i;
+  }
+  gpsConfigured = true; logf("gps configured: GPS+BDS+GLONASS, GGA+RMC, 5 Hz, 115200");
+}
+
 static void serviceGps() {
   while (gpsSerial.available()) { gps.encode(gpsSerial.read()); gpsLastCharMs = millis(); }
   uint32_t now = millis();
   if (!gpsLocked) {
-    if (gps.passedChecksum() > gpsGoodAtStart + 2) { gpsLocked = true; logf("gps found: %lu baud%s", (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? " (pins swapped)" : ""); }
+    if (gps.passedChecksum() > gpsGoodAtStart + 2) { gpsLocked = true; gpsLockedMs = now; gpsConfigured = false; logf("gps found: %lu baud%s", (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? " (pins swapped)" : ""); }
     else if (now - gpsCfgStartMs > GPS_DETECT_STEP_MS) gpsApplyCfg((gpsCfgIdx + 1) % GPS_CFG_N);
   } else if (now - gpsLastCharMs > 15000) { gpsLocked = false; logf("gps silent, re-detecting"); gpsApplyCfg(gpsCfgIdx); }
-  if (gps.location.isValid() && gps.location.isUpdated()) { fixLat = gps.location.lat(); fixLon = gps.location.lng(); lastFixMs = now; }
+  else if (!gpsConfigured && now - gpsLockedMs > 500) gpsConfigure();
+  if (gps.location.isValid() && gps.location.isUpdated()) {
+    fixLat = gps.location.lat(); fixLon = gps.location.lng(); lastFixMs = now; gpsFixCount++;
+    if (gpsLineOn) {           // fast fix line for the kart Pi: position, Doppler speed/course, quality
+      Serial.printf("{\"t\":\"gps\",\"kart\":%u,\"lat\":%.7f,\"lon\":%.7f,\"kph\":%.1f,\"heading\":%.1f,\"hdop\":%.2f,\"sats\":%u,\"ms\":%lu}\n",
+                    kartId, fixLat, fixLon, gps.speed.isValid() ? gps.speed.kmph() : 0.0, gps.course.isValid() ? gps.course.deg() : 0.0,
+                    gps.hdop.isValid() ? gps.hdop.hdop() : 99.0, gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0, (unsigned long)now);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- lora
@@ -549,6 +579,7 @@ static void serviceLoraRxOne() {
         syncMs = millis();
       }
       baseSyncSrc = b.sync_src; pitKartsOnline = b.karts_online;
+      if (b.lat_e7 && b.lon_e7) { baseLat = b.lat_e7 / 1e7; baseLon = b.lon_e7 / 1e7; baseFixMs = millis(); }
       if (b.utc_s) { baseUtc = b.utc_s; baseUtcMs = millis(); }
       break;
     }
@@ -617,8 +648,15 @@ static void serviceWifi() {
 // ---------------------------------------------------------------- usb
 static void usbReport() {
   GkTelemetry t; fillTelemetry(t);
-  char buf[640];
-  gkTelemetryToJson(buf, sizeof buf, t, "self", 0, 0, millis());
+  char buf[720];
+  int n = gkTelemetryToJson(buf, sizeof buf, t, "self", 0, 0, millis());
+  if (n > 0 && n < (int)sizeof buf - 160 && buf[n - 1] == '}') {       // USB-only extras: fix quality and the pit radio's own fix
+    uint32_t now = millis();
+    char bl[24] = "null", bo[24] = "null", ba[12] = "null";
+    if (baseFixMs && now - baseFixMs < 30000) { snprintf(bl, sizeof bl, "%.7f", baseLat); snprintf(bo, sizeof bo, "%.7f", baseLon); snprintf(ba, sizeof ba, "%lu", (unsigned long)((now - baseFixMs) / 1000)); }
+    snprintf(buf + n - 1, sizeof buf - n + 1, ",\"hdop\":%.2f,\"fix_age_ms\":%lu,\"gps_hz\":%u,\"base_lat\":%s,\"base_lon\":%s,\"base_fix_age_s\":%s}",
+             gps.hdop.isValid() ? gps.hdop.hdop() : 99.0, lastFixMs ? (unsigned long)(now - lastFixMs) : 999999UL, gpsConfigured ? 5 : 1, bl, bo, ba);
+  }
   Serial.println(buf);
 }
 
@@ -685,6 +723,7 @@ static void usbCommand(char* line) {
 #if !VESC_TRANSPORT_UART
   else if (!strcmp(line, "blescan")) { bleReport(); if (!bleConnected && !bleScanning) { bleScanMs = 0; } }
 #endif
+  else if (!strcmp(line, "gpsline") && arg) { gpsLineOn = !strcmp(arg, "on"); prefs.putBool("gpsline", gpsLineOn); logf("gps fix line %s", gpsLineOn ? "on" : "off"); }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
   else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
   else logf("unknown command '%s'", line);
@@ -782,6 +821,7 @@ void setup() {
   pinMode(PIN_GNSS_RST, OUTPUT);   digitalWrite(PIN_GNSS_RST, HIGH);
   pinMode(PIN_GNSS_PPS, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_GNSS_PPS), onPps, RISING);
+  gpsLineOn = prefs.getBool("gpsline", true);
   gpsApplyCfg(0);
 
   // VESC
