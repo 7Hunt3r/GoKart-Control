@@ -224,10 +224,14 @@ Going back: `pio run -d firmware/heltec -t upload` from your branch, as document
   kart display no longer has to infer it from command replies. Not exercised against a live VESC
   today (Colin's VESC was off: `vesc_link false`).
 - **Kart Pi 3 B display kit** under `kart/` (server on :8081, driver page with map from the pit,
-  SD card kit, simulator, 29 tests). Nothing has run on a Pi 3 B yet; the card to flash was not
-  detected by the Mac (no external disk enumerated), so the first boot is still pending.
+  SD card kit, simulator, 29 tests). **First boot on the real Pi 3 B worked 2026-11-06 16:26**
+  (card flashed from `kart/sdcard`, ~6 min to services up): cage + Chromium on the 1024x600 HDMI
+  panel, `/dev/heltec` link up reading kart 2, shop map pulled from the pit into the cache.
+  Driver-page rendering, touch and map speed on the Pi 3 B still need eyes-on checks.
   Open points from the build: Pi 3 B is 2.4 GHz only (does McLab offer 2.4 GHz?), Heltec power
   from the Pi's USB vs separate, pre-loading a map before first pit contact.
+- Repeater OLED quirk: on the second T-Beam the QMC6310 compass answers at 0x3C and the screen is at
+  0x3D; the repeater now reads register 0 of 0x3C (0x80 = compass) and picks the address itself.
 - Boards: base re-flashed from the Pi (`esptool --no-stub`, app only at 0x10000), kart 2 by
   `espota.py -i 192.168.151.44 -p 3232` (arduino-cli's mDNS discovery of gokart-2.local fails;
   espota by IP works).
