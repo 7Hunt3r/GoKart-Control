@@ -18,6 +18,11 @@ KART_IDS = tuple(range(1, 9))
 ALL_KARTS = 255
 
 ONLINE_S = 5.0     # tele heard within this many seconds -> online (matches stat.karts_online)
+M_PER_DEG_LAT = 111320.0
+CORR_MAX_M = 25.0      # position-domain GPS correction is applied only below this magnitude
+CORR_MIN_SATS = 6
+CORR_MIN_SAMPLES = 5
+CORR_MAX_AGE_S = 10.0
 STALE_S = 15.0     # within this -> stale; beyond -> offline
 
 # Fixed per-kart colours shared by every client (proposed; no owner decision yet).
@@ -236,7 +241,14 @@ class KartState:
 class Fleet:
     """Authoritative fleet + race state. Callers hold the app lock."""
 
-    def __init__(self, fallback_origin=None):
+    def __init__(self, fallback_origin=None, pit_marker=None, gps_correction=False):
+        # Position-domain differential GPS: the pit radio sits at a surveyed spot (map.json "pit"); its live
+        # fix minus that spot is mostly the common-mode error the karts see too (same sky, same minute).
+        # Off unless configured; the measured vector is always exposed so it can be judged first.
+        self.pit_marker = pit_marker if pit_marker and pit_marker.get("lat") is not None else None
+        self.corr_enabled = bool(gps_correction)
+        self.corr = {"n": 0.0, "e": 0.0, "samples": 0}
+        self.corr_mono = None
         self.karts = {k: KartState(k) for k in KART_IDS}
         self.base = {}
         self.base_mono = None
@@ -273,6 +285,7 @@ class Fleet:
         if t == "base":
             self.base = dict(msg)
             self.base_mono = now
+            self._update_correction(msg, now)
             self._maybe_origin("base", msg.get("lat"), msg.get("lon"), msg.get("fix"))
         elif t == "repeater":
             self.repeater = dict(msg)
@@ -298,6 +311,48 @@ class Fleet:
         if cur is None or self._RANK[source] > self._RANK[cur["source"]]:
             self.origin = {"lat": lat, "lon": lon, "source": source}
 
+    def _update_correction(self, msg, now):
+        if not self.pit_marker or msg.get("fix") is not True:
+            return
+        lat, lon = msg.get("lat"), msg.get("lon")
+        if lat is None or lon is None or (msg.get("sats") or 0) < CORR_MIN_SATS:
+            return
+        mlat, mlon = self.pit_marker["lat"], self.pit_marker["lon"]
+        err_n = (lat - mlat) * M_PER_DEG_LAT
+        err_e = (lon - mlon) * M_PER_DEG_LAT * math.cos(math.radians(mlat))
+        if math.hypot(err_n, err_e) > 60.0:          # not a GPS error, that is a wrong marker or an indoor fix
+            return
+        if self.corr_mono is None or now - self.corr_mono > 60.0:
+            self.corr = {"n": err_n, "e": err_e, "samples": 1}
+        else:
+            a = 0.05                                  # ~20 s window at the 1 Hz base line
+            self.corr = {"n": self.corr["n"] * (1 - a) + err_n * a,
+                         "e": self.corr["e"] * (1 - a) + err_e * a,
+                         "samples": self.corr["samples"] + 1}
+        self.corr_mono = now
+
+    def set_correction(self, enabled):
+        self.corr_enabled = bool(enabled)
+
+    def correction_status(self, now):
+        age = _age(self.corr_mono, now)
+        mag = math.hypot(self.corr["n"], self.corr["e"])
+        fresh = age is not None and age <= CORR_MAX_AGE_S
+        applied = self.corr_enabled and fresh and mag < CORR_MAX_M and self.corr["samples"] >= CORR_MIN_SAMPLES
+        return {"enabled": self.corr_enabled, "applied": applied, "north_m": round(self.corr["n"], 1),
+                "east_m": round(self.corr["e"], 1), "magnitude_m": round(mag, 1), "age_s": age,
+                "samples": self.corr["samples"], "marker": bool(self.pit_marker)}
+
+    def _apply_correction(self, snap):
+        n, e = self.corr["n"], self.corr["e"]
+        def shift(lat, lon):
+            return (lat - n / M_PER_DEG_LAT, lon - e / (M_PER_DEG_LAT * math.cos(math.radians(lat))))
+        lf = snap["gps"].get("last_fix")
+        if lf and lf.get("lat") is not None:
+            lf["lat_raw"], lf["lon_raw"] = lf["lat"], lf["lon"]
+            lf["lat"], lf["lon"] = shift(lf["lat"], lf["lon"])
+        snap["trail"] = [list(shift(p[0], p[1])) for p in snap["trail"]]
+
     def current_origin(self):
         if self.origin:
             return self.origin
@@ -313,12 +368,16 @@ class Fleet:
         laps = self.game.board(now)
         by_kart = {r["kart"]: r for r in laps}
         karts = []
+        corr = self.correction_status(now)
         for k in KART_IDS:
             snap = self.karts[k].snapshot(now)
             snap["lap"] = by_kart.get(k)
+            if corr["applied"]:
+                self._apply_correction(snap)
             karts.append(snap)
         return {
             "karts": karts,
+            "gps_correction": corr,
             "base": dict(self.base, age_s=base_age) if self.base else None,
             "stat": dict(self.stat, age_s=_age(self.stat_mono, now)) if self.stat else None,
             "repeater": dict(self.repeater, age_s=_age(self.repeater_mono, now)) if self.repeater else None,

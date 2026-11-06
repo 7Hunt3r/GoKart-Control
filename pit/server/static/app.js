@@ -245,6 +245,13 @@ function updateTop() {
       st.radio === "none" ? "bad" : (staleStat ? "stale" : "ok"));
   } else chip("radioChip", "radio: no stat", "stale");
   if (base) chip("baseChip", base.fix ? `base GPS ${fmt(base.sats)} sats` : "base GPS no fix", base.fix ? "ok" : "warn");
+  const gc = S.fleet.gps_correction;
+  if ($("corrChip")) {
+    if (!gc || !gc.marker) chip("corrChip", "GPS corr: no pit marker", "");
+    else if (!gc.samples || gc.age_s === null || gc.age_s > 10) chip("corrChip", gc.enabled ? "GPS corr: waiting for base fix" : "GPS corr off", "");
+    else chip("corrChip", `GPS corr ${gc.magnitude_m.toFixed(1)} m` + (gc.applied ? " ON" : (gc.enabled ? " (hold)" : " off")), gc.applied ? "ok" : (gc.magnitude_m >= 25 ? "warn" : ""));
+    $("corrChip").onclick = () => { if (gc) post("/gps_correction", { enabled: !gc.enabled }); };
+  }
   const rp = S.fleet.repeater;
   if (!rp) chip("repChip", "no repeater", "");
   else if (rp.age_s > 20) chip("repChip", `REPEATER LOST ${ageText(rp.age_s)}`, "bad");

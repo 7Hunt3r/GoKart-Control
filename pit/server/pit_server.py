@@ -37,6 +37,7 @@ PIT_ROOT = os.path.dirname(HERE)
 STATIC_DIR = os.path.join(HERE, "static")
 DEFAULTS = {
     "password": "",              # shared operator password; empty = only localhost allowed
+    "gps_correction": False,     # apply the pit radio's measured GPS error (vs map.json "pit") to kart positions
     "bind": "0.0.0.0",
     "http_port": 8080,
     "trust_localhost": True,     # the kiosk browser on the Pi itself skips the login
@@ -104,7 +105,8 @@ class App:
         self.sessions = {}                       # cookie token -> operator name
         self.map_cfg = self._load_map()
         fallback = self.map_cfg.get("origin") or cfg.get("origin")
-        self.fleet = pitcore.Fleet(fallback_origin=fallback)
+        self.fleet = pitcore.Fleet(fallback_origin=fallback, pit_marker=self.map_cfg.get("pit"),
+                                   gps_correction=bool(cfg.get("gps_correction", False)))
         self.zones_path = os.path.join(map_dir, "zones.json")
         self.zones_comment = None
         self._zones_mtime = None
@@ -242,6 +244,14 @@ class App:
             self.fleet.game.set_doc(doc)
         self.log.write("op", who=who, action="zones_enable", enabled=en, version=doc["version"])
         return {"enabled": en, "version": doc["version"]}
+
+    def set_gps_correction(self, body, who):
+        enabled = bool((body or {}).get("enabled"))
+        with self.lock:
+            self.fleet.set_correction(enabled)
+            st = self.fleet.correction_status(time.monotonic())
+        self.log.write("op", who=who, action="gps_correction", enabled=enabled)
+        return {"gps_correction": st}
 
     def reset_laps(self, who):
         with self.lock:
@@ -573,6 +583,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **app.enable_zones(body, who)})
             if p == "/laps/reset":
                 return self._json(200, {"ok": True, **app.reset_laps(who)})
+            if p == "/gps_correction":
+                return self._json(200, {"ok": True, **app.set_gps_correction(body, who)})
         except pitcore.CommandError as e:
             app.log.write("op", who=who, action=p, request=body, refused=str(e))
             return self._json(409, {"ok": False, "error": str(e)})

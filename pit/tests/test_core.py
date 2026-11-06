@@ -460,5 +460,45 @@ class BoostCommand(unittest.TestCase):
                 h.cm.submit("boost", 1, bad, now=h.now)
 
 
+class GpsCorrectionTest(unittest.TestCase):
+    def _base(self, f, now, lat, lon, sats=9):
+        f.ingest({"t": "base", "lat": lat, "lon": lon, "fix": True, "sats": sats, "utc": None, "pps": False}, now, "w")
+
+    def test_measured_applied_and_gated(self):
+        marker = {"lat": 41.0940, "lon": -73.4165}
+        f = pc.Fleet(pit_marker=marker, gps_correction=True)
+        # base reads 3 m north and 4 m east of the surveyed spot, steadily
+        dlat, dlon = 3.0 / pc.M_PER_DEG_LAT, 4.0 / (pc.M_PER_DEG_LAT * math.cos(math.radians(41.094)))
+        f.ingest({"t": "tele", "kart": 1, "seq": 1, "lat": 41.0950, "lon": -73.4160, "fix": True, "gps_age_s": 0, "sats": 9}, 0.0, "w")
+        for i in range(3):
+            self._base(f, float(i), marker["lat"] + dlat, marker["lon"] + dlon)
+        st = f.snapshot(3.0)
+        self.assertFalse(st["gps_correction"]["applied"])          # fewer than 5 samples
+        for i in range(3, 12):
+            self._base(f, float(i), marker["lat"] + dlat, marker["lon"] + dlon)
+        st = f.snapshot(12.0)
+        gc = st["gps_correction"]
+        self.assertTrue(gc["applied"]); self.assertAlmostEqual(gc["north_m"], 3.0, delta=0.2); self.assertAlmostEqual(gc["east_m"], 4.0, delta=0.2)
+        k1 = st["karts"][0]["gps"]["last_fix"]
+        self.assertAlmostEqual((k1["lat_raw"] - k1["lat"]) * pc.M_PER_DEG_LAT, 3.0, delta=0.2)
+        self.assertAlmostEqual(k1["lon_raw"], -73.4160)
+        # stale base -> not applied, raw positions again
+        st = f.snapshot(40.0)
+        self.assertFalse(st["gps_correction"]["applied"])
+        self.assertNotIn("lat_raw", st["karts"][0]["gps"]["last_fix"])
+        # few satellites or a 200 m indoor fix never move the estimate
+        self._base(f, 41.0, marker["lat"] + 0.002, marker["lon"], sats=9)
+        self._base(f, 42.0, marker["lat"] + dlat, marker["lon"] + dlon, sats=4)
+        self.assertEqual(f.correction_status(42.0)["samples"], 12)
+        f.set_correction(False)
+        self.assertFalse(f.correction_status(42.0)["enabled"])
+
+    def test_off_by_default_and_no_marker(self):
+        f = pc.Fleet()
+        self._base(f, 1.0, 41.0, -73.0)
+        gc = f.snapshot(1.0)["gps_correction"]
+        self.assertFalse(gc["enabled"]); self.assertFalse(gc["marker"]); self.assertEqual(gc["samples"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
