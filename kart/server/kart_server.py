@@ -71,6 +71,7 @@ DEFAULTS = {
     "cache_dir": None,                  # default <kart>/cache/map
     "max_log_mb": 800,                  # oldest session logs are deleted beyond this
     "game": True,                       # false = this kart ignores the pit's game zones entirely
+    "gps_correction": False,            # game positions += (pit surveyed - pit radio live fix), if < 25 m
     "sound": True,                      # driver page: synthesized boost/lap sounds (WebAudio)
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -129,7 +130,8 @@ class App:
         cid = cfg.get("kart_id")
         self.disp = kartcore.KartDisplay(configured_id=int(cid) if cid else None)
         self.cmds = kartcore.CommandTracker()
-        self.game = kartcore.GameEngine(local_enabled=bool(cfg.get("game", True)))
+        self.game = kartcore.GameEngine(local_enabled=bool(cfg.get("game", True)),
+                                        gps_correction=bool(cfg.get("gps_correction", False)))
         self.link = Link(self._on_line, self._on_link_state, port=cfg.get("serial_port"),
                          tcp=cfg.get("tcp"), log=self._console)
         self.maps = MapSync(cfg["pit_urls"], cfg.get("cache_dir") or os.path.join(KART_ROOT, "cache", "map"),
@@ -176,6 +178,8 @@ class App:
             elif t == "self":
                 self.cmds.on_self(msg)
                 game = self.game.on_self(msg, now)
+            elif t == "gps":
+                game = self.game.on_gps(msg, now)
         self._game_out(game)
 
     def _on_link_state(self, connected, desc):
@@ -218,8 +222,10 @@ class App:
         while not self.stopping.wait(0.25):
             now = time.monotonic()
             zones = self.maps.zones()
+            pkg = self.maps.package
             with self.lock:
                 self.cmds.tick(now)
+                self.game.set_pit(pkg.get("pit") if pkg else None)
                 game = self.game.set_zones(zones, now) + self.game.tick(now)
                 due = self.link.connected and self._status_due and now >= self._status_due
                 if due:

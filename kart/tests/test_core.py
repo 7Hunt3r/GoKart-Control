@@ -260,8 +260,9 @@ def lap_zone(**kw):
 
 def fix(e, n, stopped=False, **kw):
     lat, lon = ll(e, n)
-    return {"t": "self", "kart": 2, "fix": True, "lat": lat, "lon": lon, "stopped": stopped,
-            "vesc_link": True, "mode_req": 1, "scale": 0.714, **kw}
+    # 54 km/h (15 m/s): fast enough that the test tracks' long hops are not GPS outliers
+    return {"t": "self", "kart": 2, "fix": True, "lat": lat, "lon": lon, "stopped": stopped, "gps_kph": 54.0,
+            "heading": 90.0, "vesc_link": True, "mode_req": 1, "scale": 0.714, **kw}
 
 
 def lines(recs):
@@ -484,13 +485,13 @@ class Game(unittest.TestCase):
 
     def test_meter(self):
         g, _ = self.engine(boost_zone())
-        g.on_self(fix(-30, 0, scale=0.714, mode_req=1), 1.0)
+        g.on_self(fix(-15, 0, scale=0.714, mode_req=1), 1.0)
         self.assertEqual(g.meter(1.0)["kind"], "normal")
-        g.on_self(fix(-30, 0, scale=1.0, mode_req=1), 1.5)
+        g.on_self(fix(-15, 0, scale=1.0, mode_req=1), 1.5)
         self.assertEqual(g.meter(1.5)["kind"], "boost")
-        g.on_self(fix(-30, 0, scale=0.5, mode_req=1), 2.0)
+        g.on_self(fix(-15, 0, scale=0.5, mode_req=1), 2.0)
         self.assertEqual(g.meter(2.0)["kind"], "mud")
-        g.on_self(fix(-30, 0, scale=0.0, mode_req=1, stopped=True), 2.5)
+        g.on_self(fix(-15, 0, scale=0.0, mode_req=1, stopped=True), 2.5)
         self.assertEqual(g.meter(2.5)["kind"], "stopped")
         g.on_self(fix(0, 0, scale=1.0, mode_req=2), 3.0)   # SPORT + a 1.0 boost: scale unchanged, still a boost
         self.assertEqual(g.meter(3.0)["kind"], "boost")
@@ -504,6 +505,118 @@ class Game(unittest.TestCase):
         self.assertEqual(kc.CMD_NAMES[6], "boost")
         with self.assertRaises(kc.CommandError):
             kc.command_text("boost", 5)                     # never from the touchscreen / POST /cmd
+
+
+def gps(e, n, kph=18.0, heading=90.0, hdop=1.0, sats=10):
+    lat, lon = ll(e, n)
+    return {"t": "gps", "kart": 2, "lat": lat, "lon": lon, "kph": kph, "heading": heading, "hdop": hdop,
+            "sats": sats, "ms": 1000}
+
+
+class GpsSamples(unittest.TestCase):
+    def test_poor_samples_never_trigger(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(boost_zone(r=10), lap_zone()), 0.0)
+        self.assertEqual(lines(g.on_gps(gps(-12, 0), 1.0)), [])
+        r = g.on_gps(gps(-5, 0, hdop=4.5), 1.2) + g.on_gps(gps(0, 0, sats=4), 1.4) + g.on_gps(gps(5, 0, hdop=99.0), 1.6)
+        self.assertEqual(r, [])                                     # inside the pad + across the line: nothing
+        pos = g.snapshot(1.6)["pos"]
+        self.assertEqual((pos["quality"], pos["usable"]), ("poor", False))
+        self.assertIsNotNone(pos["lat"])                            # still drawn (greyed) on the HUD
+        self.assertEqual(lines(g.on_gps(gps(2, 0), 1.8)), ["boost 5 1.00"])
+
+    def test_outlier_rejected_then_accepted_when_repeated(self):
+        f = kc.GpsFilter()
+        self.assertEqual(f.feed(*ll(0, 0), 18.0, 90.0, 1.0, 10, 0.0, "gps")["quality"], "good")
+        # 5 m/s * 0.2 s + 15 m = 16 m allowed; 40 m is a glitch
+        self.assertEqual(f.feed(*ll(40, 0), 18.0, 90.0, 1.0, 10, 0.2, "gps")["quality"], "outlier")
+        self.assertEqual(f.feed(*ll(1.5, 0), 18.0, 90.0, 1.0, 10, 0.4, "gps")["quality"], "good")    # back on track
+        self.assertEqual(f.feed(*ll(80, 0), 18.0, 90.0, 1.0, 10, 0.6, "gps")["quality"], "outlier")
+        r = f.feed(*ll(81, 0), 18.0, 90.0, 1.0, 10, 0.8, "gps")     # repeats near the jump: accept, new track
+        self.assertEqual((r["quality"], r["reset"]), ("good", True))
+        self.assertEqual(f.feed(*ll(82, 0), 18.0, 90.0, 1.0, 10, 1.0, "gps")["reset"], False)
+
+    def test_outlier_does_not_trigger_or_cross(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(boost_zone(e=50, r=10), lap_zone()), 0.0)
+        r = g.on_gps(gps(-3, 0), 1.0) + g.on_gps(gps(50, 0), 1.2)    # 53 m in 0.2 s: glitch into the pad, across the line
+        self.assertEqual(lines(r) + [x["ev"] for x in r], [])
+        self.assertEqual(g.snapshot(1.2)["pos"]["quality"], "outlier")
+
+    def test_heading_held_below_1_5_mps(self):
+        f = kc.GpsFilter()
+        self.assertEqual(f.feed(*ll(0, 0), 10.0, 45.0, 1.0, 10, 0.0, "gps")["heading"], 45.0)
+        self.assertEqual(f.feed(*ll(0.1, 0), 5.0, 270.0, 1.0, 10, 0.2, "gps")["heading"], 45.0)   # 1.39 m/s
+        self.assertEqual(f.feed(*ll(0.2, 0), 6.0, 300.0, 1.0, 10, 0.4, "gps")["heading"], 300.0)  # 1.67 m/s
+
+    def test_gps_lines_preferred_over_self(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(boost_zone(r=10)), 0.0)
+        g.on_gps(gps(-20, 0), 1.0)
+        # a self line saying "inside the pad" is ignored while gps lines are fresh
+        self.assertEqual(lines(g.on_self(fix(0, 0), 1.1)), [])
+        self.assertEqual(g.snapshot(1.1)["gps_source"], "gps")
+        self.assertEqual(lines(g.on_gps(gps(-9, 0), 1.2)), ["boost 5 1.00"])
+        # gps lines stop (gpsline off): the self line is the source again after 2 s
+        g2 = kc.GameEngine()
+        g2.set_zones(zones_doc(boost_zone(r=10)), 0.0)
+        g2.on_gps(gps(-20, 0), 1.0)
+        self.assertEqual(lines(g2.on_self(fix(-9, 0), 3.5)), ["boost 5 1.00"])
+        self.assertEqual(g2.snapshot(3.5)["gps_source"], "self")
+
+    def test_display_counts_gps_lines_not_bad(self):
+        d = kc.KartDisplay(configured_id=2)
+        self.assertEqual(d.ingest(gps(0, 0), 1.0, "w"), "gps")
+        self.assertEqual((d.rx_bad, d.snapshot(1.0)["gps_lines"]), (0, 1))
+        d.ingest(self_line(fix=True, lat=41.094, lon=-73.4167, hdop=1.2, gps_hz=5, fix_age_ms=180,
+                           base_lat=41.0932, base_lon=-73.4187, base_fix_age_s=1), 1.2, "w")
+        g = d.snapshot(1.2)["self"]["gps"]
+        self.assertEqual((g["hdop_now"], g["gps_hz"], g["fix_age_ms"]), (1.2, 5, 180))
+        self.assertEqual(g["base"], {"lat": 41.0932, "lon": -73.4187, "fix_age_s": 1})
+
+
+class BaseCorrectionTests(unittest.TestCase):
+    def base(self, de, dn, age=1):
+        lat, lon = ll(de, dn)                  # the pit radio's live fix, de/dn metres off the surveyed point O
+        return {"base_lat": lat, "base_lon": lon, "base_fix_age_s": age}
+
+    def test_vector_exposed_but_off_by_default(self):
+        c = kc.BaseCorrection()
+        c.set_pit({"lat": O[0], "lon": O[1]})
+        for t in range(10):
+            c.feed(self.base(3, -4), float(t))
+        snap = c.snapshot(9.0)
+        self.assertFalse(snap["applied"])
+        self.assertAlmostEqual(snap["vector"]["east_m"], -3.0, places=1)    # surveyed - live = -(3, -4)
+        self.assertAlmostEqual(snap["vector"]["north_m"], 4.0, places=1)
+        self.assertAlmostEqual(snap["vector"]["mag_m"], 5.0, places=1)
+        self.assertEqual(c.apply(1.0, 2.0, 9.0), (1.0, 2.0, False))
+
+    def test_applied_under_25_m_smoothed_and_stale_ignored(self):
+        c = kc.BaseCorrection(enabled=True)
+        c.set_pit({"lat": O[0], "lon": O[1]})
+        c.feed(self.base(2, 0), 0.0)
+        c.feed(self.base(4, 0), 1.0)
+        c.feed(self.base(400, 0, age=9), 2.0)                  # base fix too old: not used
+        lat, lon, ok = c.apply(*ll(10, 0), 2.0)
+        self.assertTrue(ok)
+        e, n = kc.local_en(lat, lon, O)
+        self.assertAlmostEqual(e, 7.0, places=1)                # 10 - mean(2, 4)
+        c.feed(self.base(2, 0), 40.0)                           # the window is 30 s: the old ones age out
+        self.assertEqual(c.vector(40.0)["samples"], 1)
+        far = kc.BaseCorrection(enabled=True)
+        far.set_pit({"lat": O[0], "lon": O[1]})
+        far.feed(self.base(30, 0), 0.0)
+        self.assertFalse(far.apply(*ll(0, 0), 0.0)[2])
+        self.assertIn("not applied", far.snapshot(0.0)["why_not"])
+
+    def test_engine_uses_correction_when_enabled(self):
+        g = kc.GameEngine(gps_correction=True)
+        g.set_pit({"lat": O[0], "lon": O[1]})
+        g.set_zones(zones_doc(boost_zone(e=0, r=10)), 0.0)
+        g.on_self(fix(-30, 0, **self.base(-8, 0)), 0.5)       # live base fix 8 m west: shift east by 8
+        self.assertTrue(g.snapshot(0.5)["correction"]["applied"])
+        self.assertEqual(lines(g.on_gps(gps(-17, 0), 1.0)), ["boost 5 1.00"])    # -17 + 8 = -9: inside r 10
 
 
 if __name__ == "__main__":

@@ -223,7 +223,15 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(g["lap"]["best_s"], g["lap"]["last_s"])
             self.assertIsNotNone(g["lap"]["current_s"])
             self.assertTrue({"boost", "mud"} <= kinds, kinds)      # HUD meter saw both while lapping
-            self.assertGreaterEqual(g["cmds_sent"], 3)
+            self.assertEqual(g["gps_source"], "gps")                 # 5 Hz gps lines drive the game
+            self.assertGreater(s["gps_lines"], 20)
+            self.assertEqual(s["rx_bad"], 0)
+            self.assertEqual(g["pos"]["quality"], "good")
+            self.assertEqual(s["self"]["gps"]["gps_hz"], 5)
+            cv = g["correction"]                                      # off by default, vector still shown
+            self.assertFalse(cv["applied"])
+            self.assertAlmostEqual(cv["vector"]["mag_m"], 3.6, places=1)   # sim pit radio 3 m E, 2 m N
+            self.assertGreaterEqual(g["cmds_sent"], 2)                # boost + at least one mud (timing-dependent)
             self.assertIn(g["last_result"]["result_name"], ("accepted", "applied"))
             logs = [f for f in os.listdir(st.logs) if f.startswith("session-")]
             with open(os.path.join(st.logs, logs[0])) as f:

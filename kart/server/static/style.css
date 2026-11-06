@@ -1,8 +1,11 @@
 /* GoKart kart driver display, 1024x600 touch, readable in sunlight:
-   black on white, heavy weights, no animation, no external assets. */
+   black on white, heavy weights, no external assets. Game layer (ZONES.md): a black
+   speedometer card, boost meter, lap panel and a short flash on boost/lap; the
+   safety banners (STOPPED, SLOW, connection) stay on top of everything. */
 :root {
   --bg: #ffffff; --ink: #000; --muted: #444; --line: #000;
   --ok: #007a1f; --warn: #ff9a00; --bad: #d00000; --stale: #8a8a8a; --info: #0b4fb3;
+  --boost: #ffb000; --mud: #8a5a2b; --mudlite: #c58a4e;
   font-family: "DejaVu Sans", "Helvetica Neue", Arial, sans-serif;
 }
 * { box-sizing: border-box; }
@@ -12,22 +15,22 @@ button { font: inherit; font-weight: 800; border: 3px solid var(--line); border-
   background: #fff; color: var(--ink); cursor: pointer; }
 .hidden { display: none !important; }
 
-/* banners: full width, above everything */
+/* banners: full width, above everything (including the game flash) */
+#banners { position: relative; z-index: 30; }
 .banner { text-align: center; font-weight: 900; letter-spacing: .05em; padding: 4px 8px; }
 .alerts { display: flex; }
 .alerts .banner { flex: 1; white-space: nowrap; overflow: hidden; }
 .banner.stop { background: var(--bad); color: #fff; font-size: 44px; line-height: 56px; }
 .banner.slow { background: var(--warn); color: #000; font-size: 32px; line-height: 56px; }
 /* with an alert banner showing, the dashboard gives up some height so the mode buttons stay on screen */
-body.alerting .big { font-size: 100px; }
-body.alerting .big.na { font-size: 54px; padding-bottom: 8px; }
-body.alerting .mid { font-size: 42px; }
-body.alerting .mbtn { height: 66px; }
+body.alerting .mid { font-size: 34px; }
+body.alerting .mbtn { height: 64px; }
+body.alerting .battnote { display: none; }
 .banner.bad { background: #000; color: #fff; font-size: 22px; border-bottom: 4px solid var(--bad); }
 .banner.sim { background: repeating-linear-gradient(45deg, #ffd400 0 16px, #111 16px 32px); color: #fff;
   text-shadow: 0 0 4px #000, 0 0 2px #000; font-size: 15px; padding: 1px; }
 
-.main { flex: 1; display: grid; grid-template-columns: 372px 1fr; min-height: 0; }
+.main { flex: 1; display: grid; grid-template-columns: 380px 1fr; min-height: 0; }
 
 /* left: driver dashboard */
 .dash { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-right: 4px solid var(--line); min-height: 0; overflow: hidden; }
@@ -40,31 +43,63 @@ body.alerting .mbtn { height: 66px; }
 .chip.id { background: #000; border-color: #000; }
 .chip.id.bad { background: var(--bad); }
 
-.speed { display: flex; align-items: flex-end; gap: 8px; line-height: .9; }
-.big { font-size: 128px; font-weight: 900; letter-spacing: -.04em; min-width: 190px; text-align: right; font-variant-numeric: tabular-nums; }
-.big.na { font-size: 64px; color: var(--stale); letter-spacing: 0; padding-bottom: 14px; }
-.unit { display: flex; flex-direction: column; font-weight: 900; font-size: 30px; padding-bottom: 10px; }
-.unit small { font-size: 16px; color: var(--muted); }
+/* speedometer: black card, arc 0-30 mph, big italic number, gear badge */
+.speedo { position: relative; flex: 1 1 0; min-height: 118px; background: #000; border-radius: 12px; overflow: hidden; }
+.speedo svg { position: absolute; inset: 2px 0 0 0; width: 100%; height: calc(100% - 2px); }
+.arcbg { fill: none; stroke: #333; stroke-width: 22; stroke-linecap: butt; }
+.arcfg { fill: none; stroke: #fff; stroke-width: 22; stroke-linecap: butt; }
+.speedo.boost .arcfg { stroke: var(--boost); }
+.speedo.mud .arcfg { stroke: var(--mudlite); }
+.speedo.stopped .arcfg { stroke: var(--bad); }
+.tick { stroke: #fff; stroke-width: 3; }
+.tick.minor { stroke: #777; stroke-width: 2; }
+.ticklbl { fill: #bbb; font-size: 15px; font-weight: 800; }
+.mphnum { fill: #fff; font-size: 96px; font-weight: 900; font-style: italic; letter-spacing: -3px; font-variant-numeric: tabular-nums; }
+.mphnum.na { fill: #9a9a9a; font-size: 46px; font-style: normal; letter-spacing: 0; }
+.mphunit { fill: #ddd; font-size: 20px; font-weight: 900; letter-spacing: 2px; }
+.mphunit tspan { fill: #999; font-size: 14px; }
+.gear { position: absolute; right: 6px; bottom: 6px; width: 70px; display: flex; flex-direction: column; align-items: center;
+  background: #fff; color: #000; border: 3px solid #fff; border-radius: 9px; padding: 0 0 2px; line-height: 1; }
+.gear b { font-size: 40px; font-weight: 900; font-style: italic; }
+.gear span { font-size: 11px; font-weight: 900; letter-spacing: .02em; white-space: nowrap; }
+.gear.req { border-style: dashed; border-color: var(--info); background: #dfe8f7; }
+.gear.stale { background: #9a9a9a; border-color: #9a9a9a; }
+.gear.g2 { background: var(--boost); border-color: var(--boost); }
+
+/* boost meter: live current scale vs the mode's scale (mark); above = BOOST, below = MUD */
+.meter { display: flex; align-items: center; gap: 8px; height: 34px; flex: none; }
+.btrack { position: relative; flex: 1; height: 26px; border: 3px solid var(--line); border-radius: 6px; overflow: hidden;
+  background: repeating-linear-gradient(-60deg, #fff 0 10px, #eee 10px 20px); }
+.btrack > div { position: absolute; top: 0; bottom: 0; }
+#bBase { left: 0; width: 0; background: #333; }
+#bFill { left: 0; width: 0; }
+#bMark { width: 4px; margin-left: -2px; background: #000; top: -3px; bottom: -3px; }
+.meter.boost #bFill { background: repeating-linear-gradient(-60deg, var(--boost) 0 10px, #ff7a00 10px 20px); }
+.meter.mud #bFill { background: var(--mud); }
+.blabel { min-width: 104px; text-align: center; font-weight: 900; font-size: 20px; border-radius: 6px; padding: 2px 4px; border: 3px solid var(--line); }
+.meter.boost .blabel { background: var(--boost); font-style: italic; }
+.meter.mud .blabel { background: var(--mud); color: #fff; border-color: var(--mud); }
+.meter.stopped .blabel { background: var(--bad); color: #fff; border-color: var(--bad); }
+.meter.unknown .blabel, .meter.normal .blabel { color: var(--muted); border-color: var(--stale); font-size: 16px; }
 .note { font-size: 15px; font-weight: 700; color: var(--muted); min-height: 18px; }
 .note.cmd { font-size: 16px; color: #000; }
 
-.batt { border-top: 3px solid var(--line); padding-top: 4px; }
+.batt { border-top: 3px solid var(--line); padding-top: 2px; }
 .battrow { display: flex; align-items: baseline; gap: 12px; }
-.mid { font-size: 52px; font-weight: 900; font-variant-numeric: tabular-nums; }
-.volts { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.mid { font-size: 40px; font-weight: 900; font-variant-numeric: tabular-nums; line-height: 1.05; }
+.volts { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .bar { height: 14px; border: 3px solid var(--line); border-radius: 4px; margin-top: 2px; }
 .bar > div { height: 100%; width: 0; background: var(--ok); }
 .stale .mid, .stale .volts, .stale .modenow { color: var(--stale); }
 
-.mode { border-top: 3px solid var(--line); padding-top: 4px; }
-.modeline { display: flex; align-items: baseline; gap: 10px; }
 .lbl { font-size: 18px; font-weight: 900; color: var(--muted); }
-.modenow { font-size: 34px; font-weight: 900; }
 
 .fault { background: var(--bad); color: #fff; font-weight: 900; font-size: 18px; padding: 3px 8px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .modebtns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: auto; }
-.mbtn { height: 78px; font-size: 21px; padding: 0 2px; position: relative; overflow: hidden; --p: 0; }
+.mbtn { height: 76px; font-size: 20px; padding: 0 2px; position: relative; overflow: hidden; --p: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1; }
+.mbtn small { font-size: 26px; font-style: italic; font-weight: 900; }
 .mbtn::after { content: ""; position: absolute; left: 0; bottom: 0; height: 8px; width: calc(var(--p) * 100%); background: var(--info); }
 .mbtn.actual { background: #000; color: #fff; }
 .mbtn.req:not(.actual) { border-style: dashed; border-color: var(--info); color: var(--info); }
@@ -79,6 +114,31 @@ body.alerting .mbtn { height: 66px; }
 .mapctl button.sel { background: #000; color: #fff; }
 .mapmsg { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(0,0,0,.85); color: #fff;
   font-size: 28px; font-weight: 900; padding: 10px 18px; border-radius: 10px; text-align: center; pointer-events: none; }
-.resume { position: absolute; top: 8px; left: 8px; background: #000; color: #fff; font-weight: 800; font-size: 16px; padding: 4px 10px; border-radius: 6px; }
+.resume { position: absolute; bottom: 26px; left: 8px; background: #000; color: #fff; font-weight: 800; font-size: 16px; padding: 4px 10px; border-radius: 6px; }
 .mapnote { position: absolute; left: 0; right: 0; bottom: 0; font-size: 12px; font-weight: 700; color: #000;
   background: rgba(255,255,255,.8); padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+
+/* lap panel (top-left of the map) and the GAME OFF chip */
+.lappanel { position: absolute; top: 8px; left: 8px; min-width: 196px; background: rgba(0,0,0,.88); color: #fff;
+  border-radius: 10px; padding: 0 12px 6px; font-variant-numeric: tabular-nums; pointer-events: none; overflow: hidden; }
+.lapflag { height: 10px; margin: 0 -12px 4px; background: repeating-conic-gradient(#fff 0 25%, #000 0 50%) 0 0 / 10px 10px; }
+.lapn { font-size: 20px; font-weight: 900; letter-spacing: .06em; }
+.lapn b { font-size: 34px; font-style: italic; }
+.lapcur { font-size: 40px; font-weight: 900; line-height: 1; font-style: italic; }
+.laprow { display: flex; justify-content: space-between; gap: 14px; font-size: 20px; font-weight: 800; }
+.laprow span { color: #aaa; font-size: 15px; align-self: center; }
+.laprow.best b { color: #4cff7a; }
+.lappanel.idle .lapcur { color: #9a9a9a; font-size: 26px; }
+.gamechip { position: absolute; top: 8px; left: 8px; font-size: 14px; background: #fff; color: #555; border-color: #999; }
+
+/* boost / mud / lap flash: covers the page for ~0.7 s, below the safety banners */
+.flash { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.flash span { font-size: 132px; font-weight: 900; font-style: italic; letter-spacing: -.02em; color: #000;
+  -webkit-text-stroke: 4px #fff; text-shadow: 0 0 18px rgba(0,0,0,.5); white-space: nowrap; }
+.flash.fboost { background: repeating-linear-gradient(-60deg, rgba(255,176,0,.88) 0 60px, rgba(255,122,0,.88) 60px 120px);
+  animation: flash .75s ease-out forwards; }
+.flash.fmud { background: rgba(110,70,30,.8); animation: flash .6s ease-out forwards; }
+.flash.fmud span { color: #fff; -webkit-text-stroke: 3px #000; }
+.flash.flap { background: rgba(255,255,255,.35); animation: flash 1.1s ease-out forwards; }
+.flash.flap span { font-size: 96px; background: rgba(0,0,0,.85); color: #fff; -webkit-text-stroke: 0; padding: 4px 26px; border-radius: 14px; }
+@keyframes flash { 0% { opacity: 1; } 55% { opacity: 1; } 100% { opacity: 0; } }

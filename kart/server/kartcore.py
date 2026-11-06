@@ -143,7 +143,11 @@ class KartState:
         if msg.get("vesc_link") is True:
             self.vesc = {f: msg.get(f) for f in VESC_FIELDS}
             self.last_vesc_mono = now
-        self.gps_now = {"fix": msg.get("fix"), "sats": msg.get("sats"), "gps_age_s": msg.get("gps_age_s")}
+        self.gps_now = {"fix": msg.get("fix"), "sats": msg.get("sats"), "gps_age_s": msg.get("gps_age_s"),
+                        # USB-only self fields (firmware 2026-11-06+); absent = None
+                        "hdop": msg.get("hdop"), "fix_age_ms": msg.get("fix_age_ms"), "gps_hz": msg.get("gps_hz"),
+                        "base_lat": msg.get("base_lat"), "base_lon": msg.get("base_lon"),
+                        "base_fix_age_s": msg.get("base_fix_age_s")}
         lat, lon = msg.get("lat"), msg.get("lon")
         if msg.get("fix") is True and lat is not None and lon is not None:
             self.fix = {"lat": lat, "lon": lon, "heading": msg.get("heading"),
@@ -193,6 +197,12 @@ class KartState:
             "gps": {
                 "fix_now": self.gps_now.get("fix"),
                 "sats_now": self.gps_now.get("sats"),
+                "hdop_now": self.gps_now.get("hdop"),
+                "gps_hz": self.gps_now.get("gps_hz"),
+                "fix_age_ms": self.gps_now.get("fix_age_ms"),
+                "base": ({"lat": self.gps_now.get("base_lat"), "lon": self.gps_now.get("base_lon"),
+                          "fix_age_s": self.gps_now.get("base_fix_age_s")}
+                         if self.gps_now.get("base_lat") is not None else None),
                 "last_fix": dict(self.fix) if self.fix else None,
                 "fix_age_s": fix_age,
                 "fix_fresh": fix_fresh,
@@ -219,6 +229,7 @@ class KartDisplay:
         self.simulation = False
         self.rx_lines = 0
         self.rx_bad = 0
+        self.gps_lines = 0
         self.last_uptime = None
         self.heltec_reboots = 0
         # SLOW has no telemetry flag (all 8 flag bits are used), so it is inferred
@@ -276,6 +287,8 @@ class KartDisplay:
             self.status_mono = now
             if str(msg.get("fw") or "").startswith("sim-"):
                 self.simulation = True
+        elif t == "gps":
+            self.gps_lines += 1             # 5 Hz position line; the game engine consumes it
         elif t == "ble":
             self.ble = dict(msg)
             self.ble_mono = now
@@ -331,6 +344,7 @@ class KartDisplay:
                           for c in list(self.cmds_seen)[-6:]],
             "rx_lines": self.rx_lines,
             "rx_bad": self.rx_bad,
+            "gps_lines": self.gps_lines,
         }
 
 
@@ -582,6 +596,122 @@ def parse_zones(doc):
     return doc.get("enabled") is True, areas, lapline, ignored
 
 
+# --- GPS samples for the game: quality filter, outliers, heading, base correction ---
+GPS_LINE_FRESH_S = 2.0       # {"t":"gps"} lines seen this recently: the self line's position is not used
+GPS_MAX_HDOP = 4.0           # worse = drawn greyed, never used for triggers or laps
+GPS_MIN_SATS = 5
+GPS_JUMP_SLACK_M = 15.0      # outlier: further than speed * dt + 15 m from the last accepted sample
+GPS_HEADING_MIN_MPS = 1.5    # Doppler heading is noise below this; keep the last good one
+CORR_WINDOW_S = 30.0         # base correction: mean over this window
+CORR_MAX_BASE_AGE_S = 5.0
+CORR_MAX_M = 25.0
+
+
+def _dist_m(a, b):
+    e, n = local_en(b[0], b[1], a)
+    return math.hypot(e, n)
+
+
+class GpsFilter:
+    """One position sample in -> {lat, lon, kph, heading, hdop, sats, quality, usable, reset}.
+    quality: "good" | "poor" (hdop > 4 or sats < 5; drawn greyed, never triggers) |
+    "outlier" (jump > speed*dt + 15 m from the last accepted sample). A second sample
+    that agrees with a rejected one is accepted ("reset": the old track is not joined
+    to it, so no lap crossing is drawn across the jump). hdop/sats missing (older
+    firmware) are not filtered."""
+
+    def __init__(self):
+        self.acc = None          # (lat, lon, mono, mps) last accepted good sample
+        self.cand = None         # (lat, lon, mono) last rejected outlier
+        self.heading = None      # last good Doppler heading
+
+    def feed(self, lat, lon, kph, heading, hdop, sats, now, source):
+        mps = (float(kph) / 3.6) if _num(kph) else 0.0
+        if _num(heading) and mps >= GPS_HEADING_MIN_MPS:
+            self.heading = float(heading)
+        out = {"lat": lat, "lon": lon, "kph": kph if _num(kph) else None, "heading": self.heading,
+               "hdop": hdop if _num(hdop) else None, "sats": sats if _num(sats) else None,
+               "source": source, "mono": now, "usable": False, "reset": False}
+        if (_num(hdop) and hdop > GPS_MAX_HDOP) or (_num(sats) and sats < GPS_MIN_SATS):
+            out["quality"] = "poor"
+            return out
+        if self.acc is not None:
+            dt = max(0.0, now - self.acc[2])
+            limit = max(mps, self.acc[3]) * dt + GPS_JUMP_SLACK_M
+            if _dist_m(self.acc[:2], (lat, lon)) > limit:
+                c = self.cand
+                if c is not None and _dist_m(c[:2], (lat, lon)) <= mps * max(0.0, now - c[2]) + GPS_JUMP_SLACK_M:
+                    out["reset"] = True          # repeated: the kart really is over there
+                else:
+                    self.cand = (lat, lon, now)
+                    out["quality"] = "outlier"
+                    return out
+        self.cand = None
+        self.acc = (lat, lon, now, mps)
+        out.update(quality="good", usable=True)
+        return out
+
+
+class BaseCorrection:
+    """Optional position-domain correction (config "gps_correction", default off):
+    pit surveyed position (map package "pit") minus the pit radio's live fix
+    (self base_lat/base_lon, used while base_fix_age_s < 5), averaged over 30 s,
+    applied only when under 25 m. The vector is always computed and exposed."""
+
+    def __init__(self, enabled=False):
+        self.enabled = bool(enabled)
+        self.pit = None
+        self.samples = deque()   # (mono, dlat, dlon)
+
+    def set_pit(self, pit):
+        p = (float(pit["lat"]), float(pit["lon"])) if isinstance(pit, dict) and _num(pit.get("lat")) and _num(pit.get("lon")) else None
+        if p != self.pit:
+            self.pit = p
+            self.samples.clear()
+
+    def _trim(self, now):
+        while self.samples and now - self.samples[0][0] > CORR_WINDOW_S:
+            self.samples.popleft()
+
+    def feed(self, msg, now):
+        bl, bo, age = msg.get("base_lat"), msg.get("base_lon"), msg.get("base_fix_age_s")
+        if self.pit and _num(bl) and _num(bo) and _num(age) and age < CORR_MAX_BASE_AGE_S:
+            self.samples.append((now, self.pit[0] - bl, self.pit[1] - bo))
+        self._trim(now)
+
+    def vector(self, now):
+        self._trim(now)
+        if not self.samples or self.pit is None:
+            return None
+        n = len(self.samples)
+        dlat = sum(x[1] for x in self.samples) / n
+        dlon = sum(x[2] for x in self.samples) / n
+        e = dlon * math.pi / 180 * R_EARTH * math.cos(math.radians(self.pit[0]))
+        nn = dlat * math.pi / 180 * R_EARTH
+        return {"dlat": dlat, "dlon": dlon, "east_m": round(e, 2), "north_m": round(nn, 2),
+                "mag_m": round(math.hypot(e, nn), 2), "samples": n}
+
+    def apply(self, lat, lon, now):
+        v = self.vector(now) if self.enabled else None
+        if v and v["mag_m"] < CORR_MAX_M:
+            return lat + v["dlat"], lon + v["dlon"], True
+        return lat, lon, False
+
+    def snapshot(self, now):
+        v = self.vector(now)
+        why = None
+        if not self.enabled:
+            why = "off (config gps_correction)"
+        elif self.pit is None:
+            why = "no surveyed pit position in the map package"
+        elif v is None:
+            why = "no fresh pit radio fix (base_fix_age_s < 5) in 30 s"
+        elif v["mag_m"] >= CORR_MAX_M:
+            why = f"{v['mag_m']:.0f} m >= {CORR_MAX_M:.0f} m: not applied"
+        return {"enabled": self.enabled, "applied": bool(self.enabled and v and v["mag_m"] < CORR_MAX_M),
+                "vector": v, "pit": list(self.pit) if self.pit else None, "why_not": why}
+
+
 class GameEngine:
     """Zone triggers + lap timing for this kart. Callers hold the app lock.
 
@@ -591,8 +721,14 @@ class GameEngine:
     no zone commands while the kart reports STOPPED (a boost entered while stopped
     is used up, not saved for later); mud wins over boost when they overlap."""
 
-    def __init__(self, local_enabled=True):
+    def __init__(self, local_enabled=True, gps_correction=False):
         self.local_enabled = bool(local_enabled)
+        self.filter = GpsFilter()
+        self.corr = BaseCorrection(gps_correction)
+        self.gps_line_mono = None   # last {"t":"gps"} line
+        self.gps_lines = 0
+        self.pos = None             # last filtered sample (for the HUD)
+        self.gps_hz = None
         self.doc = None
         self.version = None
         self.enabled = False
@@ -683,13 +819,43 @@ class GameEngine:
         self.stopped = msg.get("stopped")
         self.mode_req = msg.get("mode_req")
         self.scale = msg.get("scale") if msg.get("vesc_link") is True else None
+        if _num(msg.get("gps_hz")):
+            self.gps_hz = msg.get("gps_hz")
+        self.corr.feed(msg, now)
         recs = []
-        if not self.active():
-            return recs
+        if self.gps_line_mono is not None and now - self.gps_line_mono <= GPS_LINE_FRESH_S:
+            return self._timeouts(now, recs) if self.active() else recs     # 5 Hz gps lines carry the position
         lat, lon = msg.get("lat"), msg.get("lon")
         if msg.get("fix") is not True or not _num(lat) or not _num(lon):
+            return self._timeouts(now, recs) if self.active() else recs
+        return self._sample(float(lat), float(lon), msg.get("gps_kph"), msg.get("heading"),
+                            msg.get("hdop"), msg.get("sats"), now, "self", recs)
+
+    def on_gps(self, msg, now):
+        """{"t":"gps"} line (one per fix, up to 5 Hz): the preferred position source."""
+        recs = []
+        lat, lon = msg.get("lat"), msg.get("lon")
+        if not _num(lat) or not _num(lon):
+            return recs
+        self.gps_line_mono = now
+        self.gps_lines += 1
+        return self._sample(float(lat), float(lon), msg.get("kph"), msg.get("heading"),
+                            msg.get("hdop"), msg.get("sats"), now, "gps", recs)
+
+    def set_pit(self, pit):
+        self.corr.set_pit(pit)
+
+    def _sample(self, lat, lon, kph, heading, hdop, sats, now, source, recs):
+        lat, lon, corrected = self.corr.apply(lat, lon, now)
+        self.pos = self.filter.feed(lat, lon, kph, heading, hdop, sats, now, source)
+        self.pos["corrected"] = corrected
+        if not self.active():
+            return recs
+        if not self.pos["usable"]:
             return self._timeouts(now, recs)
-        self._evaluate(float(lat), float(lon), now, recs)
+        if self.pos["reset"]:
+            self.prev_fix = None
+        self._evaluate(lat, lon, now, recs)
         return recs
 
     def tick(self, now):
@@ -830,6 +996,13 @@ class GameEngine:
             "events": [{k: v for k, v in e.items() if k != "mono"} | {"age_s": _age(e["mono"], now)}
                        for e in list(self.events)[-8:]],
             "cmds_sent": self.cmds_sent,
+            "pos": ({k: v for k, v in self.pos.items() if k != "mono"} | {"age_s": _age(self.pos["mono"], now)})
+                   if self.pos else None,
+            "gps_source": "gps" if self.gps_line_mono is not None and now - self.gps_line_mono <= GPS_LINE_FRESH_S
+                          else "self",
+            "gps_lines": self.gps_lines,
+            "gps_hz": self.gps_hz,
+            "correction": self.corr.snapshot(now),
             "last_result": ({k: v for k, v in self.last_result.items() if k != "mono"}
                             | {"age_s": _age(self.last_result["mono"], now)}) if self.last_result else None,
         }

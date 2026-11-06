@@ -20,6 +20,11 @@ a timed current-scale override like the firmware's GK_CMD_BOOST: cmd line with c
 arg = scale percent; rejected (4) while stopped, no_vesc (3) without a VESC; the
 `scale` field follows it and reverts to the mode scale after SECS ("boost over" log);
 STOP/START cancel it. Speed follows the live scale (17 mph at 1.0).
+GPS like firmware 2026-11-06+: a {"t":"gps"} line per fix at 5 Hz (--nogpsline = off,
+like `gpsline off`), and the self line's USB-only hdop / fix_age_ms / gps_hz /
+base_lat / base_lon / base_fix_age_s (the pit radio's fix: 3 m east, 2 m north of the
+origin; null while --pitloss has the pit unheard). --hdop X sets the reported HDOP
+(e.g. 6 = poor: the kart's game ignores every sample).
 Scenario flags: --kart 2 --nofix (own GPS never fixes) --novesc (VESC link down)
 --fault N (VESC fault code) --pitloss (pit link drops 20 s of every 60 s)
 --pit-stop-at S / --pit-start-at S (the pit sends STOP/START at those seconds)
@@ -131,7 +136,13 @@ class SimKart:
         self.volts = max(60.5, self.volts - amps * dt / 3600 * 0.6)
         self.ah += amps * dt / 3600
 
-    def tele(self, t, rssi=0.0, snr=0.0, rx_ms=0, base_rssi=0, uptime=0):
+    def gps_line(self, ms, hdop):
+        e, n, hd = loop_point(self.s)
+        lat, lon = en_to_latlon(e, n)
+        return {"t": "gps", "kart": self.k, "lat": round(lat, 7), "lon": round(lon, 7),
+                "kph": round(self.mph * 1.609344, 1), "heading": round(hd, 1), "hdop": hdop, "sats": 10, "ms": ms}
+
+    def tele(self, t, rssi=0.0, snr=0.0, rx_ms=0, base_rssi=0, uptime=0, extra=None):
         e, n, hd = loop_point(self.s)
         lat, lon = en_to_latlon(e, n)
         fix = not self.nofix
@@ -156,7 +167,7 @@ class SimKart:
                 "pps": fix, "wifi": False, "writes": True,
                 "last_cmd_seq": self.last_cmd_seq, "cmd_result": self.cmd_result,
                 "ah": round(self.ah, 2), "uptime_s": uptime % 65536, "base_rssi": base_rssi,
-                "rssi": rssi, "snr": snr, "rx_ms": rx_ms}
+                "rssi": rssi, "snr": snr, "rx_ms": rx_ms, **(extra or {})}
 
 
 class Sim:
@@ -300,6 +311,7 @@ class Sim:
     def run(self):
         last = time.monotonic()
         next_self = last
+        next_gps = last + 0.1
         next_fleet = [last + 0.3, last + 0.8]
         next_ble = last + 1.0
         next_log = last + 4.0
@@ -322,10 +334,19 @@ class Sim:
                 self.me.step(dt * self.args.warp, now)
                 for f in self.fleet:
                     f.step(dt, now)
+                if now >= next_gps and not self.args.nofix:
+                    next_gps += 0.2
+                    if not self.args.nogpsline:
+                        self.emit(self.me.gps_line(int(el * 1000), self.args.hdop))
                 if now >= next_self:
                     next_self += 0.5
+                    up = self.pit_link_up(now)
+                    blat, blon = en_to_latlon(3.0, 2.0)
+                    extra = {"hdop": 99.0 if self.args.nofix else self.args.hdop, "fix_age_ms": 999999 if self.args.nofix else 150,
+                             "gps_hz": 5, "base_lat": round(blat, 7) if up else None,
+                             "base_lon": round(blon, 7) if up else None, "base_fix_age_s": 1 if up else None}
                     self.emit(self.me.tele("self", rx_ms=int(el * 1000), uptime=self.uptime(),
-                                           base_rssi=-71 + random.randint(-6, 6) if self.pit_link_up(now) else 0))
+                                           base_rssi=-71 + random.randint(-6, 6) if up else 0, extra=extra))
                 for i, f in enumerate(self.fleet):
                     if now >= next_fleet[i]:
                         next_fleet[i] += 1.0
@@ -425,6 +446,8 @@ def main():
     ap.add_argument("--seed", type=int)
     ap.add_argument("--course", action="store_true", help="drive the game course (kart/sim/zones.course.json)")
     ap.add_argument("--warp", type=float, default=1.0, help="own kart moves this many times faster (tests)")
+    ap.add_argument("--nogpsline", action="store_true", help="no 5 Hz gps lines (firmware `gpsline off`)")
+    ap.add_argument("--hdop", type=float, default=0.9, help="reported HDOP (> 4 = poor: the game ignores it)")
     args = ap.parse_args()
     if args.course:
         global ORIGIN

@@ -3,6 +3,7 @@
 # Adapted from pit/kiosk/start-chromium.sh (worked on the pit Pi 4, 2026-11-05).
 # Pi 3 B (1 GB RAM): one renderer, small disk cache. Extra flags can be added via
 # GOKART_CHROMIUM_FLAGS in /etc/default/gokart-kart-kiosk (e.g. --disable-gpu).
+# --autoplay-policy: the game sounds (WebAudio, driver page) play with no touch first.
 URL="${GOKART_KIOSK_URL:-http://127.0.0.1:8081/}"
 BIN="$(command -v chromium || command -v chromium-browser)"
 PROFILE="$HOME/.config/gokart-kart-kiosk"
@@ -16,5 +17,6 @@ exec "$BIN" --kiosk --noerrdialogs --disable-infobars --touch-events=enabled \
   --disable-session-crashed-bubble --disable-features=Translate,TranslateUI,MediaRouter \
   --overscroll-history-navigation=0 --disable-pinch --check-for-update-interval=31536000 \
   --renderer-process-limit=1 --disk-cache-size=33554432 \
+  --autoplay-policy=no-user-gesture-required \
   $GOKART_CHROMIUM_FLAGS \
   --user-data-dir="$PROFILE" "$URL"

@@ -3,7 +3,11 @@
    Server-Sent Events (/events, ~5 Hz). The page never invents values: anything
    missing or stale is shown as such ("--", "NO GPS FIX", greyed + age).
    Map projection, imagery placement, dead reckoning and pinch/drag are adapted
-   from pit/server/static/app.js so the pit and the karts draw the same way. */
+   from pit/server/static/app.js so the pit and the karts draw the same way.
+   Game layer (pit/server/map/ZONES.md): speedometer arc, gear, boost meter from the
+   live current scale, lap panel, zone overlays on the map, and a short flash +
+   synthesized sound (WebAudio, no files) on boost / mud / lap events. The page only
+   SHOWS the game; the server decides and sends the boost commands. */
 "use strict";
 
 const MODES = ["ECO", "NORMAL", "SPORT"];
@@ -55,16 +59,23 @@ function render() {
   else setChip("vescChip", "NO VESC", "bad");
   const g = me.gps || {};
   if (!fresh) setChip("gpsChip", "GPS ?", "");
-  else if (g.fix_fresh) setChip("gpsChip", `GPS ${nul(g.sats_now) ? "" : g.sats_now}`, "ok");
+  else if (g.fix_fresh && gpsWeak()) setChip("gpsChip", `GPS WEAK${nul(g.hdop_now) || g.hdop_now >= 99 ? "" : " " + Number(g.hdop_now).toFixed(1)}`, "warn");
+  else if (g.fix_fresh) setChip("gpsChip", `GPS ${nul(g.sats_now) ? "" : g.sats_now}${g.gps_hz === 5 ? " 5Hz" : ""}`, "ok");
   else setChip("gpsChip", "NO FIX", "warn");
 
-  // speed: GPS ground speed from a fresh fix only
+  // speed: GPS ground speed from a fresh fix only; the arc falls back to wheel mph when there is no fix
   const d = me.derived || {};
   const mphEl = $("mph");
-  if (fresh && !nul(d.gps_mph)) { mphEl.textContent = Math.round(d.gps_mph); mphEl.className = "big"; $("mphSrc").textContent = "GPS"; }
-  else { mphEl.textContent = !fresh ? "NO DATA" : "NO FIX"; mphEl.className = "big na"; $("mphSrc").textContent = "GPS"; }
-  $("mphNote").textContent = fresh && me.vesc_fresh && !nul(d.wheel_mph)
-    ? `wheel ${Math.abs(d.wheel_mph).toFixed(0)} mph (uncalibrated)` : (fresh && !g.fix_fresh && !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "");
+  const wheel = fresh && me.vesc_fresh && !nul(d.wheel_mph) ? Math.abs(d.wheel_mph) : null;
+  let arcMph = null;
+  if (fresh && !nul(d.gps_mph)) { mphEl.textContent = Math.round(d.gps_mph); mphEl.setAttribute("class", "mphnum"); $("mphSrc").textContent = "GPS"; arcMph = d.gps_mph; }
+  else if (wheel !== null) { mphEl.textContent = Math.round(wheel); mphEl.setAttribute("class", "mphnum"); $("mphSrc").textContent = "WHEEL"; arcMph = wheel; }
+  else { mphEl.textContent = !fresh ? "NO DATA" : "NO FIX"; mphEl.setAttribute("class", "mphnum na"); $("mphSrc").textContent = "GPS"; }
+  $("mphNote").textContent = fresh && !g.fix_fresh
+    ? (wheel !== null ? "NO GPS FIX: wheel speed (uncalibrated)" : !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "")
+    : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph (uncalibrated)` : "");
+  const game = S.game || {}, meter = (game.meter || {});
+  drawSpeedo(arcMph, fresh ? meter.kind : "unknown");
 
   // battery: only from samples with vesc_link true, with its own age
   const v = me.vesc || {};
@@ -77,9 +88,11 @@ function render() {
   bar.style.background = !battFresh ? "var(--stale)" : d.battery_pct < 20 ? "var(--bad)" : d.battery_pct < 40 ? "var(--warn)" : "var(--ok)";
   $("battNote").textContent = nul(v.volts) ? "no VESC data yet" : !battFresh ? `VESC data ${ageText(me.vesc_age_s)} old` : (d.under_load ? "under load: % reads low" : "20S pack, 60-84 V");
 
-  // mode requested -> actual
+  // mode requested -> actual, shown as the gear badge
   const mr = st.mode_req, ma = st.mode_actual;
-  document.querySelector(".mode").classList.toggle("stale", !fresh);
+  const gear = $("gear");
+  gear.className = "gear" + (!fresh ? " stale" : "") + (fresh && !nul(mr) && mr !== ma ? " req" : "") + (fresh && ma === 2 ? " g2" : "");
+  $("gearLetter").textContent = nul(ma) ? "?" : MODES[ma][0];
   $("modeNow").textContent = nul(ma) ? "unknown" : MODES[ma] + (st.mode_confirmed ? " ✓" : "");
   let mn = "";
   if (!nul(mr) && mr !== ma) mn = `requested ${MODES[mr]}: not applied yet`;
@@ -116,7 +129,199 @@ function render() {
   if (!cn && me.id_mismatch) cn = `Heltec says kart ${me.heltec_id}; display config says ${me.configured_id}`;
   $("cmdNote").textContent = cn;
 
+  renderGame(game, fresh, st);
   drawMap();
+}
+
+/* ------------------------------------------------------- game: speedo */
+const SPEEDO = { cx: 180, cy: 150, r: 128, a0: 160, a1: 380, max: 30 };
+function polar(a, r) { const t = a * Math.PI / 180; return [SPEEDO.cx + r * Math.cos(t), SPEEDO.cy + r * Math.sin(t)]; }
+function arcPath(a0, a1, r) {
+  const p0 = polar(a0, r), p1 = polar(a1, r);
+  return `M${p0[0].toFixed(1)} ${p0[1].toFixed(1)} A${r} ${r} 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${p1[0].toFixed(1)} ${p1[1].toFixed(1)}`;
+}
+(function buildSpeedo() {
+  $("arcBg").setAttribute("d", arcPath(SPEEDO.a0, SPEEDO.a1, SPEEDO.r));
+  let svg = "";
+  for (let v = 0; v <= SPEEDO.max; v += 5) {
+    const a = SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * v / SPEEDO.max, major = v % 15 === 0;   // labels clear of the number
+    const p = polar(a, SPEEDO.r - 14), q = polar(a, SPEEDO.r - (major ? 30 : 24));
+    svg += `<line class="tick${major ? "" : " minor"}" x1="${p[0].toFixed(1)}" y1="${p[1].toFixed(1)}" x2="${q[0].toFixed(1)}" y2="${q[1].toFixed(1)}"/>`;
+    if (major) { const l = polar(a, SPEEDO.r - 44); svg += `<text class="ticklbl" x="${l[0].toFixed(1)}" y="${(l[1] + 5).toFixed(1)}" text-anchor="middle">${v}</text>`; }
+  }
+  $("ticks").innerHTML = svg;
+})();
+function drawSpeedo(mph, kind) {
+  const f = nul(mph) ? 0 : Math.max(0, Math.min(1, mph / SPEEDO.max));
+  $("arcFg").setAttribute("d", f > 0.004 ? arcPath(SPEEDO.a0, SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * f, SPEEDO.r) : "");
+  $("speedo").className = "speedo" + (kind === "boost" || kind === "mud" || kind === "stopped" ? " " + kind : "");
+}
+
+/* ------------------------------------------- game: meter, laps, events */
+function lapTime(s) {
+  if (nul(s)) return "--";
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return `${m}:${r < 10 ? "0" : ""}${r.toFixed(1)}`;
+}
+function renderGame(game, fresh, st) {
+  // boost meter: live scale vs the requested mode's scale
+  const m = game.meter || {}, kind = fresh ? (m.kind || "unknown") : "unknown";
+  const bm = $("boostMeter");
+  bm.className = "meter " + kind;
+  const sc = fresh && !nul(m.scale) ? Math.max(0, Math.min(1, m.scale)) : null, ms = nul(m.mode_scale) ? null : m.mode_scale;
+  $("bMark").style.left = ms === null ? "100%" : ms * 100 + "%";
+  $("bMark").style.display = ms === null ? "none" : "";
+  const base = sc === null ? 0 : ms === null ? sc : Math.min(sc, ms);
+  $("bBase").style.width = base * 100 + "%";
+  const fill = $("bFill");
+  if (sc !== null && ms !== null && kind === "boost") { fill.style.left = ms * 100 + "%"; fill.style.width = Math.max(0.03, sc - ms) * 100 + "%"; }
+  else if (sc !== null && ms !== null && kind === "mud") { fill.style.left = sc * 100 + "%"; fill.style.width = (ms - sc) * 100 + "%"; }
+  else fill.style.width = "0";
+  const ov = m.override;
+  const left = ov && ov.left_s > 0 ? ` ${Math.ceil(ov.left_s)}s` : "";
+  $("boostLabel").textContent = kind === "boost" ? "BOOST!" + left : kind === "mud" ? "MUD" + left
+    : kind === "stopped" ? "STOP" : kind === "normal" ? `POWER ${Math.round(sc * 100)}%` : "POWER --";
+
+  // lap panel or the GAME OFF chip
+  const on = game.on === true;
+  show("lapPanel", on);
+  show("gameChip", !on);
+  if (!on) $("gameChip").textContent = "GAME OFF";
+  else {
+    const lap = game.lap || {};
+    $("lapPanel").classList.toggle("idle", !lap.running);
+    $("lapNum").textContent = lap.running ? String(lap.count + 1) : "-";
+    $("lapCur").textContent = lap.running ? lapTime(lap.current_s) : "CROSS THE LINE";
+    $("lapLast").textContent = lapTime(lap.last_s);
+    $("lapBest").textContent = lapTime(lap.best_s);
+  }
+  gameEvents(game);
+}
+
+let lastEvSeq = null;
+function gameEvents(game) {
+  const evs = game.events || [];
+  const top = evs.reduce((a, e) => Math.max(a, e.seq), 0);
+  if (lastEvSeq === null || top < lastEvSeq) { lastEvSeq = top; return; }   // first frame / server restarted: no replay
+  evs.filter((e) => e.seq > lastEvSeq && e.age_s < 3).forEach((e) => {
+    if (e.ev === "boost") { flash("BOOST!", "boost"); sound("boost"); }
+    else if (e.ev === "mud") { flash("MUD", "mud"); sound("mud"); }
+    else if (e.ev === "lap") { flash(`LAP ${e.lap}  ${lapTime(e.lap_s)}${e.best ? "  BEST" : ""}`, "lap"); sound(e.best ? "best" : "lap"); }
+    else if (e.ev === "lap_start") sound("go");
+  });
+  lastEvSeq = top;
+}
+let flashTimer = null;
+function flash(text, cls) {
+  const f = $("flash");
+  f.className = "flash hidden"; void f.offsetWidth;     // restart the animation
+  $("flashText").textContent = text;
+  f.className = "flash f" + cls;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { f.className = "flash hidden"; }, cls === "lap" ? 1200 : 800);
+}
+
+/* synthesized sounds (no audio files). The kiosk runs Chromium with
+   --autoplay-policy=no-user-gesture-required; elsewhere audio starts after the first touch. */
+let actx = null;
+function audio() {
+  if (!cfg("sound", true)) return null;
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+  } catch (e) { return null; }
+  return actx;
+}
+window.addEventListener("pointerdown", () => { if (cfg("sound", true)) audio(); }, { capture: true });
+function tone(ctx, t0, dur, type, f0, f1, vol) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f0, t0);
+  if (f1) o.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(vol, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(ctx.destination);
+  o.start(t0); o.stop(t0 + dur + 0.05);
+}
+function sound(kind) {
+  const ctx = audio(); if (!ctx || ctx.state !== "running") return;
+  const t = ctx.currentTime + 0.01;
+  if (kind === "boost") { tone(ctx, t, 0.55, "sawtooth", 180, 900, 0.22); tone(ctx, t + 0.05, 0.5, "square", 360, 1500, 0.08); tone(ctx, t + 0.55, 0.25, "square", 1320, 0, 0.12); }
+  else if (kind === "mud") { tone(ctx, t, 0.45, "square", 140, 60, 0.2); tone(ctx, t + 0.12, 0.35, "triangle", 90, 50, 0.25); }
+  else if (kind === "lap") { tone(ctx, t, 0.14, "square", 880, 0, 0.14); tone(ctx, t + 0.18, 0.3, "square", 1320, 0, 0.14); }
+  else if (kind === "best") { [880, 1109, 1319, 1760].forEach((f, i) => tone(ctx, t + i * 0.13, 0.2, "square", f, 0, 0.13)); }
+  else if (kind === "go") tone(ctx, t, 0.25, "square", 1046, 0, 0.12);
+}
+
+/* ---------------------------------------------- game: zones on the map */
+function drawZones(ctx, en, px) {
+  const doc = S.map && S.map.zones;
+  if (!doc || !Array.isArray(doc.zones)) return;
+  const on = !!(S.game && S.game.on), inside = new Set((S.game && S.game.inside) || []);
+  ctx.save();
+  if (!on) { ctx.globalAlpha = 0.35; ctx.setLineDash([8, 6]); }
+  doc.zones.forEach((z) => {
+    try {
+      if (z.type === "lapline" && z.a && z.b) return lapLine(ctx, px(en(z.a[0], z.a[1])), px(en(z.b[0], z.b[1])), on);
+      if (z.type !== "boost" && z.type !== "mud") return;
+      const boost = z.type === "boost";
+      let c, rad;
+      ctx.beginPath();
+      if (z.shape === "circle" && !nul(z.lat)) {
+        c = px(en(z.lat, z.lon)); rad = Math.max(4, z.r_m * view.scale);
+        ctx.arc(c[0], c[1], rad, 0, 2 * Math.PI);
+      } else if (z.shape === "polygon" && Array.isArray(z.points) && z.points.length >= 3) {
+        const pts = z.points.map((p) => px(en(p[0], p[1])));
+        pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+        ctx.closePath();
+        c = [pts.reduce((a, q) => a + q[0], 0) / pts.length, pts.reduce((a, q) => a + q[1], 0) / pts.length];
+        rad = Math.min(...pts.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1])));
+      } else return;
+      ctx.fillStyle = !on ? "rgba(140,140,140,.4)" : boost ? "rgba(255,176,0,.45)" : "rgba(110,70,30,.55)";
+      ctx.fill();
+      ctx.lineWidth = inside.has(z.id) ? 7 : 4;
+      ctx.strokeStyle = !on ? "#666" : boost ? "#e08a00" : "#4a2e12";
+      ctx.stroke();
+      if (boost) chevrons(ctx, c, rad, on);
+      else mudDots(ctx, c, rad, on);
+    } catch (e) { /* a malformed zone never breaks the map */ }
+  });
+  ctx.restore();
+}
+function chevrons(ctx, c, rad, on) {
+  const s = Math.max(5, Math.min(18, rad * 0.28));
+  ctx.save(); ctx.setLineDash([]);
+  ctx.lineWidth = Math.max(3, s * 0.45); ctx.lineJoin = "miter"; ctx.lineCap = "butt";
+  for (let i = -1; i <= 1; i++) {
+    const y = c[1] - i * s * 1.1;
+    ctx.beginPath(); ctx.moveTo(c[0] - s, y + s * 0.6); ctx.lineTo(c[0], y - s * 0.4); ctx.lineTo(c[0] + s, y + s * 0.6);
+    ctx.strokeStyle = "#000"; ctx.lineWidth = Math.max(5, s * 0.6); ctx.stroke();
+    ctx.strokeStyle = on ? "#fff" : "#ddd"; ctx.lineWidth = Math.max(3, s * 0.35); ctx.stroke();
+  }
+  ctx.restore();
+}
+function mudDots(ctx, c, rad, on) {
+  const s = Math.max(2, Math.min(7, rad * 0.12));
+  ctx.save(); ctx.setLineDash([]);
+  ctx.fillStyle = on ? "#2b1a0a" : "#555";
+  [[-1.6, -0.6], [0.4, -1.2], [1.5, 0.3], [-0.5, 1], [0.9, 1.5], [-1.8, 1.4]].forEach(([dx, dy]) => {
+    ctx.beginPath(); ctx.arc(c[0] + dx * s * 2.2, c[1] + dy * s * 2.2, s * (0.7 + 0.25 * Math.abs(dx)), 0, 2 * Math.PI); ctx.fill();
+  });
+  ctx.restore();
+}
+function lapLine(ctx, a, b, on) {
+  const L = Math.hypot(b[0] - a[0], b[1] - a[1]); if (L < 2) return;
+  const w = Math.max(8, Math.min(16, 2.5 * view.scale)), n = Math.max(2, Math.round(L / w));
+  ctx.save(); ctx.setLineDash([]);
+  ctx.translate(a[0], a[1]); ctx.rotate(Math.atan2(b[1] - a[1], b[0] - a[0]));
+  ctx.fillStyle = "#000"; ctx.fillRect(-2, -w - 2, L + 4, 2 * w + 4);
+  const cw = L / n;
+  for (let i = 0; i < n; i++) for (let j = 0; j < 2; j++) {
+    ctx.fillStyle = (i + j) % 2 ? "#000" : on ? "#fff" : "#bbb";
+    ctx.fillRect(i * cw, (j - 1) * w, cw, w);
+  }
+  ctx.restore();
 }
 
 /* --------------------------------------------------- mode buttons (hold) */
@@ -166,8 +371,19 @@ function projection() {
   const cl = Math.cos(o.lat * Math.PI / 180);
   return (lat, lon) => [(lon - o.lon) * Math.PI / 180 * R_EARTH * cl, (lat - o.lat) * Math.PI / 180 * R_EARTH];
 }
-function drPosition(key, k, now, en, fresh) {
-  const f = k.gps && k.gps.last_fix; if (!f) return null;
+/* own kart: the game engine's filtered sample (5 Hz gps lines, else the self line) when fresh */
+function gamePos() {
+  const p = S.game && S.game.pos;
+  return p && !nul(p.lat) && p.age_s !== null && p.age_s < 3 ? p : null;
+}
+function gpsWeak() { const p = gamePos(); return !!p && p.quality === "poor"; }
+function selfFix(me) {
+  const p = gamePos();
+  if (p) return { lat: p.lat, lon: p.lon, heading: p.heading, gps_kph: p.kph || 0, quality: p.quality };
+  return me.gps && me.gps.last_fix;
+}
+function drPosition(key, f, now, en, fresh) {
+  if (!f) return null;
   let d = dr.get(key);
   if (!d || d.fixLat !== f.lat || d.fixLon !== f.lon) {
     const e = en(f.lat, f.lon);
@@ -201,9 +417,10 @@ function drawMap() {
   if (!en) { msg.textContent = "No map yet and no GPS fix"; show("mapMsg", true); $("mapNote").textContent = mapNoteText(); return; }
 
   const now = performance.now();
-  const me = S.self, mf = me.gps && me.gps.last_fix;
+  const me = S.self, mf = selfFix(me);
   const meFresh = me.link === "online" && me.gps.fix_fresh;
-  const mePos = mf ? drPosition("self", me, now, en, meFresh) : null;
+  const meGood = meFresh && (!mf || !mf.quality || mf.quality === "good");    // poor / outlier: drawn greyed
+  const mePos = mf ? drPosition("self", mf, now, en, meFresh) : null;
 
   // follow resumes follow_resume_s after the last touch
   if (userFollow && !view.follow && Date.now() >= view.pausedUntil) { view.follow = true; view.all = false; view.scale = null; }
@@ -236,6 +453,7 @@ function drawMap() {
     pkg.course.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
     ctx.stroke(); ctx.setLineDash([]);
   }
+  drawZones(ctx, en, px);
   if (pkg && pkg.pit && !nul(pkg.pit.lat)) {
     const b = px(en(pkg.pit.lat, pkg.pit.lon));
     ctx.fillStyle = "#000"; ctx.fillRect(b[0] - 9, b[1] - 9, 18, 18);
@@ -248,7 +466,7 @@ function drawMap() {
     const fresh = k.link === "online" && k.gps.fix_fresh;
     const gone = k.link === "offline";
     if (k.trail.length > 1) trail(ctx, k.trail, en, px, fresh ? k.color : "#888", 4, 0.6);
-    const p = px(drPosition(k.id, k, now, en, fresh) || en(k.gps.last_fix.lat, k.gps.last_fix.lon));
+    const p = px(drPosition(k.id, k.gps.last_fix, now, en, fresh) || en(k.gps.last_fix.lat, k.gps.last_fix.lon));
     ctx.beginPath(); ctx.arc(p[0], p[1], 15, 0, 2 * Math.PI);
     ctx.fillStyle = fresh ? k.color : gone ? "rgba(210,210,210,.6)" : "#bbb"; ctx.fill();
     ctx.lineWidth = 3; ctx.strokeStyle = fresh ? "#000" : "#555";
@@ -269,10 +487,11 @@ function drawMap() {
       ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(19, 20); ctx.lineTo(0, 10); ctx.lineTo(-19, 20); ctx.closePath();
     } else { ctx.beginPath(); ctx.arc(0, 0, 18, 0, 2 * Math.PI); }
     ctx.lineWidth = 8; ctx.strokeStyle = "#fff"; ctx.stroke();
-    ctx.fillStyle = meFresh ? me.color : "#999"; ctx.fill();
-    ctx.lineWidth = 3; ctx.strokeStyle = "#000"; if (!meFresh) ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = meGood ? me.color : "#999"; ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = "#000"; if (!meGood) ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
     ctx.restore();
     if (!meFresh) label(ctx, `last fix ${ageText(me.gps.fix_age_s)}`, p[0] + 24, p[1] - 14);
+    else if (!meGood) label(ctx, mf.quality === "outlier" ? "GPS jump ignored" : "weak GPS: zones paused", p[0] + 24, p[1] - 14);
   }
   if (!mf) { msg.textContent = me.link === "online" ? "NO GPS FIX YET" : "NO POSITION"; show("mapMsg", true); }
   else if (!meFresh) { msg.textContent = me.link === "online" ? "NO GPS FIX" : "POSITION FROZEN"; show("mapMsg", true); }
