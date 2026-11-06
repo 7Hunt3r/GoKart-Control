@@ -70,15 +70,17 @@ diskutil unmountDisk "$DISK"
 
 # --- 4. boot partition ---------------------------------------------------------
 BOOT=""
-for i in $(seq 1 40); do
-  diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
+# Both real runs (pit 2026-11-05, kart 2026-11-06) needed ~2-3 minutes after Imager exited before the
+# card could be mounted, so poll for up to 5 minutes and also ask for the whole disk to be mounted.
+for i in $(seq 1 150); do
+  diskutil mount "${DISK}s1" >/dev/null 2>&1 || diskutil mountDisk "$DISK" >/dev/null 2>&1 || true
   BOOT="$(diskutil info "${DISK}s1" | { grep -E '^\s*Mount Point:' || true; } | sed -E 's/.*Mount Point:\s+//')"
   # macOS often auto-mounts the card itself while we poll; accept that too.
   [ -z "$BOOT" ] && [ -f /Volumes/bootfs/config.txt ] && BOOT=/Volumes/bootfs
   [ -n "$BOOT" ] && [ -d "$BOOT" ] && break
   sleep 2
 done
-[ -n "$BOOT" ] && [ -f "$BOOT/config.txt" ] || { echo "could not mount boot partition ${DISK}s1"; exit 5; }
+[ -n "$BOOT" ] && [ -f "$BOOT/config.txt" ] || { echo "could not mount boot partition ${DISK}s1 (image is written). Mount it by hand, then:"; echo "  cp build/user-data build/network-config build/meta-data /Volumes/bootfs/ && diskutil eject $DISK"; exit 5; }
 echo "boot partition at $BOOT"
 cp build/user-data build/network-config build/meta-data "$BOOT/"
 
