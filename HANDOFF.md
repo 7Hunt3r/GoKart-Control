@@ -236,6 +236,29 @@ Going back: `pio run -d firmware/heltec -t upload` from your branch, as document
   `espota.py -i 192.168.151.44 -p 3232` (arduino-cli's mDNS discovery of gokart-2.local fails;
   espota by IP works).
 
+## 2026-11-06 evening: game layer ("Mario Kart"), GPS upgrades, repeater heartbeat
+
+- **Game layer is in, off by default.** Contract: pit/server/map/ZONES.md. Pit: ZONES editor on the
+  operator page (boost pad, mud, lap line), GAME ON/OFF on every page, BOOST per kart / BOOST ALL,
+  laps + leaderboard from telemetry. Kart Pi: zones arrive with the map package, geofence engine
+  runs on the kart's own 5 Hz GPS, sends `boost SECS SCALE` to the Heltec, racing HUD (speedo,
+  gear, boost meter, laps, flash + sound). Firmware: GK_CMD_BOOST timed scale override, auto-revert,
+  STOP/START cancel, never above 1.0. 36+48 unit tests, 3+3 e2e. **Not yet driven**: no zones drawn,
+  boost never run against a live VESC. First test: draw one boost pad on a straight, kart in ECO,
+  wheels-up, confirm the scale read-back rises and drops after 5 s.
+- **GPS**: L76K now GPS+BDS+GLONASS, GGA+RMC only, 5 Hz at 115200 (configured after every
+  (re)detect); `{"t":"gps"}` USB line per fix; self line adds hdop/fix_age_ms/gps_hz and the pit
+  radio's fix (`base_lat/lon`). Kart Pi gates on hdop/sats, rejects jumps, holds heading below
+  1.5 m/s, dead-reckons 1.2 s. Pit: measured position-domain correction (pit radio fix vs the
+  surveyed `pit` marker) shown as a chip, applied only when tapped on and under 25 m with >= 6 sats.
+  Indoor bench fixes are 200 m off and frozen; that is the building, not the map (OSM puts
+  50 Day St within 30 m of the marker).
+- **Repeater heartbeat** (GK_MSG_REPEATER_INFO every 5 s behind the beacon copy): pit shows a
+  repeater chip with RSSI, battery and which karts it carries; LOST after 20 s. Repeater OLED needed
+  address detection (compass at 0x3C on the second T-Beam, screen at 0x3D).
+- Bench note: `base_rssi` 0 in telemetry means "not heard" but side by side the real RSSI is 0 to
+  -1 dBm, so the pit may show 0 on the bench; outdoors it reads normally.
+
 ## The connected kart: findings that matter
 
 See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.md).
