@@ -43,6 +43,7 @@ void IRAM_ATTR onLoraIrq() { loraIrq = true; loraIrqMicros = micros(); }
 bool     radioOk = false;
 int      radioStatus = -999;
 uint32_t loraTx = 0, loraRx = 0, loraRxBad = 0, relayRx = 0;
+uint8_t  raceState = 0, racePos[4] = {0, 0, 0, 0}; uint32_t raceInfoMs = 0;   // from the host, carried in every beacon
 uint8_t  txSeq = 0;
 
 // ---------------------------------------------------------------- gps
@@ -245,6 +246,7 @@ static void transmitBeacon(uint8_t src) {
   bool fix = lastFixMs && (millis() - lastFixMs) < 3000;
   if (fix) { b.lat_e7 = (int32_t)llround(fixLat * 1e7); b.lon_e7 = (int32_t)llround(fixLon * 1e7); }
   b.utc_s = gpsUnix(); b.sync_src = src; b.karts_online = (uint8_t)kartsOnline();
+  if (raceInfoMs && millis() - raceInfoMs < 30000) { b.race_state = raceState; memcpy(b.pos, racePos, 4); }   // stale after 30 s
   b.phase_ms = (uint16_t)(basePhaseUs(nullptr) / 1000UL);
   int st = radio.transmit((const uint8_t*)&b, sizeof b);
   loraIrq = false; radio.startReceive();
@@ -286,6 +288,14 @@ static uint8_t cmdFromName(const char* s) {
 static void hostJson(const char* line) {
   JsonDocument doc;
   if (deserializeJson(doc, line) != DeserializationError::Ok) { logf("bad json"); return; }
+  const char* lineType = doc["t"] | "";
+  if (!strcmp(lineType, "race")) {                      // {"t":"race","state":0-3,"pos":[p1..p8]} -> next beacons
+    raceState = (uint8_t)(doc["state"] | 0); memset(racePos, 0, 4);
+    JsonArray pos = doc["pos"].as<JsonArray>(); int k = 1;
+    for (JsonVariant v : pos) { if (k > GK_MAX_KARTS) break; int p = v | 0; if (p < 0 || p > 15) p = 0;
+      racePos[(k - 1) / 2] |= (uint8_t)((p & 0xF) << (((k - 1) % 2) * 4)); k++; }
+    raceInfoMs = millis(); return;
+  }
   const char* cmdName = doc["cmd"] | "";
   uint8_t cmd = cmdFromName(cmdName);
   if (!cmd) { logf("unknown cmd '%s'", cmdName); return; }

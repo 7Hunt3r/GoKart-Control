@@ -74,6 +74,13 @@ Plain-text lines are also accepted for maintenance: `status`,
 `wifi <ssid> <password>` (stored on the board for OTA, never echoed), `otapw <password>`,
 `reboot`.
 
+### Race positions (host -> T-Beam, added 2026-11-06)
+
+`{"t":"race","state":S,"pos":[p1,...,p8]}` — S: 0 idle, 1 countdown, 2 running, 3 finished; p = running position
+1-8 (0 = none). The base puts them into every beacon for the next 30 s (send at least every 10 s while racing).
+Each kart prints `{"t":"race","kart":N,"event":"position","position":P,"state":S}` when its own value changes
+and carries `race_pos`/`race_state` on its USB `self` line, so the kart display can show "P3" with no Wi-Fi.
+
 ## Map package endpoint (host side, for the kart Pis later)
 
 The pit host serves `GET /map/package.json` describing the current course map:

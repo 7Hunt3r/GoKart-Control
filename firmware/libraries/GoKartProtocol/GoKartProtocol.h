@@ -165,7 +165,11 @@ struct GkBaseInfo {       // pit beacon, once per second at GK_BEACON_PHASE_MS i
   uint16_t phase_ms;      // ms into the base's second when this packet started transmitting
   uint8_t  sync_src;      // 0 free-running, 1 GPS PPS, 2 derived from kart slot timing
   uint8_t  karts_online;  // how many karts the pit heard in the last 5 s
+  uint8_t  race_state;    // 0 idle, 1 countdown, 2 running, 3 finished (added 2026-11-06; 22-byte beacons lack it)
+  uint8_t  pos[4];        // running position per kart, one nibble each: kart k -> (pos[(k-1)/2] >> (((k-1)%2)*4)) & 0xF, 0 = none
 };
+#define GK_BASEINFO_LEN_V0 22   // beacons from firmware before race_state/pos; still accepted, fields read as 0
+static inline uint8_t gkBeaconPos(const struct GkBaseInfo& b, uint8_t kart);
 
 struct GkRepeaterInfo {   // repeater heartbeat; sent with GK_HDR_RELAY_BIT already set so no repeater relays it
   GkHeader h;
@@ -182,7 +186,7 @@ static_assert(sizeof(GkHeader) == 6, "header size");
 static_assert(sizeof(GkTelemetry) == 47, "telemetry size changed; update airtime budget and host decoder");
 #define GK_TELEMETRY_LEN_V0 46   // packets from firmware before slow_mph; still accepted, slow_mph reads as 0
 static_assert(sizeof(GkCommandMsg) == 14, "command size");
-static_assert(sizeof(GkBaseInfo) == 22, "base info size");
+static_assert(sizeof(GkBaseInfo) == 27, "base info size");
 static_assert(sizeof(GkRepeaterInfo) == 16, "repeater info size");
 
 // ---- Helpers ---------------------------------------------------------------
@@ -198,7 +202,7 @@ static inline uint8_t gkValidate(const uint8_t* buf, size_t len) {
   switch (h->type) {
     case GK_MSG_TELEMETRY: return (len == sizeof(GkTelemetry) || len == GK_TELEMETRY_LEN_V0) ? h->type : 0;
     case GK_MSG_COMMAND:   return len == sizeof(GkCommandMsg) ? h->type : 0;
-    case GK_MSG_BASE_INFO: return len == sizeof(GkBaseInfo) ? h->type : 0;
+    case GK_MSG_BASE_INFO: return (len == sizeof(GkBaseInfo) || len == GK_BASEINFO_LEN_V0) ? h->type : 0;
     case GK_MSG_REPEATER_INFO: return len == sizeof(GkRepeaterInfo) ? h->type : 0;
   }
   return 0;
@@ -206,6 +210,19 @@ static inline uint8_t gkValidate(const uint8_t* buf, size_t len) {
 
 static inline bool gkIsRelayed(const GkHeader& h) { return (h.version & GK_HDR_RELAY_BIT) != 0; }
 
+static inline uint8_t gkBeaconPos(const GkBaseInfo& b, uint8_t kart) {
+  if (kart < 1 || kart > GK_MAX_KARTS) return 0;
+  return (b.pos[(kart - 1) / 2] >> (((kart - 1) % 2) * 4)) & 0xF;
+}
+static inline void gkBeaconSetPos(GkBaseInfo& b, uint8_t kart, uint8_t p) {
+  if (kart < 1 || kart > GK_MAX_KARTS) return;
+  uint8_t i = (kart - 1) / 2, sh = ((kart - 1) % 2) * 4;
+  b.pos[i] = (b.pos[i] & ~(0xF << sh)) | ((p & 0xF) << sh);
+}
+// Copy a validated beacon (22 or 27 bytes) into b; fields a short packet lacks read as 0.
+static inline void gkCopyBeacon(GkBaseInfo& b, const uint8_t* buf, size_t len) {
+  memset(&b, 0, sizeof b); memcpy(&b, buf, len < sizeof b ? len : sizeof b);
+}
 // Copy a validated telemetry packet (46 or 47 bytes) into t; fields a short packet lacks read as 0.
 static inline void gkCopyTelemetry(GkTelemetry& t, const uint8_t* buf, size_t len) {
   memset(&t, 0, sizeof t); memcpy(&t, buf, len < sizeof t ? len : sizeof t);

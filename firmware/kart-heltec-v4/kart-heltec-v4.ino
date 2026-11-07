@@ -58,6 +58,7 @@ uint8_t  reportRate = 1;                      // 1 or 2 reports per second ("rat
 // Beacon sync: when there is no GPS PPS, align slots to the pit beacon's second.
 uint32_t syncEdgeMicros = 0, syncMs = 0;
 uint32_t baseUtc = 0, baseUtcMs = 0; uint8_t pitKartsOnline = 0; uint8_t baseSyncSrc = 0;
+uint8_t  racePos = 0, raceState = 0; uint32_t racePosMs = 0;   // from the pit beacon: running position (0 = none) and race state
 // VESC identity pin (UUID from FW_VERSION), optional
 String   vescUuid; bool vescIdentityBad = false; uint32_t vescIdCheckedMs = 0;
 
@@ -639,7 +640,7 @@ static void serviceLoraRxOne() {
       break;
     }
     case GK_MSG_BASE_INFO: {
-      GkBaseInfo b; memcpy(&b, buf, len);
+      GkBaseInfo b; gkCopyBeacon(b, buf, len);
       static uint32_t directBeaconMs = 0;
       bool relayed = gkIsRelayed(b.h);
       if (!relayed) directBeaconMs = millis();
@@ -649,6 +650,7 @@ static void serviceLoraRxOne() {
         syncMs = millis();
       }
       baseSyncSrc = b.sync_src; pitKartsOnline = b.karts_online;
+      if (len >= (size_t)sizeof(GkBaseInfo)) { uint8_t p = gkBeaconPos(b, kartId); if (p != racePos || b.race_state != raceState) Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"position\",\"position\":%u,\"state\":%u}\n", kartId, p, b.race_state); racePos = p; raceState = b.race_state; racePosMs = millis(); }
       if (b.lat_e7 && b.lon_e7) { baseLat = b.lat_e7 / 1e7; baseLon = b.lon_e7 / 1e7; baseFixMs = millis(); }
       if (b.utc_s) { baseUtc = b.utc_s; baseUtcMs = millis(); }
       break;
@@ -724,8 +726,9 @@ static void usbReport() {
     uint32_t now = millis();
     char bl[24] = "null", bo[24] = "null", ba[12] = "null";
     if (baseFixMs && now - baseFixMs < 30000) { snprintf(bl, sizeof bl, "%.7f", baseLat); snprintf(bo, sizeof bo, "%.7f", baseLon); snprintf(ba, sizeof ba, "%lu", (unsigned long)((now - baseFixMs) / 1000)); }
-    snprintf(buf + n - 1, sizeof buf - n + 1, ",\"hdop\":%.2f,\"fix_age_ms\":%lu,\"gps_hz\":%u,\"base_lat\":%s,\"base_lon\":%s,\"base_fix_age_s\":%s}",
-             gps.hdop.isValid() ? gps.hdop.hdop() : 99.0, lastFixMs ? (unsigned long)(now - lastFixMs) : 999999UL, gpsConfigured ? 5 : 1, bl, bo, ba);
+    bool rp = racePosMs && now - racePosMs < 30000;
+    snprintf(buf + n - 1, sizeof buf - n + 1, ",\"hdop\":%.2f,\"fix_age_ms\":%lu,\"gps_hz\":%u,\"base_lat\":%s,\"base_lon\":%s,\"base_fix_age_s\":%s,\"race_pos\":%u,\"race_state\":%u}",
+             gps.hdop.isValid() ? gps.hdop.hdop() : 99.0, lastFixMs ? (unsigned long)(now - lastFixMs) : 999999UL, gpsConfigured ? 5 : 1, bl, bo, ba, rp ? racePos : 0, rp ? raceState : 0);
   }
   Serial.println(buf);
 }
@@ -856,6 +859,7 @@ static void serviceOled() {
   oled.drawStr(0, 9, l);
   if (stopActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
   else if (raceHold) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "GRID"); oled.setDrawColor(1); }
+  else if (racePos && racePosMs && millis() - racePosMs < 30000) { char pb[6]; snprintf(pb, sizeof pb, "P%u", racePos); oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(104, 9, pb); oled.setDrawColor(1); }
   else if (ovActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(96, 9, ovScale >= (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].currentMaxScale : 1.0f) ? "BOOST" : "MUD"); oled.setDrawColor(1); }
   else if (slowActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "SLOW"); oled.setDrawColor(1); }
   else if (!writesEnabled()) oled.drawStr(100, 9, "RO");
