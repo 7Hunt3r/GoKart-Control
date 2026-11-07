@@ -111,8 +111,10 @@ def main():
         rec("race command outcome", bool(c) and c["outcomes"].get(str(k)) in want, f"{c and c['outcomes']} (want {sorted(want)})")
         if kst is not None:
             time.sleep(max(0, 5 - (time.time() - t_send)))
-            rs = get(kurl + "/api/state").get("race") or {}
-            rec("kart display saw countdown", bool(rs) and rs.get("last_event") in ("go", "countdown") or bool(rs.get("go_wall") or rs.get("last_go_wall")), f"race block: {json.dumps(rs)[:160]}" if rs else "no race block in kart /api/state yet (display build pending)")
+            kst2 = get(kurl + "/api/state")
+            rs = (kst2.get("game") or {}).get("race") or kst2.get("race") or {}
+            seen = bool(rs) and (rs.get("go_confirmed") is True or (rs.get("go_age_s") is not None and rs.get("go_age_s") < 30))
+            rec("kart display saw countdown + GO", seen, f"race block: {json.dumps(rs)[:160]}" if rs else "no race block in kart /api/state")
     except Exception as e:
         rec("race command outcome", False, str(e))
 
