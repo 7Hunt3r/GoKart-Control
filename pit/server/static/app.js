@@ -273,6 +273,17 @@ function updateTop() {
     const on = S.fleet.karts.filter((k) => k.link === "online").length;
     chip("kartsChip", `karts ${on}/${S.fleet.karts.length}`, on ? (on === S.fleet.karts.length ? "ok" : "warn") : "bad");
   }
+  const tr = S.track_rec, pe = $("paceChip");
+  if (pe) {
+    const on = !!(tr && tr.recording);
+    pe.classList.toggle("hidden", !on);
+    if (on) pe.textContent = `REC K${tr.kart}`;
+  }
+  const hc = GKWatch.healthChip(S.server.health), he = $("healthChip");
+  if (he) {
+    he.classList.toggle("hidden", !hc);
+    if (hc) { he.textContent = hc.text; he.className = "chip " + hc.cls; }
+  }
   chip("raceChip", race.active ? `RACE ${MODES[race.mode]} (${race.entered.length})` : "race off", race.active ? "info" : "");
   $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
   const cb = $("connBanner");
@@ -492,6 +503,7 @@ function drawMap() {
   }
   drawTrack(ctx, zed.on ? zed.track : zonesDoc().track, px, en, !zed.on && !zonesDoc().enabled);
   drawZones(ctx, zones, px, en, !zed.on && !zonesDoc().enabled);
+  drawPaceTrail(ctx, px, en);
   if (base && base.fix && !nul(base.lat)) {
     const b = px(en(base.lat, base.lon));
     ctx.fillStyle = "#000"; ctx.fillRect(b[0] - 7, b[1] - 7, 14, 14);
@@ -662,6 +674,76 @@ function drawBoostPanel(ctx, c, rpx) {
   }
   ctx.restore();
 }
+/* ------------------------------------------------ pace car / track builder */
+let pace = null, paceBusy = false, paceKey = "";
+function paceOn() { return !!$("paceBar") && (zed.on || !!(S && S.track_rec && S.track_rec.recording)); }
+function pollPace() {
+  if (!paceOn() || paceBusy) return;
+  paceBusy = true;
+  fetch("/track/recording", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null))
+    .then((j) => { if (j) { pace = j; updatePace(); if (S) drawMap(); } })
+    .catch(() => {}).finally(() => { paceBusy = false; });
+}
+function drawPaceTrail(ctx, px, en) {               // red trail of the recording (dashed once stopped)
+  if (!pace || !paceOn() || !pace.points || pace.points.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = "#e00000"; ctx.lineWidth = 3; ctx.globalAlpha = 0.9;
+  if (!pace.recording) ctx.setLineDash([6, 5]);
+  ctx.beginPath();
+  pace.points.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+  ctx.stroke();
+  const s0 = px(en(pace.points[0][0], pace.points[0][1]));
+  ctx.setLineDash([]); ctx.fillStyle = "#e00000"; ctx.beginPath(); ctx.arc(s0[0], s0[1], 6, 0, 2 * Math.PI); ctx.fill();
+  ctx.restore();
+}
+function updatePace() {
+  if (!$("paceBar") || !zed.on) return;
+  const sel = $("pcKart");
+  if (!sel.dataset.touched && S) {                    // default: the first online kart
+    const k = S.fleet.karts.find((q) => q.link === "online");
+    if (k) sel.value = String(k.id);
+  }
+  const p = pace || (S && S.track_rec) || {};
+  const rec = !!p.recording;
+  $("pcRec").classList.toggle("on", rec);
+  $("pcRec").disabled = rec;
+  $("pcStop").disabled = !rec;
+  $("pcClear").disabled = rec || !p.n_points;
+  $("pcStatus").textContent = rec ? `recording K${p.kart}: ${p.n_points} pts, ${p.laps.length} lap${p.laps.length === 1 ? "" : "s"}`
+    : p.n_points ? `K${p.kart} recording stopped: ${p.n_points} pts` : "drive the course with one kart: laps are detected when it returns to its start";
+  const laps = p.laps || [];
+  const key = JSON.stringify([laps, p.n_points > 0, rec]);
+  if (key === paceKey) return;
+  paceKey = key;
+  const rows = laps.map((l) => `<tr><td>Lap ${l.n}</td><td>${l.length_m.toFixed(0)} m</td><td>${l.time_s.toFixed(1)} s</td>`
+    + `<td><button data-pcuse="${l.n}">USE AS TRACK</button></td></tr>`).join("");
+  const all = p.n_points > 1 ? `<tr><td>All</td><td colspan="2">${p.n_points} pts</td><td><button data-pcuse="all">USE AS TRACK</button></td></tr>` : "";
+  $("pcLaps").innerHTML = rows || all ? `<table><tr><th>Lap</th><th>Length</th><th>Time</th><th></th></tr>${rows}${all}</table>` : "";
+}
+function paceAction(b) {
+  if (b.id === "pcRec") {
+    const p = pace || {};
+    if (p.n_points && !confirm("Replace the current recording?")) return;
+    post("/track/record", { kart: Number($("pcKart").value), action: "start" }).then((j) => { if (j && j.ok) { pace = j.recording; pace.points = []; updatePace(); } });
+  } else if (b.id === "pcStop") {
+    post("/track/record", { action: "stop" }).then((j) => { if (j && j.ok) { toast(`Recording stopped: ${j.recording.laps.length} lap(s)`); pollPace(); } });
+  } else if (b.id === "pcClear") {
+    if (!confirm("Clear the recording?")) return;
+    post("/track/record", { action: "clear" }).then((j) => { if (j && j.ok) { pace = j.recording; pace.points = []; paceKey = ""; updatePace(); if (S) drawMap(); } });
+  } else if (b.dataset.pcuse) {
+    if (zed.dirty && !confirm("Discard your unsaved zone edits and use the recorded lap?")) return;
+    const lap = b.dataset.pcuse === "all" ? "all" : Number(b.dataset.pcuse);
+    post("/track/use", { lap, width_m: Number($("pcWidth").value), lapline: $("pcLapline").checked ? "auto" : "none", simplify_m: 1.0 })
+      .then((j) => {
+        if (!j || !j.ok) return;
+        if (S) S.zones = j.zones;
+        zoneEdit(true);                             // reload the editor from the saved document
+        toast(`Track saved from ${lap === "all" ? "the whole recording" : "lap " + lap}: ${j.info.points} points`
+          + (j.info.lapline ? ", lap line placed" : "") + ` (zones v${j.zones.version})`);
+      });
+  }
+}
+
 /* course centreline (ZONES.md "Track route"): thin dashed line + direction chevrons every ~15 m */
 function drawTrack(ctx, trk, px, en, off) {
   if (!trk || !Array.isArray(trk.points) || !trk.points.length) return;
@@ -1124,6 +1206,7 @@ function render() {
   drawMap();
   updateSheet();
   updateZoneBar();
+  updatePace();
   updateCountdown();
   sndUi();
 }
@@ -1167,6 +1250,7 @@ document.addEventListener("click", (e) => {
     zed.dirty = true; setZoneTool("track"); if (S) drawMap();
   }
   else if (b.id === "zCancel") { if (zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(false); }
+  else if (b.id === "pcRec" || b.id === "pcStop" || b.id === "pcClear" || b.dataset.pcuse) paceAction(b);
   else if (b.id === "gameChip") {
     if (!S) return;
     const on = !zonesDoc().enabled;
@@ -1186,6 +1270,9 @@ function connect() {
   es.onmessage = (ev) => {
     lastMsg = Date.now();
     try { S = JSON.parse(ev.data); } catch (e) { return; }
+    heal.lastMsg = lastMsg;
+    heal.startId = S.server.start_id || null;
+    if (!heal.startId0) heal.startId0 = heal.startId;
     $("connBanner").dataset.server = "ok";
     render();
   };
@@ -1194,7 +1281,28 @@ function connect() {
   };
 }
 
+/* Self-healing (watch.js GKWatch.decide): reload after the pit server restarts, or when the
+   stream has been dead > 20 s while /healthz answers. Unsaved zone edits are never thrown away. */
+const heal = { pageStart: Date.now(), lastMsg: 0, startId0: null, startId: null, probeOkAt: 0, probeAt: 0, probing: false };
+function selfHeal() {
+  const now = Date.now(), d = GKWatch.decide(heal, now);
+  if (d === "reload") {
+    if (zed.dirty) return;
+    heal.pageStart = now;                 // belt and braces: no second reload from this page
+    location.reload();
+  } else if (d === "probe" && !heal.probing && now - heal.probeAt > 3000) {
+    heal.probing = true;
+    heal.probeAt = now;
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 4000);
+    fetch("/healthz", { cache: "no-store", signal: ac.signal })
+      .then((r) => { if (r.ok) heal.probeOkAt = Date.now(); })
+      .catch(() => {})
+      .finally(() => { clearTimeout(t); heal.probing = false; });
+  }
+}
+
 function watchdog() {
+  selfHeal();
   if (Date.now() - lastMsg > 3000) {
     const cb = $("connBanner");
     cb.textContent = lastMsg ? "PIT SERVER NOT RESPONDING: everything on screen is frozen" : "Connecting to pit server...";
@@ -1224,4 +1332,6 @@ setInterval(() => {
   if (moving) drawMap();
 }, 50);
 setInterval(refreshLog, 2000);
+setInterval(pollPace, 1000);
+if ($("pcKart")) $("pcKart").addEventListener("change", (e) => { e.target.dataset.touched = "1"; });
 connect();

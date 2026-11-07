@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import health  # noqa: E402
 import pitcore  # noqa: E402
 from link import Link  # noqa: E402
 
@@ -46,6 +47,8 @@ DEFAULTS = {
     "cmd_ttl_s": pitcore.DEFAULT_TTL_S,
     "origin": None,              # {"lat":..,"lon":..} last-resort map origin
     "log_dir": None,             # default <pit>/logs
+    "health_period_s": health.PERIOD_S,   # vcgencmd get_throttled + CPU temp sample period (Pi only)
+    "health_file": None,         # tests/dev: read the get_throttled text from this file instead of vcgencmd
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
@@ -57,11 +60,28 @@ PAGES = {"/": "index.html", "/index.html": "index.html", "/kiosk": "kiosk.html",
          "/m": "mobile.html", "/mobile": "mobile.html"}
 COOKIE = "gkpit"
 SSE_PERIOD_S = 0.25
+RACE_POS_PERIOD_S = 2.0      # {"t":"race"} repeat while a race runs (the base keeps it 30 s)
+RACE_FINISH_REPEATS = (0.0, 3.0, 6.0)   # finished: sent 3 times over 6 s, then left to the base
 
 
 def wall_iso(ts=None):
     return datetime.fromtimestamp(time.time() if ts is None else ts, timezone.utc) \
         .isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _read_boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip()[:36] or None
+    except OSError:
+        return None
+
+
+def _file_reader(path):
+    def read():
+        with open(path) as f:
+            return f.read()
+    return read
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +128,8 @@ class App:
         self.fleet = pitcore.Fleet(fallback_origin=fallback, pit_marker=self.map_cfg.get("pit"),
                                    gps_correction=bool(cfg.get("gps_correction", False)))
         self.zones_path = os.path.join(map_dir, "zones.json")
+        # pace car / track builder: recordings in map/recordings/, newest reloaded
+        self.fleet.recorder = pitcore.TrackRecorder(os.path.join(map_dir, "recordings"))
         self.zones_comment = None
         self._zones_mtime = None
         self._load_zones()
@@ -119,7 +141,18 @@ class App:
         self._saved_seq = self.cmds.next_seq
         self._state_cache = (0.0, b"{}")
         self.stopping = threading.Event()
+        self._race_tx = None                    # (state, pos) last sent to the T-Beam
+        self._race_tx_mono = 0.0
+        self._race_logged = None                # (state, pos) last written to the session log
+        self._race_finish_at = []               # pending repeat times (mono) for state 3
+        self._race_idle_pending = False         # NEW RACE / reset: one state-0 line
+        # start_id changes on every server start: the pages reload themselves when it does
+        self.start_id = secrets.token_hex(6)
+        self.boot_id = _read_boot_id()
+        self.health = health.Health(reader=_file_reader(cfg["health_file"]) if cfg.get("health_file") else "auto",
+                                    on_change=self._on_health)
         self.log.write("event", what="server_start", version=VERSION, pid=os.getpid(),
+                       start_id=self.start_id, boot_id=self.boot_id, health=self.health.available,
                        source=cfg.get("tcp") or cfg.get("serial_port") or "auto",
                        start_seq=self.cmds.next_seq)
 
@@ -286,7 +319,51 @@ class App:
         self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="race_start", secs=secs, laps=laps, id=d["id"], seq=d["seq"],
                        go_wall=wall_iso(t + secs))
+        self._race_tick(now, force=True)        # state 1, positions all 0, right away
         return {"command": d, "go_wall": wall_iso(t + secs), "secs": secs, "laps": laps}
+
+    # -- pace car / track builder ------------------------------------------------
+    def track_record(self, body, who):
+        action = body.get("action")
+        now, wall = time.monotonic(), wall_iso()
+        with self.lock:
+            rec = self.fleet.recorder
+            if action == "start":
+                kart = body.get("kart")
+                if isinstance(kart, bool) or kart not in pitcore.KART_IDS:
+                    raise pitcore.CommandError("kart must be 1-8")
+                out = rec.start(kart, now, wall)
+            elif action == "stop":
+                out = rec.stop(wall)
+            elif action == "clear":
+                out = rec.clear()
+            else:
+                raise pitcore.CommandError('action must be "start", "stop" or "clear"')
+        self._state_cache = (0.0, b"{}")
+        self.log.write("op", who=who, action="track_record", what=action, kart=out["kart"],
+                       points=out["n_points"], laps=[(lp["n"], lp["length_m"], lp["time_s"]) for lp in out["laps"]],
+                       file=out["file"])
+        return out
+
+    def track_recording(self):
+        with self.lock:
+            return self.fleet.recorder.summary(with_points=True)
+
+    def track_use(self, body, who):
+        lap = body.get("lap")
+        self._load_zones()
+        with self.lock:
+            rec = self.fleet.recorder
+            lt = None
+            if isinstance(lap, int) and not isinstance(lap, bool) and 1 <= lap <= len(rec.laps):
+                lt = rec.laps[lap - 1]["time_s"]
+            zbody, info = pitcore.track_from_recording(
+                rec, lap, self.fleet.game.doc, width_m=body.get("width_m", 6), lapline=body.get("lapline", "auto"),
+                simplify_m=body.get("simplify_m", 1.0), lap_time_s=lt)
+            info["kart"] = rec.kart
+        doc = self.save_zones(zbody, who)
+        self.log.write("op", who=who, action="track_use", version=doc["version"], **info)
+        return {"zones": doc, "info": info}
 
     def _online(self, now):
         return [k for k in pitcore.KART_IDS if self.fleet.is_online(k, now)]
@@ -310,13 +387,16 @@ class App:
             res = self.fleet.game.session.snapshot()
         self._state_cache = (0.0, b"{}")
         self.log.write("op", who=who, action="race_stop", sent=sent, results=res["results"])
+        self._race_tick(now)                    # state 3 with the final positions, right away
         return {"sent": sent, "session": res}
 
     def reset_laps(self, who):
         with self.lock:
             self.fleet.game.reset_laps()
+            self._race_idle_pending = True
         self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="laps_reset")
+        self._race_tick(time.monotonic())       # state 0 once
         return {"reset": True}
 
     # -- link callbacks (reader thread) --------------------------------------
@@ -349,6 +429,8 @@ class App:
             self.log.write("event", what="race_finish", sent=sent, ended=ended,
                            results=res["results"] if res and ended else None)
             self._state_cache = (0.0, b"{}")
+            if ended:
+                self._race_tick(now)
 
     def _on_link_state(self, connected, desc):
         with self.lock:
@@ -364,12 +446,64 @@ class App:
     def start(self):
         self.link.start()
         threading.Thread(target=self._ticker, name="cmd-ticker", daemon=True).start()
+        threading.Thread(target=self._health_loop, name="health", daemon=True).start()
+
+    def _health_loop(self):
+        period = max(0.2, float(self.cfg.get("health_period_s") or health.PERIOD_S))
+        while not self.stopping.is_set():
+            try:
+                self.health.sample()
+            except Exception as e:          # never let a sensor problem kill the thread
+                print(f"{wall_iso()} health sample failed: {e!r}", flush=True)
+            if self.stopping.wait(period):
+                break
+
+    def _on_health(self, prev, snap):
+        """Status transitions go to the session log and the journal (persistent: see why_rebooted.sh)."""
+        self.log.write("event", what="health", status=snap["status"], prev=prev,
+                       throttled=snap["throttled"], temp_c=snap["temp_c"])
+        print(f"{wall_iso()} health {prev} -> {snap['status']} throttled={snap['throttled']} "
+              f"temp={snap['temp_c']}C", flush=True)
 
     def _ticker(self):
         while not self.stopping.wait(0.1):
             with self.lock:
                 self.cmds.tick(time.monotonic(), wall_iso())
                 self._save_seq()
+            self._race_tick(time.monotonic())
+
+    def _race_tick(self, now, force=False):
+        """Race positions to the T-Beam (SERIAL_PROTOCOL.md "Race positions"): on START RACE (state 1),
+        every RACE_POS_PERIOD_S while running (1/2), 3 times over 6 s when finished (3), and state 0
+        once on NEW RACE / reset. The session log gets one event per change, not every repeat."""
+        with self.lock:
+            state, pos = self.fleet.game.race_positions(now)
+            cur = (state, tuple(pos))
+            send = False
+            if state in (1, 2):
+                self._race_finish_at = []
+                send = force or cur != self._race_tx or now - self._race_tx_mono >= RACE_POS_PERIOD_S
+            elif state == 3:
+                if self._race_tx is None or self._race_tx[0] != 3 or (cur != self._race_tx and not self._race_finish_at):
+                    self._race_finish_at = [now + d for d in RACE_FINISH_REPEATS]
+                if self._race_finish_at and now >= self._race_finish_at[0]:
+                    while self._race_finish_at and now >= self._race_finish_at[0]:
+                        self._race_finish_at.pop(0)
+                    send = True
+            else:
+                self._race_finish_at = []
+                send = self._race_idle_pending or force
+            if not send:
+                return
+            if state == 0:
+                self._race_idle_pending = False
+            ok = self.link.write_line({"t": "race", "state": state, "pos": list(pos)})
+            self._race_tx, self._race_tx_mono = cur, now
+            log = cur != self._race_logged
+            if log:
+                self._race_logged = cur
+        if log:
+            self.log.write("event", what="race_pos", state=state, pos=list(pos), ok=ok)
 
     # -- state ---------------------------------------------------------------
     def state(self):
@@ -383,6 +517,7 @@ class App:
             rx, bad = self.fleet.rx_lines, self.fleet.rx_bad
         return {
             "server": {"version": VERSION, "time": wall_iso(), "log_file": os.path.basename(self.log.path),
+                       "start_id": self.start_id, "boot_id": self.boot_id, "health": self.health.snapshot(),
                        "link": {"connected": self.link.connected, "desc": self.link.description,
                                 "since": self.link_since},
                        "rx_lines": rx, "rx_bad": bad},
@@ -390,6 +525,7 @@ class App:
             "commands": cmds,
             "map": self.map_package(fleet["origin"]),
             "zones": self.zones_doc(),
+            "track_rec": self.fleet.recorder.summary(),
         }
 
     def state_json(self):
@@ -582,6 +718,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.log.recent(n, include_lines=(q.get("lines") or ["0"])[0] == "1"))
         if p == "/api/log/download":
             return self._download_log()
+        if p == "/track/recording":
+            return self._json(200, app.track_recording())
         if p == "/api/whoami":
             return self._json(200, {"who": who})
         if p == "/events":
@@ -662,6 +800,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **app.race_stop(who)})
             if p == "/laps/reset":
                 return self._json(200, {"ok": True, **app.reset_laps(who)})
+            if p == "/track/record":
+                return self._json(200, {"ok": True, "recording": app.track_record(body, who)})
+            if p == "/track/use":
+                return self._json(200, {"ok": True, **app.track_use(body, who)})
             if p == "/gps_correction":
                 return self._json(200, {"ok": True, **app.set_gps_correction(body, who)})
         except pitcore.CommandError as e:

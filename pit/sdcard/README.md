@@ -18,12 +18,15 @@ seeded from the FAT boot partition). flash.sh writes three files there:
   `runcmd` unpacks it to `/opt/gokart-pit` and runs `firstboot.sh`.
 - `network-config`: netplan v2 Wi-Fi with two access points (`WIFI_SSID`, then
   the optional `WIFI2_SSID`), rendered by NetworkManager.
+  This only gets the first boot online; `user-data` also writes the Wi-Fi list to
+  `/etc/gokart-pit/wifi.env` (root, 0600) for the persistent keyfiles below.
 - `meta-data`: a fresh instance-id, so cloud-init runs once per flash.
 
 `firstboot.sh` then runs `../install.sh` (apt: python3-serial, cage, chromium,
-fonts, avahi; systemd units; udev rule; kiosk PAM file), sets NetworkManager
-autoconnect priority so `WIFI_SSID` is preferred (20) over the second network
-(10), installs Tailscale only if `TAILSCALE_AUTHKEY` is set, scrubs the
+fonts, avahi; systemd units; udev rule; kiosk PAM file; persistent journal), writes
+persistent NetworkManager keyfiles in `/etc/NetworkManager/system-connections` so
+`WIFI_SSID` is preferred (20) over the second network (10) with eth0 DHCP as a fallback
+(see "If the pit reboots" in ../README.md), installs Tailscale only if `TAILSCALE_AUTHKEY` is set, scrubs the
 Tailscale key and the web password from the boot partition copy of user-data,
 and cloud-init reboots. After the reboot the kiosk opens on the HDMI screen.
 

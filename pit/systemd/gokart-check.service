@@ -1,0 +1,8 @@
+# Installed by pit/install.sh. Liveness check for gokart-kiosk (Chromium present) and
+# gokart-pit (/healthz answers); run by gokart-check.timer. See tools/gokart_check.sh.
+[Unit]
+Description=GoKart pit liveness check (kiosk Chromium + pit /healthz)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/gokart-pit/tools/gokart_check.sh

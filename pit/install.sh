@@ -17,6 +17,41 @@ warn() { echo "WARN: $*"; WARN=1; }
 id "$PIT_USER" >/dev/null 2>&1 || { echo "user $PIT_USER does not exist"; exit 1; }
 echo "=== gokart-pit install $(date) user=$PIT_USER src=$SRC"
 
+# Network + journal first: they matter most after a bad reboot and need nothing from apt.
+echo "--- journal: persistent across reboots, capped at 200M"
+sh "$SRC/tools/journal_persist.sh" || warn "journal_persist failed"
+
+echo "--- network: persistent NetworkManager keyfiles (Wi-Fi + eth0 DHCP fallback)"
+# The Wi-Fi list comes from /etc/gokart-pit/wifi.env (written by cloud-init on first boot,
+# or pushed by deploy.sh --install), GOKART_WIFI_ENV, or a copy of sdcard/secrets.env next
+# to this script. Only the WIFI_* lines are kept, root-only. Passwords are never printed.
+WIFI_ENV=/etc/gokart-pit/wifi.env
+for f in "${GOKART_WIFI_ENV:-}" "$SRC/sdcard/secrets.env"; do
+  if [ -n "$f" ] && [ -s "$f" ] && [ "$f" != "$WIFI_ENV" ] && grep -qE '^WIFI_SSID=.+' "$f"; then
+    install -d -m 700 /etc/gokart-pit
+    ( umask 077; grep -E '^(WIFI2?_(SSID|PASSWORD)|WIFI_COUNTRY)=' "$f" > "$WIFI_ENV.tmp" ) && mv "$WIFI_ENV.tmp" "$WIFI_ENV"
+    echo "wifi env: WIFI_* lines from $f -> $WIFI_ENV"
+    break
+  fi
+done
+if ! command -v nmcli >/dev/null; then
+  warn "nmcli not found: Wi-Fi profiles not written"
+elif [ -s "$WIFI_ENV" ]; then
+  chmod 600 "$WIFI_ENV"
+  python3 "$SRC/tools/wifi_profiles.py" "$WIFI_ENV" || warn "wifi_profiles.py failed (Wi-Fi profile not written)"
+else
+  echo "no $WIFI_ENV: Wi-Fi profiles left as they are (only the eth0 fallback is ensured)"
+  python3 "$SRC/tools/wifi_profiles.py" /dev/null || warn "wifi_profiles.py failed"
+fi
+# NetworkManager-written netplan files that a power cut left at 0 bytes (the 2026-11-06 failure)
+for y in /etc/netplan/90-NM-*.yaml; do
+  [ -f "$y" ] && [ ! -s "$y" ] && rm -f "$y" && echo "removed empty $y"
+done
+# cloud-init must never rewrite the network config after the first boot (profiles live in keyfiles now)
+if [ -d /etc/cloud/cloud.cfg.d ]; then
+  echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-gokart-no-network-config.cfg
+fi
+
 echo "--- packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update || warn "apt-get update failed (no network?)"
@@ -34,7 +69,7 @@ if [ "$SRC" != "$DEST" ]; then
     --exclude 'sdcard/secrets.env' --exclude 'sdcard/build/' --exclude '__pycache__/' \
     "$SRC/" "$DEST/"
   # map/ holds operator-added imagery: add/refresh files, never delete
-  rsync -a "$SRC/server/map/" "$DEST/server/map/"
+  rsync -a --exclude recordings/ "$SRC/server/map/" "$DEST/server/map/"
 fi
 mkdir -p "$DEST/logs"
 if [ ! -f "$DEST/server/config.json" ]; then
@@ -43,7 +78,7 @@ if [ ! -f "$DEST/server/config.json" ]; then
 fi
 chmod 600 "$DEST/server/config.json"
 chown -R "$PIT_USER:$PIT_USER" "$DEST"
-chmod +x "$DEST/kiosk/start-chromium.sh" "$DEST/install.sh" 2>/dev/null || true
+chmod +x "$DEST/kiosk/start-chromium.sh" "$DEST/install.sh" "$DEST"/tools/*.sh "$DEST"/tools/*.py 2>/dev/null || true
 
 echo "--- groups"
 for g in dialout video render input; do
@@ -85,17 +120,22 @@ systemctl enable --now avahi-daemon || warn "avahi-daemon failed"
 
 echo "--- systemd units"
 install -m 644 "$DEST/kiosk/pam-gokart-kiosk" /etc/pam.d/gokart-kiosk
-for unit in gokart-pit.service gokart-kiosk.service; do
+for unit in gokart-pit.service gokart-kiosk.service gokart-check.service gokart-check.timer; do
   sed "s/@PIT_USER@/$PIT_USER/g" "$DEST/systemd/$unit" > "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 systemctl disable getty@tty1.service 2>/dev/null || true   # tty1 belongs to the kiosk; ssh + tty2-6 remain
 systemctl set-default graphical.target
 systemctl enable gokart-pit.service gokart-kiosk.service
+systemctl enable --now gokart-check.timer || warn "gokart-check.timer failed"
 systemctl restart gokart-pit.service || warn "gokart-pit failed to start: journalctl -u gokart-pit"
 if [ "${GOKART_NO_KIOSK_RESTART:-0}" != 1 ]; then
   systemctl restart gokart-kiosk.service || warn "kiosk failed to start: journalctl -u gokart-kiosk"
 fi
 
+for u in gokart-pit gokart-check.timer; do
+  echo "$u: $(systemctl is-active "$u")"
+done
+echo "after a surprise reboot: sudo /opt/gokart-pit/tools/why_rebooted.sh"
 echo "=== install done (warnings: $WARN) $(date)"
 exit 0

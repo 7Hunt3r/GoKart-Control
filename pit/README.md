@@ -31,9 +31,11 @@ shows a striped SIMULATION banner (driven by the simulator's own
 ```text
 pit/
   server/pit_server.py     HTTP server, SSE, auth, session log, wiring (stdlib + pyserial)
+  server/health.py         Pi power/thermal health (vcgencmd get_throttled + CPU temp)
   server/pitcore.py        fleet state, staleness, derived values, command delivery (pure logic)
   server/link.py           T-Beam link: serial auto-find + reconnect, or TCP to the simulator
-  server/static/           index.html (operator), kiosk.html (1024x600 touch), app.js, style.css, login.html
+  server/static/           index.html (operator), kiosk.html (1024x600 touch), app.js, watch.js, style.css, login.html
+  tools/                   wifi_profiles.py, journal_persist.sh, gokart_check.sh, why_rebooted.sh
   server/map/              map.json + README (how to add CT ECO imagery; none bundled)
   server/config.example.json   copy to config.json (gitignored): shared password etc.
   sim/sim_tbeam.py         simulated T-Beam (pty or TCP), eight karts, honours commands
@@ -187,6 +189,13 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
   FINISHED P3 (FIN P3 on the kiosk); during a laps race the leaderboard has a "Left" column.
   State: `fleet.race.session` (`state` running|finished, `laps_target`, `finished` {kart: pos},
   `ended_by` laps|stop, `results`). Race command args: 1-30 = GO in s, 0 = finish, 101-108 = finish P1-P8.
+- **Running positions to the karts (no Wi-Fi needed).** The server also sends the T-Beam
+  `{"t":"race","state":S,"pos":[p1..p8]}` (firmware/base-tbeam-s3/SERIAL_PROTOCOL.md "Race positions"),
+  which the base carries in every beacon for 30 s so kart screens can show "P3": state 1 with all 0 at
+  START RACE, every 2 s while racing (1 until GO, then 2; finished karts keep their place, then laps desc,
+  earliest last crossing; no completed lap = 0), state 3 with the final positions 3 times over 6 s at the
+  end, state 0 once on NEW RACE. The session log gets one `race_pos` event per change. The simulator
+  accepts the line silently.
 - **Laps.** The pit times laps itself from `tele` fixes: a lap counts when the segment previous
   fix -> current fix crosses the lap line (either direction) and `min_lap_s` (default 20) has
   passed since the previous crossing; the first crossing starts the clock. The crossing time is
@@ -216,6 +225,33 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
 - **Deploy.** `deploy.sh` copies `zones.json` only when the Pi has none, so zones edited on the
   Pi survive later deploys. `ZONES.md` and the rest of `map/` are pushed as before.
 
+## Pace car: record a track by driving it
+
+Instead of tapping the course in by hand, drive it once with one kart and let the pit turn the
+path into the track. Nothing changes on the radio: the pit already gets every kart's fixes at 2 Hz.
+
+1. Operator page -> **ZONES** -> **PACE CAR** row: pick the kart (defaults to the first online one),
+   press **REC** and drive the course at a steady pace, staying on the racing line. A red **REC K2**
+   chip shows on the operator, kiosk and phone pages while recording, and a red trail is drawn on the
+   operator map (dashed once stopped).
+2. Laps are detected automatically: a lap closes when the kart comes back within 12 m of the lap's
+   start after at least 60 m (closed at the nearest approach). Each lap gets a row: length and time.
+   Only good fixes count (fix, 5+ satellites, no jumps beyond speed x dt + 15 m, 1.5 m minimum spacing).
+3. **STOP**, then **USE AS TRACK** on the cleanest lap (or **All** for a point-to-point course).
+   Choose the width (default 6 m) and keep **auto lap line** ticked to put a 10 m start/finish line
+   across the lap's start, perpendicular to the direction of travel (it replaces the existing lap line;
+   its `min_lap_s` is capped at 60 % of the driven lap time). The lap is Douglas-Peucker simplified
+   (1 m, raised until it fits 200 points), closed, and saved to `zones.json` like the editor's SAVE
+   (version bumped, other zones kept). The editor reopens on the new document.
+
+API (login): `POST /track/record {"kart":2,"action":"start"|"stop"|"clear"}`,
+`GET /track/recording` (kart, recording, since_wall, n_points, points, laps [{n, length_m, time_s, points}]),
+`POST /track/use {"lap":1|"all","width_m":6,"lapline":"auto"|"none","simplify_m":1.0}`; `/api/state`
+carries `track_rec` (no points) for the chip. Recordings are saved to
+`server/map/recordings/<YYYYmmdd-HHMMSS>-k<N>.json` on every lap and on STOP (gitignored, never
+deployed or deleted by deploy.sh); the newest is reloaded when the server starts; CLEAR deletes it.
+Session log: `op track_record` (start/stop/clear) and `op track_use` (+ the usual `zones_save`).
+
 ## On the Pi
 
 Flash a card with [`sdcard/`](sdcard/README.md); first boot installs everything.
@@ -224,8 +260,10 @@ Pi: hostname `gokart-pit` (`gokart-pit.local` via avahi), user `pit`, app in
 
 Services:
 - `gokart-pit.service`: `python3 /opt/gokart-pit/server/pit_server.py` as `pit`
-  (group dialout), `Restart=always`. No Wi-Fi dependency.
-- `gokart-kiosk.service`: cage + Chromium on tty1 (below).
+  (group dialout), `Restart=always`, `StartLimitIntervalSec=0`. No Wi-Fi dependency.
+- `gokart-kiosk.service`: cage + Chromium on tty1 (below), `Restart=always`, `StartLimitIntervalSec=0`.
+- `gokart-check.timer` (every 30 s, `tools/gokart_check.sh`): restarts the kiosk if its cgroup has had
+  no Chromium process for 2 checks, and gokart-pit if `/healthz` failed 3 checks in a row.
 - udev: `/etc/udev/rules.d/99-gokart-tbeam.rules` makes `/dev/tbeam`.
 
 ```sh
@@ -235,13 +273,55 @@ sudo systemctl restart gokart-pit gokart-kiosk
 udevadm info -a -n /dev/ttyACM0 | grep -iE 'idVendor|idProduct|product'   # check the rule's match
 ```
 
+### If the pit reboots
+
+On 2026-11-06 the pit Pi rebooted several times, came back with no Wi-Fi profile, and the crash
+logs were gone. Both causes are fixed by `install.sh` (and the first boot):
+
+- **Wi-Fi lost:** the profile cloud-init made was netplan-backed. firstboot's old
+  `nmcli connection modify` made NetworkManager move it to `/etc/netplan/90-NM-<uuid>.yaml`,
+  and the power cuts left those files 0 bytes long. Now `tools/wifi_profiles.py` writes plain
+  NetworkManager keyfiles in `/etc/NetworkManager/system-connections/` (atomic write + fsync,
+  autoconnect, priority 20 primary / 10 second network, retries forever) plus `gokart-eth0`
+  (eth0 DHCP fallback). The Wi-Fi list is `/etc/gokart-pit/wifi.env` (root, 0600; written by
+  cloud-init on first boot or pushed by `deploy.sh --install` from `sdcard/secrets.env`, WIFI_* lines only).
+  A hand-made profile for the same SSID is adopted in place (same UUID, no disconnect). Empty
+  `90-NM-*.yaml` files are deleted and cloud-init network config is disabled after the first boot.
+- **Logs lost:** Raspberry Pi OS ships `Storage=volatile`. `tools/journal_persist.sh` adds
+  `/etc/systemd/journald.conf.d/90-gokart-persistent.conf` (`Storage=persistent`, `SystemMaxUse=200M`).
+
+Next time, one command:
+
+```sh
+ssh pit@gokart-pit.local sudo /opt/gokart-pit/tools/why_rebooted.sh      # previous boot; add -2 for the one before
+```
+
+It prints the boot list, the previous boot's last 30 journal lines (and whether it ended with a clean
+shutdown or just stopped: power cut / brown-out), under-voltage counts, the current `get_throttled`
+flags and temperature, NetworkManager state with each profile's file (`/etc` = persistent, `/run` = not),
+and the pit services' restart counts.
+
+Power on the pages: the server samples `vcgencmd get_throttled` and the CPU temperature every 10 s
+(`server.health` in `/api/state`; skipped off a Pi) and logs every status change to the session log and
+the journal. The kiosk, operator and phone pages show a chip only when something is wrong:
+**UNDERVOLT** (red, under-voltage now), **throttled** (amber), **had undervolt** (grey, happened since boot).
+Repeated reboots plus "had undervolt" = the supply or cable; use the official 5.1 V 3 A supply.
+
+Self-healing pages: every page reloads itself when the pit server restarts (`server.start_id` changes)
+or when its event stream has been dead for 20 s while `/healthz` answers (`static/watch.js`; never in the
+first 30 s after loading, so no reload loops; never while there are unsaved zone edits).
+
+Wi-Fi by hand if it is ever missing again: `sudo bash /opt/gokart-pit/install.sh pit` (needs
+`/etc/gokart-pit/wifi.env`), or
+`sudo nmcli con add type wifi ifname wlan0 con-name McLab ssid McLab wifi-sec.key-mgmt wpa-psk wifi-sec.psk '<pw>' connection.autoconnect yes connection.autoconnect-priority 20`.
+
 ### Updating the app later
 
 From the Mac, with the Pi on the same network:
 
 ```sh
 pit/deploy.sh                    # rsync pit/ -> pit@gokart-pit.local:/opt/gokart-pit, restart services
-pit/deploy.sh gokart-pit.local --install   # also re-run install.sh (packages, units, udev)
+pit/deploy.sh gokart-pit.local --install   # also re-run install.sh (packages, units, udev, Wi-Fi keyfiles, journal)
 ```
 
 deploy.sh keeps the Pi's `server/config.json`, `logs/`, map imagery and its edited `map/zones.json`. By hand:

@@ -8,19 +8,18 @@ PRIMARY_SSID="${3:-}"
 APP=/opt/gokart-pit
 echo "=== gokart-pit firstboot $(date) user=$USER_NAME host=$HOST_NAME"
 
-echo "--- pit app (packages, services, udev, kiosk)"
-# The kiosk starts after the automatic reboot; don't light the screen mid-install.
-GOKART_NO_KIOSK_RESTART=1 bash "$APP/install.sh" "$USER_NAME" || echo "WARN: install.sh failed (see above)"
+echo "--- journal: persistent from now on (Pi OS default is volatile; crash logs were lost on 2026-11-06)"
+sh "$APP/tools/journal_persist.sh" || echo "WARN: journal_persist failed"
 
-echo "--- wifi preference: $PRIMARY_SSID first"
-if command -v nmcli >/dev/null; then
-  nmcli -t -f NAME,TYPE connection show | while IFS=: read -r name type; do
-    [ "$type" = "802-11-wireless" ] || continue
-    ssid="$(nmcli -g 802-11-wireless.ssid connection show "$name")"
-    prio=10; [ "$ssid" = "$PRIMARY_SSID" ] && prio=20
-    nmcli connection modify "$name" connection.autoconnect-priority "$prio" \
-      && echo "  $ssid -> priority $prio" || echo "WARN: could not set priority on $name"
-  done
+echo "--- pit app (packages, services, udev, kiosk, Wi-Fi keyfiles)"
+# The kiosk starts after the automatic reboot; don't light the screen mid-install.
+# install.sh writes real NetworkManager keyfiles for $PRIMARY_SSID (priority 20) and the optional
+# second network (10) from /etc/gokart-pit/wifi.env (cloud-init write_files), plus eth0 DHCP.
+# Do NOT `nmcli connection modify` the netplan-generated profiles: that makes NetworkManager move
+# them into /etc/netplan/90-NM-*.yaml, which power cuts left empty (Wi-Fi gone after reboot).
+GOKART_NO_KIOSK_RESTART=1 bash "$APP/install.sh" "$USER_NAME" || echo "WARN: install.sh failed (see above)"
+if [ -n "$PRIMARY_SSID" ] && ! grep -rqsx "ssid=$PRIMARY_SSID" /etc/NetworkManager/system-connections/; then
+  echo "WARN: no persistent keyfile for $PRIMARY_SSID in /etc/NetworkManager/system-connections"
 fi
 
 echo "--- tailscale (optional)"

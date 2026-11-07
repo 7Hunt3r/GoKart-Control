@@ -2,6 +2,8 @@
 [Unit]
 Description=GoKart pit server (T-Beam serial link + web UI on :8080)
 After=network.target
+# Never give up restarting (the default limit stops after 5 restarts in 10 s).
+StartLimitIntervalSec=0
 # No dependency on Wi-Fi: the pit must run in the field with no network.
 
 [Service]

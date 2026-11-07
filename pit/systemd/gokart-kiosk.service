@@ -11,6 +11,8 @@ After=gokart-pit.service getty@tty1.service
 Wants=gokart-pit.service dbus.socket systemd-logind.service
 Conflicts=getty@tty1.service
 ConditionPathExists=/dev/tty1
+# Never give up restarting (the default limit stops after 5 restarts in 10 s).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -30,6 +32,8 @@ Environment=XDG_SESSION_TYPE=wayland
 # does not open on an error page. It never needs Wi-Fi.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:8080/healthz && exit 0; sleep 1; done; exit 0'
 ExecStart=/usr/bin/cage -d -s -- /opt/gokart-pit/kiosk/start-chromium.sh
+# Chromium exiting ends cage and this unit; restart it. A hung or missing Chromium is caught
+# by gokart-check.timer (tools/gokart_check.sh). The page itself reloads after a server restart.
 Restart=always
 RestartSec=3
 

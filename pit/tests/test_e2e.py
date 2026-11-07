@@ -248,6 +248,12 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(s["commands"]["last_fleet"]["cmd"], "race")
             rows = json.loads(st.request("GET", "/api/log/recent?n=300")[1])
             self.assertTrue(any(r.get("action") == "race_start" and r.get("secs") == 3 for r in rows))
+            rp = [(r["state"], r["pos"]) for r in rows if r.get("what") == "race_pos"]
+            while rp and rp[0][0] == 0:
+                rp.pop(0)                                          # the earlier RESET LAPS sent state 0
+            self.assertEqual(rp[0], (1, [0] * 8))                  # {"t":"race"} line sent at START RACE
+            self.assertTrue(all(st_ in (1, 2) for st_, _ in rp), rp)
+            self.assertEqual(len(rp), len(set((a, tuple(b)) for a, b in rp)))   # logged once per change
 
             # STOP RACE: final results, one finish command per kart (100 + position, 0 for offline karts)
             code, body, _ = st.request("POST", "/race/stop", {})
@@ -260,6 +266,10 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual((ses["state"], ses["ended_by"]), ("finished", "stop"))
             self.assertEqual(len(ses["results"]), len(placed))
             self.assertEqual(st.request("POST", "/laps/reset", {})[0], 200)            # NEW RACE
+            rows = json.loads(st.request("GET", "/api/log/recent?n=500")[1])
+            rp = [(r["state"], r["pos"]) for r in rows if r.get("what") == "race_pos"]
+            self.assertIn(3, [x[0] for x in rp])
+            self.assertEqual(rp[-1], (0, [0] * 8))
             self.assertIsNone(st.state()["fleet"]["race"]["session"])
             rows = json.loads(st.request("GET", "/api/log/recent?n=300")[1])
             self.assertTrue(any(r.get("action") == "race_stop" for r in rows))
@@ -311,6 +321,92 @@ class EndToEnd(unittest.TestCase):
         finally:
             st.close()
 
+
+    def test_health_field_and_transitions(self):
+        tmp = tempfile.mkdtemp()
+        hf = os.path.join(tmp, "throttled")
+        with open(hf, "w") as f:
+            f.write("throttled=0x0\n")
+        st = Stack(["--offline", "0"], config={"health_file": hf, "health_period_s": 0.3})
+        try:
+            s = st.state()
+            self.assertRegex(s["server"]["start_id"], r"^[0-9a-f]{12}$")
+            self.assertIn("boot_id", s["server"])
+            h = st.wait(lambda s: s["server"]["health"]["status"] == "ok")["server"]["health"]
+            self.assertTrue(h["available"])
+            self.assertEqual(h["throttled"], "0x0")
+            with open(hf, "w") as f:
+                f.write("throttled=0x50005\n")
+            h = st.wait(lambda s: s["server"]["health"]["status"] == "undervolt")["server"]["health"]
+            self.assertTrue(h["flags"]["undervolt_now"])
+            with open(hf, "w") as f:
+                f.write("throttled=0x50000\n")
+            st.wait(lambda s: s["server"]["health"]["status"] == "had_undervolt")
+            code, body, _ = st.request("GET", "/api/log/recent?n=200")
+            ev = [(r["prev"], r["status"]) for r in json.loads(body) if r.get("what") == "health"]
+            self.assertEqual(ev, [("ok", "undervolt"), ("undervolt", "had_undervolt")])
+            for page in ("/kiosk", "/", "/m"):
+                body = st.request("GET", page)[1]
+                self.assertIn(b'id="healthChip"', body, page)
+                self.assertIn(b"/static/watch.js", body, page)
+            self.assertEqual(st.request("GET", "/static/watch.js")[0], 200)
+        finally:
+            st.close()
+            shutil.rmtree(tmp)
+
+    def test_health_absent_off_pi(self):
+        st = Stack(["--offline", "0"])
+        try:
+            h = st.state()["server"]["health"]
+            if shutil.which("vcgencmd"):
+                self.skipTest("running on a Pi")
+            self.assertFalse(h["available"])
+            self.assertEqual(h["status"], "unavailable")
+        finally:
+            st.close()
+
+    def test_pace_car_records_two_laps(self):
+        st = Stack(["--offline", "0", "--flaky", "0", "--nofix", "0", "--loss", "0", "--track-scale", "0.3"])
+        try:
+            st.wait(lambda s: s["fleet"]["karts"][0]["link"] == "online")
+            code, body, _ = st.request("POST", "/track/record", {"kart": 1, "action": "start"})
+            self.assertEqual(code, 200, body)
+            self.assertEqual(st.request("POST", "/track/record", {"kart": 9, "action": "start"})[0], 409)
+            s = st.wait(lambda s: len(s["track_rec"]["laps"]) >= 2, timeout=90)
+            self.assertTrue(s["track_rec"]["recording"])
+            code, body, _ = st.request("POST", "/track/record", {"action": "stop"})
+            rec = json.loads(body)["recording"]
+            self.assertFalse(rec["recording"])
+            laps = rec["laps"]
+            self.assertGreaterEqual(len(laps), 2)
+            # sim oval at scale 0.3: 2*36 m straights + r 10.5 m ends = ~138 m
+            for lp in laps[:2]:
+                self.assertAlmostEqual(lp["length_m"], 138, delta=25, msg=laps)
+                self.assertGreater(lp["time_s"], 5)
+            code, body, _ = st.request("GET", "/track/recording")
+            full = json.loads(body)
+            self.assertEqual(len(full["points"]), full["n_points"])
+            self.assertTrue(full["file"].endswith("-k1.json"))
+            self.assertTrue(os.path.exists(os.path.join(st.map_dir, "recordings", full["file"])))
+            v0 = st.state()["zones"]["version"]
+            code, body, _ = st.request("POST", "/track/use", {"lap": 1, "width_m": 6, "lapline": "auto", "simplify_m": 1.0})
+            self.assertEqual(code, 200, body)
+            z = json.loads(body)["zones"]
+            self.assertEqual(z["version"], v0 + 1)
+            self.assertTrue(z["track"]["closed"])
+            self.assertLessEqual(len(z["track"]["points"]), 200)
+            ll = [x for x in z["zones"] if x["type"] == "lapline"]
+            self.assertEqual([x["id"] for x in ll], ["lap"])
+            with open(os.path.join(st.map_dir, "zones.json")) as f:
+                on_disk = json.load(f)
+            sys.path.insert(0, os.path.join(PIT, "server"))
+            import pitcore
+            pitcore.validate_zones(on_disk)                           # what the karts will fetch validates
+            rows = json.loads(st.request("GET", "/api/log/recent?n=300")[1])
+            self.assertTrue(any(r.get("action") == "track_use" for r in rows))
+            self.assertEqual(st.request("POST", "/track/use", {"lap": 99})[0], 409)
+        finally:
+            st.close()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -26,6 +26,11 @@ write_files:
     permissions: "0600"
     owner: root:root
     content: {{PIT_CONFIG_JSON}}
+  # Wi-Fi list for pit/tools/wifi_profiles.py (persistent NetworkManager keyfiles); root-only.
+  - path: /etc/gokart-pit/wifi.env
+    permissions: "0600"
+    owner: root:root
+    content: {{WIFI_ENV}}
   - path: /root/tailscale.key
     permissions: "0600"
     owner: root:root

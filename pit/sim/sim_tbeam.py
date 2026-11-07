@@ -250,6 +250,7 @@ class Sim:
         self.out = []                           # writers: callables(bytes)
         self.t0 = time.monotonic()
         self.rx = self.tx = 0
+        self.race_info = None                   # last {"t":"race"} from the host (state, pos, mono)
         self.pending = []                       # (due, kart, msg)
 
     def emit(self, obj):
@@ -275,6 +276,11 @@ class Sim:
             msg = json.loads(line)
         except ValueError:
             self.emit({"t": "log", "msg": "sim: bad json from host"})
+            return
+        if msg.get("t") == "race":
+            # Race positions (SERIAL_PROTOCOL.md): the real base only puts them in its beacons and
+            # replies nothing; the sim just remembers the latest for debugging.
+            self.race_info = (msg.get("state"), msg.get("pos"), time.monotonic())
             return
         self.tx += 1
         self.emit({"t": "sent", "seq": msg.get("seq"), "cmd": msg.get("cmd"),

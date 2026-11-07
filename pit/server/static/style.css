@@ -393,3 +393,16 @@ body.kiosk #clock { font-weight: 700; }
 .newrace { width: calc(100% - 12px); margin: 0 6px 6px; min-height: 52px; background: #111; color: #fff; font-size: 18px; }
 table.laps td.left { font-weight: 900; color: var(--info); }
 body.op .card .hdr { white-space: nowrap; }
+
+/* pace car (track builder) panel in the ZONES editor */
+.pacebar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; border-top: 2px dashed #bbb; padding-top: 6px; }
+.pacebar label { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.pacebar select { font-size: 15px; padding: 4px 6px; border: 0; border-right: 1px solid #bbb; background: #fff; min-height: 44px; }
+.pacebar label select { border: 2px solid var(--line); border-radius: 6px; min-height: 36px; }
+.pacebar input[type=checkbox] { width: 20px; height: 20px; }
+.zgroup button.pcrec { color: #c40000; font-weight: 900; }
+.zgroup button.pcrec.on { background: #c40000; color: #fff; }
+.pclaps { flex-basis: 100%; }
+.pclaps table { border-collapse: collapse; font-size: 14px; }
+.pclaps td, .pclaps th { padding: 3px 10px; border-bottom: 1px solid #ccc; text-align: left; }
+.pclaps button { min-height: 32px; padding: 2px 10px; font-size: 13px; }

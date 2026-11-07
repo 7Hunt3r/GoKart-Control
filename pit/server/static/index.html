@@ -17,6 +17,8 @@
   <span id="repChip" class="chip">no repeater</span>
   <span id="corrChip" class="chip" title="pit radio fix vs the surveyed pit marker; tap to apply/stop applying">GPS corr off</span>
   <span id="baseChip" class="chip">base GPS ?</span>
+  <span id="paceChip" class="chip bad hidden"></span>
+  <span id="healthChip" class="chip hidden"></span>
   <span id="raceChip" class="chip">race off</span>
   <button id="gameChip" class="chip gamechip off">GAME OFF</button>
   <span class="spacer"></span>
@@ -62,6 +64,13 @@
         <span class="spacer"></span>
         <span id="zCounts" class="note"></span>
       </div>
+      <div id="paceBar" class="pacebar">
+        <span class="zgroup"><span class="zglbl">PACE CAR</span><select id="pcKart" aria-label="pace car kart"><option value="1">K1</option><option value="2">K2</option><option value="3">K3</option><option value="4">K4</option><option value="5">K5</option><option value="6">K6</option><option value="7">K7</option><option value="8">K8</option></select><button id="pcRec" class="pcrec">&#9679; REC</button><button id="pcStop">STOP</button><button id="pcClear">CLEAR</button></span>
+        <label>Width <select id="pcWidth"><option>4</option><option>5</option><option selected>6</option><option>8</option><option>10</option><option>12</option></select> m</label>
+        <label><input type="checkbox" id="pcLapline" checked> auto lap line</label>
+        <span id="pcStatus" class="note">drive the course with one kart: laps are detected when it returns to its start</span>
+        <div id="pcLaps" class="pclaps"></div>
+      </div>
     </div>
     <div class="mapwrap">
       <canvas id="map" class="map"></canvas>
@@ -75,6 +84,7 @@
     <div class="panel"><h3>Session log <span class="note">operator actions and events</span></h3><div id="log" class="log"></div></div>
   </div>
 </div>
+<script src="/static/watch.js"></script>
 <script src="/static/sound.js"></script>
 <script src="/static/app.js"></script>
 </body>

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import time
 from collections import deque
 
 KART_IDS = tuple(range(1, 9))
@@ -263,6 +265,7 @@ class Fleet:
         self.rx_lines = 0
         self.rx_bad = 0
         self.game = Game()
+        self.recorder = None                    # TrackRecorder (pace car), set by the server
 
     # -- ingest ------------------------------------------------------------
     def ingest(self, msg, now, wall):
@@ -278,6 +281,9 @@ class Fleet:
             ks.ingest_tele(msg, now, wall)
             if self.game.session is not None and self.game.session.running:
                 self.game.session.seen.add(k)
+            if self.recorder is not None and ks.fix and ks.last_fix_mono == now:
+                self.recorder.on_fix(k, ks.fix.get("lat"), ks.fix.get("lon"), msg.get("gps_kph"),
+                                     msg.get("sats"), msg.get("fix"), now)
             if prev is not None and ks.last_fix_mono == now:
                 cur = (ks.fix["lat"], ks.fix["lon"])
                 if cur != prev[:2]:
@@ -780,6 +786,31 @@ class Game:
             ses.finish(kart, at, st.laps)    # reached the race length: finished with its position now
         return True
 
+    def race_positions(self, now, n_karts=8):
+        """(state, [p1..p8]) for the T-Beam `{"t":"race"}` line (SERIAL_PROTOCOL.md "Race positions").
+        state: 0 idle (no race session), 1 countdown (before GO), 2 running, 3 finished.
+        Positions: finished karts keep their finishing position; the rest follow by completed laps
+        desc, then earliest last crossing (as board()); karts with no completed lap get 0."""
+        ses = self.session
+        pos = [0] * n_karts
+        if ses is None:
+            return 0, pos
+        if not ses.running:
+            for k, f in ses.finished.items():
+                if 1 <= k <= n_karts:
+                    pos[k - 1] = f["pos"]
+            return 3, pos
+        if ses.go_mono is not None and now < ses.go_mono:
+            return 1, pos
+        order = sorted(ses.finished, key=lambda k: ses.finished[k]["pos"])
+        rest = [k for k, st in self.laps.items()
+                if k not in ses.finished and st.laps > 0 and st.started_mono is not None]
+        rest.sort(key=lambda k: (-self.laps[k].laps, self.laps[k].started_mono, k))
+        for i, k in enumerate(order + rest, 1):
+            if 1 <= k <= n_karts:
+                pos[k - 1] = i
+        return 2, pos
+
     def board(self, now):
         """Ranked laps: completed laps desc, then earlier last crossing first."""
         if not self.active:
@@ -1098,3 +1129,290 @@ class CommandManager:
                 c.outcomes[k] = unresolved
         c.state = "done"
         self.log("cmd_done", id=c.id, seq=c.seq, outcomes=c.outcomes, tx=c.tx_count)
+
+
+# ---------------------------------------------------------------------------
+# Pace car / track builder (README "Pace car: record a track by driving it").
+# The pit records one kart's accepted fixes (2 Hz tele, no radio change), detects laps
+# when the path comes back to its start, and turns a lap into the zones.json "track"
+# (+ an optional lap line across the start).
+REC_MIN_SATS = 5
+REC_MIN_SPACING_M = 1.5
+REC_JUMP_SLACK_M = 15.0
+REC_START_RADIUS_M = 12.0
+REC_MIN_LAP_M = 60.0
+REC_MAX_POINTS = 20000
+LAPLINE_LEN_M = 10.0
+
+
+def dist_m(a, b):
+    """Metres between two [lat, lon] (tangent plane, fine at track scale)."""
+    cl = math.cos(math.radians((a[0] + b[0]) / 2))
+    return math.hypot(math.radians(b[1] - a[1]) * R_EARTH * cl, math.radians(b[0] - a[0]) * R_EARTH)
+
+
+def path_length(pts):
+    return sum(dist_m(pts[i - 1], pts[i]) for i in range(1, len(pts)))
+
+
+def douglas_peucker(pts, tol_m):
+    """Simplify [[lat, lon], ...] keeping both ends; perpendicular tolerance in metres. Iterative."""
+    if len(pts) < 3:
+        return [list(p[:2]) for p in pts]
+    proj = local_en(pts[0][0], pts[0][1])
+    xy = [proj(p[0], p[1]) for p in pts]
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, ay), (bx, by) = xy[i], xy[j]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        best, bi = -1.0, None
+        for k in range(i + 1, j):
+            px, py = xy[k]
+            d = abs(dy * (px - ax) - dx * (py - ay)) / L if L > 1e-9 else math.hypot(px - ax, py - ay)
+            if d > best:
+                best, bi = d, k
+        if bi is not None and best > tol_m:
+            keep[bi] = True
+            stack += [(i, bi), (bi, j)]
+    return [list(pts[k][:2]) for k in range(len(pts)) if keep[k]]
+
+
+def simplify_track(pts, tol_m=1.0, max_points=TRACK_MAX_POINTS):
+    """Douglas-Peucker with `tol_m`, raised x1.5 until the result fits in max_points."""
+    tol = max(0.05, float(tol_m))
+    out = douglas_peucker(pts, tol)
+    while len(out) > max_points:
+        tol *= 1.5
+        out = douglas_peucker(pts, tol)
+    return out
+
+
+def lapline_at(pts, length_m=LAPLINE_LEN_M):
+    """A segment `length_m` long through pts[0], perpendicular to the heading there
+    (towards the first point at least 4 m away). Returns (a, b) as [lat, lon]."""
+    p0 = pts[0]
+    ahead = next((p for p in pts[1:] if dist_m(p0, p) >= 4.0), pts[-1] if len(pts) > 1 else None)
+    if ahead is None or dist_m(p0, ahead) < 0.5:
+        raise ZoneError("lap is too short to place a lap line")
+    proj = local_en(p0[0], p0[1])
+    ex, ny = proj(ahead[0], ahead[1])
+    h = math.hypot(ex, ny)
+    lx, ly = -ny / h, ex / h                       # left normal
+    half = length_m / 2
+    cl = math.cos(math.radians(p0[0]))
+
+    def back(e, n):
+        return [round(p0[0] + math.degrees(n / R_EARTH), 7), round(p0[1] + math.degrees(e / (R_EARTH * cl)), 7)]
+    return back(lx * half, ly * half), back(-lx * half, -ly * half)
+
+
+class TrackRecorder:
+    """Records one kart's path. Points are [lat, lon, t_s (since start), kph].
+    Laps close when the path returns within REC_START_RADIUS_M of the lap's start point after
+    at least REC_MIN_LAP_M travelled (closed at the nearest approach). Persisted as JSON in
+    save_dir on every lap and on stop; the newest file is reloaded at start-up."""
+
+    def __init__(self, save_dir=None):
+        self.save_dir = save_dir
+        self.file = None
+        self._reset(None)
+        if save_dir:
+            self.load_latest()
+
+    def _reset(self, kart):
+        self.kart = kart
+        self.recording = False
+        self.since_wall = None
+        self.stopped_wall = None
+        self.t0 = None
+        self.points = []
+        self.laps = []
+        self._lap_start = 0          # index of the current lap's first point
+        self._travel = 0.0           # metres since the current lap's start
+        self._close = None           # (index, distance) best approach to the start while inside the radius
+        self.rejected = 0
+
+    # -- control -------------------------------------------------------------
+    def start(self, kart, now, wall):
+        if kart not in KART_IDS:
+            raise CommandError("kart must be 1-8")
+        self._reset(kart)
+        self.recording, self.since_wall, self.t0 = True, wall, now
+        self.file = None
+        if self.save_dir:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            self.file = os.path.join(self.save_dir, f"{stamp}-k{kart}.json")
+        return self.summary()
+
+    def stop(self, wall):
+        if self.recording:
+            if self._close is not None:
+                self._close_lap(self._close[0])
+            self.recording = False
+            self.stopped_wall = wall
+            self.save()
+        return self.summary()
+
+    def clear(self):
+        f = self.file
+        self._reset(None)
+        self.file = None
+        if f:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        return self.summary()
+
+    # -- fixes ---------------------------------------------------------------
+    def on_fix(self, kart, lat, lon, kph, sats, fix, now):
+        """Offer one kart fix. Returns True when it was appended."""
+        if not self.recording or kart != self.kart:
+            return False
+        if fix is not True or lat is None or lon is None or not isinstance(sats, (int, float)) or sats < REC_MIN_SATS:
+            return False
+        p = [round(float(lat), 7), round(float(lon), 7), round(now - self.t0, 2),
+             None if kph is None else round(float(kph), 1)]
+        if self.points:
+            last = self.points[-1]
+            d = dist_m(last, p)
+            dt = max(0.0, p[2] - last[2])
+            v = max(float(kph or 0.0), float(last[3] or 0.0)) / 3.6
+            if d > v * dt + REC_JUMP_SLACK_M:
+                self.rejected += 1
+                return False                         # GPS jump
+            if d < REC_MIN_SPACING_M:
+                return False
+            self._travel += d
+        if len(self.points) >= REC_MAX_POINTS:
+            self.stop(None)
+            return False
+        self.points.append(p)
+        self._check_lap()
+        return True
+
+    def _check_lap(self):
+        i = len(self.points) - 1
+        start = self.points[self._lap_start]
+        if self._travel < REC_MIN_LAP_M:
+            return
+        d = dist_m(start, self.points[i])
+        if self._close is None:
+            if d <= REC_START_RADIUS_M:
+                self._close = (i, d)
+            return
+        if d < self._close[1] and d <= REC_START_RADIUS_M:
+            self._close = (i, d)
+            return
+        self._close_lap(self._close[0])
+
+    def _close_lap(self, end):
+        start = self._lap_start
+        pts = self.points[start:end + 1]
+        self.laps.append({"n": len(self.laps) + 1, "start": start, "end": end,
+                          "length_m": round(path_length(pts), 1),
+                          "time_s": round(pts[-1][2] - pts[0][2], 1)})
+        self._lap_start = end
+        self._close = None
+        self._travel = path_length(self.points[end:])
+        self.save()
+
+    # -- output --------------------------------------------------------------
+    def lap_points(self, which):
+        """[[lat, lon], ...] of lap n (1-based) or "all" (the whole recording)."""
+        if which == "all":
+            pts = self.points
+        else:
+            if isinstance(which, bool) or not isinstance(which, int) or not 1 <= which <= len(self.laps):
+                raise CommandError(f"lap must be 1-{len(self.laps)} or \"all\"" if self.laps else "no laps recorded yet")
+            lp = self.laps[which - 1]
+            pts = self.points[lp["start"]:lp["end"] + 1]
+        return [p[:2] for p in pts]
+
+    def summary(self, with_points=False):
+        out = {"kart": self.kart, "recording": self.recording, "since_wall": self.since_wall,
+               "stopped_wall": self.stopped_wall, "n_points": len(self.points), "rejected": self.rejected,
+               "travelled_m": round(path_length(self.points), 1) if with_points else None,
+               "laps": [{"n": lp["n"], "length_m": lp["length_m"], "time_s": lp["time_s"],
+                         "points": lp["end"] - lp["start"] + 1} for lp in self.laps],
+               "file": os.path.basename(self.file) if self.file else None}
+        if with_points:
+            out["points"] = [p[:2] for p in self.points]
+        return out
+
+    def save(self):
+        if not self.file or not self.points:
+            return
+        doc = {"kart": self.kart, "since_wall": self.since_wall, "stopped_wall": self.stopped_wall,
+               "points": self.points, "laps": self.laps}
+        try:
+            os.makedirs(os.path.dirname(self.file), exist_ok=True)
+            tmp = self.file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(doc, f, separators=(",", ":"))
+            os.replace(tmp, self.file)
+        except OSError:
+            pass
+
+    def load_latest(self):
+        try:
+            names = sorted(n for n in os.listdir(self.save_dir) if n.endswith(".json"))
+        except OSError:
+            return False
+        for name in reversed(names):
+            path = os.path.join(self.save_dir, name)
+            try:
+                with open(path) as f:
+                    doc = json.load(f)
+                pts = [[float(p[0]), float(p[1]), float(p[2]), p[3]] for p in doc["points"]]
+                laps = [dict(lp) for lp in doc.get("laps") or []]
+                for lp in laps:
+                    if not 0 <= lp["start"] <= lp["end"] < len(pts):
+                        raise ValueError("bad lap indices")
+            except (OSError, ValueError, KeyError, TypeError, IndexError):
+                continue
+            self._reset(doc.get("kart"))
+            self.points, self.laps, self.file = pts, laps, path
+            self.since_wall, self.stopped_wall = doc.get("since_wall"), doc.get("stopped_wall")
+            self._lap_start = laps[-1]["end"] if laps else 0
+            return True
+        return False
+
+
+def track_from_recording(rec, lap, cur_doc, width_m=6, lapline="auto", simplify_m=1.0, lap_time_s=None):
+    """Build the zones body for POST-like saving: the recorded lap as "track" (closed), plus a lap
+    line across the lap's start when lapline == "auto" (replacing any existing lap line).
+    Returns (body, info). Raises CommandError/ZoneError."""
+    if lapline not in ("auto", "none"):
+        raise CommandError('lapline must be "auto" or "none"')
+    if isinstance(width_m, bool) or not isinstance(width_m, (int, float)) or not TRACK_WIDTH_M[0] <= width_m <= TRACK_WIDTH_M[1]:
+        raise CommandError("width_m must be 2-20")
+    if isinstance(simplify_m, bool) or not isinstance(simplify_m, (int, float)) or not 0.1 <= simplify_m <= 20:
+        raise CommandError("simplify_m must be 0.1-20")
+    raw = rec.lap_points(lap)
+    if len(raw) < 3 or path_length(raw) < 20:
+        raise CommandError("the recording is too short for a track")
+    pts = simplify_track(raw, simplify_m, TRACK_MAX_POINTS)
+    loop = lap != "all" or dist_m(raw[0], raw[-1]) <= 2 * REC_START_RADIUS_M
+    if loop and len(pts) > 3 and dist_m(pts[0], pts[-1]) <= max(3.0, 2 * simplify_m):
+        pts = pts[:-1]                     # closed: the renderer joins last -> first
+    track = {"points": pts, "closed": bool(loop and len(pts) >= 3), "width_m": round(float(width_m), 1)}
+    zones = [dict(z) for z in cur_doc.get("zones") or []]
+    info = {"lap": lap, "raw_points": len(raw), "points": len(pts), "length_m": round(path_length(raw), 1),
+            "closed": track["closed"], "lapline": None}
+    if lapline == "auto":
+        old = next((z for z in zones if z.get("type") == "lapline"), None)
+        zones = [z for z in zones if z.get("type") != "lapline" and z.get("id") != "lap"]
+        a, b = lapline_at(raw)
+        min_lap = int((old or {}).get("min_lap_s", DEFAULT_MIN_LAP_S))
+        if lap_time_s:
+            min_lap = max(5, min(min_lap, int(lap_time_s * 0.6)))     # never longer than 60 % of the driven lap
+        zones.append({"id": "lap", "type": "lapline", "shape": "line", "a": a, "b": b, "min_lap_s": min_lap})
+        info["lapline"] = {"a": a, "b": b, "min_lap_s": min_lap}
+    body = {"enabled": cur_doc.get("enabled", False), "zones": zones, "track": track}
+    validate_zones(body)                   # raises ZoneError with a clear message
+    return body, info

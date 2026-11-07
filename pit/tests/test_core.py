@@ -2,13 +2,23 @@
 
 Run:  python3 -I pit/tests/test_core.py      (or python3 -m unittest from pit/tests)
 """
+import json
 import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
+import health  # noqa: E402
 import pitcore as pc  # noqa: E402
+
+PIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PIT, "tools"))
+import wifi_profiles as wp  # noqa: E402
 
 
 def tele(kart, **kw):
@@ -598,6 +608,332 @@ class GpsCorrectionTest(unittest.TestCase):
         gc = f.snapshot(1.0)["gps_correction"]
         self.assertFalse(gc["enabled"]); self.assertFalse(gc["marker"]); self.assertEqual(gc["samples"], 0)
 
+
+class HealthTest(unittest.TestCase):
+    def test_parse_and_status(self):
+        self.assertEqual(health.parse_throttled("throttled=0x50005\n"), 0x50005)
+        self.assertEqual(health.parse_throttled("throttled=0x0"), 0)
+        self.assertIsNone(health.parse_throttled("garbage"))
+        self.assertIsNone(health.parse_throttled(""))
+        self.assertEqual(health.status_of(0x0), "ok")
+        self.assertEqual(health.status_of(0x50005), "undervolt")        # under-voltage now wins
+        self.assertEqual(health.status_of(0x40004), "throttled")
+        self.assertEqual(health.status_of(0x80008), "throttled")        # soft temp limit counts
+        self.assertEqual(health.status_of(0x50000), "had_undervolt")
+        self.assertEqual(health.status_of(0x40000), "ok")               # only throttling in the past: nothing shown
+        self.assertEqual(health.status_of(None), "unavailable")
+        f = health.flags(0x50005)
+        self.assertTrue(f["undervolt_now"] and f["throttled_now"] and f["undervolt_since_boot"])
+        self.assertFalse(f["freq_capped_now"])
+
+    def test_sampler_transitions_and_unavailable(self):
+        seq = iter(["throttled=0x0", "throttled=0x0", "throttled=0x50005", "throttled=0x50000", "throttled=0x50000"])
+        seen = []
+        h = health.Health(reader=lambda: next(seq), temp_reader=lambda: 51.2,
+                          on_change=lambda prev, snap: seen.append((prev, snap["status"])), clock=lambda: 100.0)
+        snaps = [h.sample() for _ in range(5)]
+        self.assertEqual(seen, [("ok", "undervolt"), ("undervolt", "had_undervolt")])  # first "ok" is silent
+        self.assertEqual(snaps[2]["throttled"], "0x50005")
+        self.assertEqual(snaps[2]["temp_c"], 51.2)
+        self.assertTrue(snaps[2]["available"])
+        bad = []
+        h2 = health.Health(reader=lambda: "throttled=0x50005", temp_reader=None,
+                           on_change=lambda p, s: bad.append(p))
+        h2.sample()
+        self.assertEqual(bad, [None])                                   # starts bad: logged at once
+        off = health.Health(reader=None, temp_reader=lambda: None)
+        self.assertEqual(off.sample()["status"], "unavailable")
+        self.assertFalse(off.snapshot()["available"])
+
+
+class WifiProfiles(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.nm = os.path.join(self.tmp, "nm")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_render_adopt_idempotent(self):
+        env = wp.load_env('WIFI_SSID="McLab"\nWIFI_PASSWORD="s3cret pw"\nWIFI2_SSID=Shop\nWIFI2_PASSWORD=\'other;pw\\x\'\n')
+        self.assertEqual(wp.networks(env), [("McLab", "s3cret pw", 20), ("Shop", "other;pw\\x", 10)])
+        os.makedirs(self.nm)
+        # a hand-made profile (nmcli con add) for the same SSID is adopted: same file, same UUID
+        with open(os.path.join(self.nm, "McLab.nmconnection"), "w") as f:
+            f.write("[connection]\nid=McLab\nuuid=c3192c39-e574-424b-b3aa-c4f1e1b849f1\ntype=wifi\n\n[wifi]\nssid=McLab\n")
+        items = wp.plan(env, self.nm)
+        self.assertEqual([os.path.basename(p) for p, _, _ in items],
+                         ["McLab.nmconnection", "Shop.nmconnection", "gokart-eth0.nmconnection"])
+        kv = wp.parse_keyfile(items[0][1])
+        self.assertEqual(kv["connection.uuid"], "c3192c39-e574-424b-b3aa-c4f1e1b849f1")
+        self.assertEqual((kv["connection.autoconnect"], kv["connection.autoconnect-priority"]), ("true", "20"))
+        self.assertEqual(kv["wifi-security.psk"], "s3cret pw")
+        self.assertEqual(wp.parse_keyfile(items[1][1])["wifi-security.psk"], "other;pw\\x")   # escaped round trip
+        self.assertIn("psk=other\\;pw\\\\x", items[1][1])
+        self.assertEqual(wp.parse_keyfile(items[2][1])["ipv4.method"], "auto")
+        envf = os.path.join(self.tmp, "wifi.env")
+        with open(envf, "w") as f:
+            f.write('WIFI_SSID="McLab"\nWIFI_PASSWORD="s3cret pw"\n')
+        out1 = subprocess.run([sys.executable, "-I", os.path.join(PIT, "tools", "wifi_profiles.py"), envf,
+                               "--dir", self.nm, "--no-reload"], capture_output=True, text=True)
+        out2 = subprocess.run([sys.executable, "-I", os.path.join(PIT, "tools", "wifi_profiles.py"), envf,
+                               "--dir", self.nm, "--no-reload"], capture_output=True, text=True)
+        self.assertEqual((out1.returncode, out2.returncode), (0, 0), out1.stderr + out2.stderr)
+        self.assertIn("written", out1.stdout)
+        self.assertNotIn("written", out2.stdout)                         # idempotent
+        self.assertNotIn("s3cret", out1.stdout + out1.stderr + out2.stdout)   # never prints the password
+        self.assertEqual(os.stat(os.path.join(self.nm, "McLab.nmconnection")).st_mode & 0o777, 0o600)
+
+    def test_bad_input(self):
+        with self.assertRaises(ValueError) as e:
+            wp.networks({"WIFI_SSID": "x", "WIFI_PASSWORD": "short"})
+        self.assertNotIn("short", str(e.exception))
+        self.assertEqual(wp.networks({"WIFI_SSID": "", "WIFI_PASSWORD": ""}), [])
+        self.assertEqual(wp.networks({"WIFI_SSID": "a", "WIFI_PASSWORD": "12345678",
+                                      "WIFI2_SSID": "", "WIFI2_PASSWORD": "\"\""}), [("a", "12345678", 20)])
+
+
+def run_js(expr):
+    """Evaluate watch.js + expr with node, or JavaScriptCore (osascript) on a Mac; None if neither exists."""
+    with open(os.path.join(PIT, "server", "static", "watch.js")) as f:
+        src = f.read().replace('"use strict";', "")
+    prog = src + "\nJSON.stringify(" + expr + ");"
+    node = shutil.which("node")
+    if node:
+        r = subprocess.run([node, "-p", prog], capture_output=True, text=True, timeout=20)
+    elif sys.platform == "darwin" and shutil.which("osascript"):
+        r = subprocess.run(["osascript", "-l", "JavaScript", "-"], input=prog, capture_output=True, text=True, timeout=20)
+    else:
+        return None
+    if r.returncode != 0:
+        raise AssertionError(r.stderr)
+    return json.loads(r.stdout.strip())
+
+
+class KioskWatchdogJs(unittest.TestCase):
+    def test_decide(self):
+        cases = {
+            # young page: never reload (no loops), even with a changed start_id
+            "young": "GKWatch.decide({pageStart:0,lastMsg:1000,startId0:'a',startId:'b',probeOkAt:0},29000)",
+            "restarted": "GKWatch.decide({pageStart:0,lastMsg:39000,startId0:'a',startId:'b',probeOkAt:0},40000)",
+            "healthy": "GKWatch.decide({pageStart:0,lastMsg:39000,startId0:'a',startId:'a',probeOkAt:0},40000)",
+            "dead19": "GKWatch.decide({pageStart:0,lastMsg:21000,startId0:'a',startId:'a',probeOkAt:0},40000)",
+            "dead_noprobe": "GKWatch.decide({pageStart:0,lastMsg:10000,startId0:'a',startId:'a',probeOkAt:0},40000)",
+            "dead_probe_ok": "GKWatch.decide({pageStart:0,lastMsg:10000,startId0:'a',startId:'a',probeOkAt:38000},40000)",
+            "dead_probe_old": "GKWatch.decide({pageStart:0,lastMsg:10000,startId0:'a',startId:'a',probeOkAt:30000},40000)",
+            "never_msg": "GKWatch.decide({pageStart:0,lastMsg:0,startId0:null,startId:null,probeOkAt:0},40000)",
+            "chip_uv": "GKWatch.healthChip({available:true,status:'undervolt'})",
+            "chip_thr": "GKWatch.healthChip({available:true,status:'throttled'})",
+            "chip_had": "GKWatch.healthChip({available:true,status:'had_undervolt'})",
+            "chip_ok": "GKWatch.healthChip({available:true,status:'ok'})",
+            "chip_off": "GKWatch.healthChip({available:false,status:'unavailable'})",
+            "chip_none": "GKWatch.healthChip(undefined)",
+        }
+        got = run_js("{" + ",".join(f"{k}:{v}" for k, v in cases.items()) + "}")
+        if got is None:
+            self.skipTest("no JavaScript runtime (node or macOS osascript)")
+        self.assertEqual(got["young"], "wait")
+        self.assertEqual(got["restarted"], "reload")
+        self.assertEqual(got["healthy"], "ok")
+        self.assertEqual(got["dead19"], "ok")
+        self.assertEqual(got["dead_noprobe"], "probe")
+        self.assertEqual(got["dead_probe_ok"], "reload")
+        self.assertEqual(got["dead_probe_old"], "probe")     # a stale probe never triggers a reload
+        self.assertEqual(got["never_msg"], "probe")
+        self.assertEqual(got["chip_uv"], {"text": "UNDERVOLT", "cls": "bad"})
+        self.assertEqual(got["chip_thr"], {"text": "throttled", "cls": "warn"})
+        self.assertEqual(got["chip_had"], {"text": "had undervolt", "cls": "stale"})
+        self.assertIsNone(got["chip_ok"])
+        self.assertIsNone(got["chip_off"])
+        self.assertIsNone(got["chip_none"])
+
+
+def lapstate(laps, last_cross):
+    st = pc.LapState()
+    st.laps, st.started_mono = laps, last_cross
+    return st
+
+
+class RacePositions(unittest.TestCase):
+    def test_states_and_order(self):
+        g = pc.Game()
+        self.assertEqual(g.race_positions(10.0), (0, [0] * 8))             # no race: idle
+        g.race_begin(3, 100.0, "go")
+        self.assertEqual(g.race_positions(95.0), (1, [0] * 8))             # countdown: all 0
+        g.laps = {1: lapstate(2, 190.0), 2: lapstate(2, 185.0), 3: lapstate(1, 180.0), 4: lapstate(0, 150.0)}
+        # laps desc, then earliest last crossing; kart 4 has no completed lap -> 0
+        self.assertEqual(g.race_positions(200.0), (2, [2, 1, 3, 0, 0, 0, 0, 0]))
+        g.laps[5] = lapstate(3, 199.0)
+        g.session.finish(5, 199.0, 3)                                       # finished karts keep their place
+        g.laps[6] = lapstate(3, 201.0)                                      # 3 laps but not finished yet: after 5
+        st, pos = g.race_positions(205.0)
+        self.assertEqual(pos[4], 1)
+        self.assertEqual(pos[5], 2)
+        self.assertEqual((pos[1], pos[0], pos[2], pos[3]), (3, 4, 5, 0))
+        g.race_stop([1, 2, 3, 4, 5, 6], "end")
+        st, pos = g.race_positions(210.0)
+        self.assertEqual(st, 3)
+        self.assertEqual(sorted(p for p in pos if p), [1, 2, 3, 4, 5, 6])
+        self.assertEqual(pos[4], 1)
+        g.reset_laps()
+        self.assertEqual(g.race_positions(220.0), (0, [0] * 8))
+
+
+class FakeLink:
+    connected = True
+    description = "fake"
+
+    def __init__(self):
+        self.lines = []
+
+    def write_line(self, obj):
+        self.lines.append(obj)
+        return True
+
+
+class RaceLineSender(unittest.TestCase):
+    """pit_server App._race_tick: what goes to the T-Beam and what goes to the session log."""
+
+    def setUp(self):
+        import pit_server as ps
+        self.ps = ps
+        self.tmp = tempfile.mkdtemp()
+        cfg = dict(ps.DEFAULTS, log_dir=os.path.join(self.tmp, "logs"))
+        self.app = ps.App(cfg, os.path.join(self.tmp, "map"))
+        self.link = self.app.link = FakeLink()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def races(self):
+        return [m for m in self.link.lines if m.get("t") == "race"]
+
+    def logged(self):
+        return [(r["state"], r["pos"]) for r in self.app.log.recent(500) if r.get("what") == "race_pos"]
+
+    def test_start_running_finish_reset(self):
+        app, g = self.app, self.app.fleet.game
+        app.race_start({"secs": 3, "laps": 0}, "t")
+        self.assertEqual(self.races(), [{"t": "race", "state": 1, "pos": [0] * 8}])      # immediately on start
+        go = g.session.go_mono
+        g.laps = {3: lapstate(2, go + 50), 1: lapstate(2, go + 40), 7: lapstate(1, go + 30), 2: lapstate(0, go + 10)}
+        t = go + 60
+        app._race_tick(t)
+        self.assertEqual(self.races()[-1], {"t": "race", "state": 2, "pos": [1, 0, 2, 0, 0, 0, 3, 0]})
+        n = len(self.races())
+        app._race_tick(t + 1.0)                     # unchanged, < 2 s: nothing
+        self.assertEqual(len(self.races()), n)
+        app._race_tick(t + 2.1)                     # 2 s repeat
+        app._race_tick(t + 4.2)
+        self.assertEqual(len(self.races()), n + 2)
+        self.assertEqual(self.logged(), [(1, [0] * 8), (2, [1, 0, 2, 0, 0, 0, 3, 0])])     # once per change
+        n = len(self.races())
+        app.race_stop("t")                          # first state-3 line goes out at once
+        self.assertEqual(self.races()[-1]["state"], 3)
+        t0 = time.monotonic()
+        for dt in (0.1, 1.0, 3.0, 3.1, 5.0, 6.0, 8.0, 20.0):
+            app._race_tick(t0 + dt)
+        fin = self.races()[n:]
+        self.assertEqual(len(fin), 3)                                        # 3 times over 6 s
+        self.assertTrue(all(m["state"] == 3 for m in fin))
+        self.assertEqual(fin[0]["pos"][:3], [1, 4, 2])                       # final results place kart 2 (no laps) 4th
+        app.reset_laps("t")
+        app._race_tick(t + 40)
+        app._race_tick(t + 45)
+        self.assertEqual(self.races()[-1], {"t": "race", "state": 0, "pos": [0] * 8})
+        self.assertEqual(sum(1 for m in self.races() if m["state"] == 0), 1)  # state 0 once
+        self.assertEqual([s for s, _ in self.logged()], [1, 2, 3, 0])
+
+def circle_fix(i, r=25.0, n=60):
+    """Point i on a circle (r m) around LAT0/LON0, n points per lap."""
+    a = 2 * math.pi * i / n
+    return at(r * math.cos(a), r * math.sin(a))
+
+
+class PaceCar(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dir = os.path.join(self.tmp, "recordings")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def drive(self, rec, laps=2.0, kart=1, t0=0.0, n=60):
+        t = t0
+        for i in range(int(n * laps) + 1):
+            lat, lon = circle_fix(i, n=n)
+            t += 0.5                                          # 2 Hz, 157 m lap in 30 s ~ 19 kph
+            rec.on_fix(kart, lat, lon, 19.0, 9, True, t)
+        return t
+
+    def test_laps_filters_and_persist(self):
+        rec = pc.TrackRecorder(self.dir)
+        self.assertFalse(rec.on_fix(1, LAT0, LON0, 10, 9, True, 0.0))         # not recording
+        rec.start(1, 0.0, "w0")
+        lat, lon = circle_fix(0)
+        self.assertTrue(rec.on_fix(1, lat, lon, 19, 9, True, 0.5))
+        self.assertFalse(rec.on_fix(2, *circle_fix(1), 19, 9, True, 1.0))     # other kart
+        self.assertFalse(rec.on_fix(1, *circle_fix(1), 19, 4, True, 1.0))     # sats < 5
+        self.assertFalse(rec.on_fix(1, *circle_fix(1), 19, 9, False, 1.0))   # no fix
+        self.assertFalse(rec.on_fix(1, *at(500, 0), 19, 9, True, 1.0))       # 500 m jump in 0.5 s
+        self.assertFalse(rec.on_fix(1, *at(25.5, 0.3), 19, 9, True, 1.0))    # < 1.5 m from the last point
+        self.assertEqual(rec.rejected, 1)
+        self.drive(rec, 2.05, t0=1.0)
+        s = rec.stop("w1")
+        self.assertEqual(len(s["laps"]), 2, s["laps"])
+        for lp in s["laps"]:
+            self.assertAlmostEqual(lp["length_m"], 2 * math.pi * 25, delta=6)
+            self.assertAlmostEqual(lp["time_s"], 30.0, delta=2)
+        self.assertTrue(s["file"].endswith("-k1.json"))
+        again = pc.TrackRecorder(self.dir)                                     # reload the latest at start-up
+        self.assertEqual((again.kart, len(again.laps), len(again.points)), (1, 2, len(rec.points)))
+        self.assertFalse(again.recording)
+        again.clear()
+        self.assertEqual(os.listdir(self.dir), [])
+        self.assertEqual(pc.TrackRecorder(self.dir).summary()["n_points"], 0)
+
+    def test_use_lap_builds_valid_track_and_lapline(self):
+        rec = pc.TrackRecorder(None)
+        rec.start(3, 0.0, "w0")
+        self.drive(rec, 2.05, kart=3)
+        rec.stop("w1")
+        cur = {"enabled": True, "zones": [dict(LAPLINE, id="old", min_lap_s=40),
+                                           {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 5}]}
+        body, info = pc.track_from_recording(rec, 1, cur, width_m=7, lapline="auto", simplify_m=0.5, lap_time_s=30.0)
+        doc = pc.validate_zones(body)
+        self.assertTrue(doc["track"]["closed"])
+        self.assertEqual(doc["track"]["width_m"], 7.0)
+        self.assertLessEqual(len(doc["track"]["points"]), pc.TRACK_MAX_POINTS)
+        self.assertGreaterEqual(len(doc["track"]["points"]), 8)
+        laps = [z for z in doc["zones"] if z["type"] == "lapline"]
+        self.assertEqual([z["id"] for z in laps], ["lap"])                   # replaced the old one
+        self.assertEqual(laps[0]["min_lap_s"], 18)                           # 60 % of the 30 s lap
+        self.assertIn("b1", [z["id"] for z in doc["zones"]])                 # other zones kept
+        a, b = laps[0]["a"], laps[0]["b"]
+        self.assertAlmostEqual(pc.dist_m(a, b), 10.0, delta=0.2)
+        start = rec.lap_points(1)[0]
+        mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]
+        self.assertLess(pc.dist_m(mid, start), 0.2)                          # centred on the lap start
+        # the line is crossed by the driven path (perpendicular to the heading)
+        proj = pc.local_en(start[0], start[1])
+        pts = rec.lap_points(2)
+        crossed = any(pc.segment_cross(proj(*pts[i]), proj(*pts[i + 1]), proj(*a), proj(*b)) is not None
+                      for i in range(len(pts) - 1))
+        self.assertTrue(crossed)
+        body2, _ = pc.track_from_recording(rec, "all", cur, lapline="none")
+        self.assertEqual([z["id"] for z in body2["zones"]], ["old", "b1"])
+        with self.assertRaises(pc.CommandError):
+            pc.track_from_recording(rec, 9, cur)
+        with self.assertRaises(pc.CommandError):
+            pc.track_from_recording(rec, 1, cur, width_m=50)
+
+    def test_simplify_caps_points(self):
+        pts = [circle_fix(i, n=2000) for i in range(2000)]
+        out = pc.simplify_track(pts, 0.01, 200)
+        self.assertLessEqual(len(out), 200)
+        self.assertEqual(out[0], list(pts[0]))
+        line = [at(i, 0) for i in range(50)]
+        self.assertEqual(len(pc.douglas_peucker(line, 0.5)), 2)              # a straight line -> its ends
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

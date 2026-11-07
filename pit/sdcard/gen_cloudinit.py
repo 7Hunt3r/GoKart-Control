@@ -27,7 +27,7 @@ PIT = HERE.parent                               # pit/
 BUILD = HERE / "build"
 # Never ship these in the payload (secrets, runtime state, generated files).
 EXCLUDE_TOP = {"logs", "build"}
-EXCLUDE_REL = {"sdcard/secrets.env", "sdcard/build", "server/config.json"}
+EXCLUDE_REL = {"sdcard/secrets.env", "sdcard/build", "server/config.json", "server/map/recordings"}
 
 # ---------------------------------------------------------------------------
 # sha512-crypt ($6$) in pure Python. macOS ships LibreSSL (no `openssl passwd -6`)
@@ -141,6 +141,14 @@ def access_points(env) -> str:
     return "\n".join(f"{pad}{q(ssid)}:\n{pad}  password: {q(pw)}" for ssid, pw in aps)
 
 
+def wifi_env(env) -> str:
+    """WIFI_* lines (shell-quoted) for /etc/gokart-pit/wifi.env, read by tools/wifi_profiles.py."""
+    keys = ["WIFI_SSID", "WIFI_PASSWORD", "WIFI_COUNTRY"]
+    if env.get("WIFI2_SSID"):
+        keys += ["WIFI2_SSID", "WIFI2_PASSWORD"]
+    return "".join(f"{k}={shlex.quote(env.get(k, ''))}\n" for k in keys)
+
+
 def main():
     self_test()
     env_path = Path(os.environ.get("GOKART_SECRETS") or HERE / "secrets.env")
@@ -175,6 +183,7 @@ def main():
                  .replace("{{PASSWORD_HASH}}", q(pw_hash))
                  .replace("{{WIFI_SSID}}", shlex.quote(env["WIFI_SSID"]))
                  .replace("{{PIT_CONFIG_JSON}}", q(pit_config))
+                 .replace("{{WIFI_ENV}}", q(wifi_env(env)))
                  .replace("{{TAILSCALE_AUTHKEY}}", q(env.get("TAILSCALE_AUTHKEY", "")))
                  .replace("{{PAYLOAD_B64}}", payload_b64()))
     (BUILD / "user-data").write_text(user_data)
