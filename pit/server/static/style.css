@@ -406,3 +406,31 @@ body.op .card .hdr { white-space: nowrap; }
 .pclaps table { border-collapse: collapse; font-size: 14px; }
 .pclaps td, .pclaps th { padding: 3px 10px; border-bottom: 1px solid #ccc; text-align: left; }
 .pclaps button { min-height: 32px; padding: 2px 10px; font-size: 13px; }
+
+/* phone: pace car panel under the map (REC / STOP / USE AS TRACK from trackside) */
+body.mobile .mpace { flex: none; margin: 0 6px 6px; padding: 6px; border: 2px solid var(--line); border-radius: var(--radius); background: #f0efe9; }
+body.mobile .mpacehead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+body.mobile .mpacehead > select { min-height: 48px; font-size: 18px; font-weight: 800; padding: 4px 8px; border: 2px solid var(--line); border-radius: 6px; }
+body.mobile .mpacebtns { display: grid; grid-template-columns: 2fr 1.4fr 1fr; gap: 6px; width: 100%; }
+body.mobile .mpacebtns button { min-height: 60px; font-size: 20px; }
+body.mobile .mpace .pclaps { width: 100%; }
+body.mobile .mpace .pclaps table { width: 100%; font-size: 16px; }
+body.mobile .mpace .pclaps button { min-height: 48px; width: 100%; }
+body.mobile #tab-map .mapwrap { min-height: 240px; }
+body.mobile .mpacebtns button.pcrec { color: #c40000; font-weight: 900; }
+body.mobile .mpacebtns button.pcrec.on { background: #c40000; color: #fff; }
+
+/* kiosk top bar: never wider than the 1024 px panel. Status chips shrink (ellipsis) before the
+   right-hand controls (SOUND, filters, clock) are pushed off the edge. */
+body.kiosk .topbar > .chip, body.kiosk .topbar > .banner { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+body.kiosk .topbar > .spacer { flex: 1 1 0; min-width: 0; }
+body.kiosk .topbar > #sndBtn, body.kiosk .topbar > .toggle, body.kiosk .topbar > #clock, body.kiosk .topbar > .title { flex: none; }
+body.kiosk .topbar > .toggle { min-height: 40px; padding: 2px 10px; }
+body.kiosk #tab-race .laph { margin-top: 0; }
+body.kiosk #tab-race #laps { margin-bottom: 10px; }
+
+/* SCALE != MODE: amber, tappable (sends the kart's mode again) */
+.badge.warnb { background: #ffb000; color: #000; border: 2px solid #000; min-height: 0; cursor: pointer; font: inherit; font-weight: 800; }
+.card .badge.warnb { padding: 0 6px; }
+.basestat { margin: 0 0 6px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.radioq { margin-top: 4px; }

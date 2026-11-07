@@ -11,6 +11,32 @@ const LOGIN_URL = MOBILE ? "/login?next=/m" : "/login";
 const MODES = ["ECO", "NORMAL", "SPORT"];
 const LINK_TEXT = { online: "ONLINE", stale: "STALE", offline: "OFFLINE", never: "NEVER HEARD" };
 const LINK_CLASS = { online: "ok", stale: "warn", offline: "stale", never: "stale" };
+/* Command outcomes in plain words, the same on the kiosk, operator page and phone. The server's
+   machine names (pitcore.py) stay in the log and the API; OUTCOME_HELP explains each one. */
+const OUTCOME_TEXT = {
+  queued: "waiting", pending: "sending", received: "heard", accepted: "working", applied: "done",
+  no_vesc: "no VESC", rejected: "refused", unknown: "not confirmed", no_ack: "no answer",
+  offline: "kart offline", superseded: "replaced", cancelled: "cancelled", link_lost: "radio lost",
+};
+const OUTCOME_HELP = [
+  ["sending", "on the air, retried every 1.5 s (6 tries)"], ["heard / working", "the kart has it and is applying it"],
+  ["done", "kart confirmed it (VESC read back)"], ["no VESC", "kart has no link to its controller"],
+  ["refused", "kart firmware said no (writes off, stopped, bad value)"], ["not confirmed", "sent to the VESC, read-back did not match"],
+  ["no answer", "no echo after 6 tries: outcome unknown"], ["kart offline", "not heard when sent (a late echo still updates it)"],
+  ["replaced", "a newer command (e.g. STOP) went to that kart first"], ["cancelled", "dropped from the queue by a STOP, never sent"],
+  ["radio lost", "T-Beam link dropped: never replayed"],
+];
+function outWord(o) { return OUTCOME_TEXT[o] || o; }
+/* per-kart outcome words: a Heltec that rebooted during STOP refuses START until it is given a mode */
+function kartOutWord(cmd, o, kartId) {
+  const k = S && S.fleet.karts[kartId - 1];
+  if (cmd === "start" && o === "rejected" && k && nul((k.status || {}).mode_req)) return "rejected: send a mode first";
+  return outWord(o);
+}
+/* DOM writes only when the value changed: the kiosk renders 4 times a second on a Pi 4 */
+function setText(el, v) { if (el && el.textContent !== v) el.textContent = v; }
+function setHTML(el, v) { if (el && el._h !== v) { el._h = v; el.innerHTML = v; } }
+function setClass(el, v) { if (el && el.className !== v) el.className = v; }
 let S = null;
 let lastMsg = 0;
 const $ = (id) => document.getElementById(id);
@@ -57,14 +83,21 @@ async function post(url, body) {
   }
 }
 
-function cmdLabel(cmd, kart, arg) {
-  const who = kart === 255 ? "ALL" : "K" + kart;
-  return cmd === "mode" ? `${who} ${MODES[arg]}` : `${who} ${cmd.toUpperCase()}`;
+function cmdWhat(cmd, arg, argName) {
+  if (cmd === "mode") return MODES[arg] || "MODE";
+  if (cmd === "race") return argName ? "RACE " + argName : "RACE";
+  if ((cmd === "slow" || cmd === "boost") && argName) return `${cmd.toUpperCase()} ${argName}`;
+  return cmd.toUpperCase();
+}
+function cmdLabel(cmd, kart, arg, argName) {
+  return `${kart === 255 ? "ALL" : "K" + kart} ${cmdWhat(cmd, arg, argName)}`;
 }
 function sendCmd(cmd, kart, arg) {
   const body = { cmd, kart };
   if (cmd === "mode" || ((cmd === "slow" || cmd === "boost") && !nul(arg))) body.arg = arg;
-  post("/cmd", body).then((j) => { if (j && j.ok) toast(`${cmdLabel(cmd, kart, arg)} sent (seq ${j.command.seq ?? "queued"})`); });
+  post("/cmd", body).then((j) => {
+    if (j && j.ok) toast(`${cmdLabel(cmd, kart, arg, j.command.arg_name)} ${j.command.seq === null ? "queued behind the last command" : "sent"}`);
+  });
 }
 
 /* press-and-hold buttons (STOP ALL, START ALL, RACE ON) */
@@ -145,7 +178,7 @@ function buildCards() {
       ${KIOSK ? "" : kartButtons(k)}`;
     const f = {};
     el.querySelectorAll("[data-f]").forEach((n) => { f[n.dataset.f] = n; });
-    if (KIOSK) el.addEventListener("click", () => openSheet(k));
+    if (KIOSK) el.addEventListener("click", (e) => { if (!e.target.closest("button")) openSheet(k); });
     box.appendChild(el);
     cards[k] = { el, f };
   }
@@ -161,14 +194,14 @@ function faultInfo(k) {
 function modeText(k) {
   const st = k.status || {};
   const req = k.mode_req_name || "--", act = k.mode_actual_name || "?";
+  if (KIOSK && st.mode_confirmed === true && req === act) return `<b>${esc(act)}</b> <span class="o-applied">✓</span>`;
   const conf = st.mode_confirmed === true ? "✓ confirmed" : (st.mode_confirmed === false ? "unconfirmed" : "");
   return `<b>${esc(req)}</b> → ${esc(act)} <span class="${st.mode_confirmed ? "o-applied" : "o-unknown"}">${conf}</span>`;
 }
 function outcomeText(k) {
   const pk = S.commands.per_kart[String(k)];
   if (!pk) return "";
-  const what = pk.cmd === "mode" ? MODES[pk.arg] : pk.cmd.toUpperCase();
-  return `<span class="o-${pk.outcome}">${esc(what)}: ${esc(pk.outcome)}</span>`;
+  return `<span class="o-${pk.outcome}">${esc(cmdWhat(pk.cmd, pk.arg, pk.arg_name))}: ${esc(kartOutWord(pk.cmd, pk.outcome, k))}</span>`;
 }
 
 function visible(k) {
@@ -187,87 +220,102 @@ function updateCards() {
     const st = k.status || {}, v = k.vesc || {}, d = k.derived || {}, g = k.gps || {};
     const show = visible(k);
     if (!show) hidden++;
-    c.el.className = "card " + k.link + (show ? "" : " hidden") + (expanded.has(k.id) ? " open" : "");
-    c.f.sw.style.background = k.color;
-    c.f.link.textContent = LINK_TEXT[k.link];
-    c.f.link.className = "chip " + LINK_CLASS[k.link];
-    c.f.age.textContent = nul(k.age_s) ? "" : ageText(k.age_s) + " ago";
+    setClass(c.el, "card " + k.link + (show ? "" : " hidden") + (expanded.has(k.id) ? " open" : ""));
+    if (!show) continue;                     // hidden cards: nothing to draw (counted above)
+    if (c.f.sw.dataset.c !== k.color) { c.f.sw.dataset.c = k.color; c.f.sw.style.background = k.color; }
+    setText(c.f.link, LINK_TEXT[k.link]);
+    setClass(c.f.link, "chip " + LINK_CLASS[k.link]);
+    setText(c.f.age, nul(k.age_s) ? "" : ageText(k.age_s) + (KIOSK ? "" : " ago"));
     const old = !k.vesc_fresh && !nul(k.vesc_age_s) ? ` (${ageText(k.vesc_age_s)} old)` : "";
-    c.f.batt.textContent = nul(d.battery_pct) ? "--" : Math.round(d.battery_pct) + "%";
-    c.f.volts.textContent = fmt(v.volts, 1, "V") + (d.under_load ? (COMPACT ? " load" : " under load") : "") + old;
-    c.f.wheel.textContent = nul(d.wheel_mph) ? "--" : Math.abs(d.wheel_mph).toFixed(0);
-    c.f.batt.classList.toggle("old", !k.vesc_fresh);
-    c.f.wheel.classList.toggle("old", !k.vesc_fresh);
-    c.f.gpsmph.textContent = g.fix_fresh && !nul(d.gps_mph) ? `GPS ${d.gps_mph.toFixed(0)} mph` : "GPS --";
-    c.f.mode.innerHTML = modeText(k);
-    c.f.esc.textContent = "ESC " + fmt(v.esc_c, 0, "°C");
+    setText(c.f.batt, nul(d.battery_pct) ? "--" : Math.round(d.battery_pct) + "%");
+    setText(c.f.volts, fmt(v.volts, 1, "V") + (d.under_load ? (COMPACT ? " load" : " under load") : "") + old);
+    setText(c.f.wheel, nul(d.wheel_mph) ? "--" : Math.abs(d.wheel_mph).toFixed(0));
+    if (c.f.batt.classList.contains("old") === !!k.vesc_fresh) c.f.batt.classList.toggle("old", !k.vesc_fresh);
+    if (c.f.wheel.classList.contains("old") === !!k.vesc_fresh) c.f.wheel.classList.toggle("old", !k.vesc_fresh);
+    setText(c.f.gpsmph, g.fix_fresh && !nul(d.gps_mph) ? `GPS ${d.gps_mph.toFixed(0)} mph` : "GPS --");
+    setHTML(c.f.mode, modeText(k));
+    setText(c.f.esc, "ESC " + fmt(v.esc_c, 0, "°C"));
     const fi = faultInfo(k);
-    c.f.fault.textContent = fi.text;
-    c.f.fault.className = fi.cls;
-    c.f.gps.textContent = (g.fix_now === true ? `${fmt(g.sats_now)} sats` : (g.fix_now === false ? "NO FIX" : "fix --"))
-      + (g.last_fix && !g.fix_fresh ? ` (last ${ageText(g.fix_age_s)})` : "");
+    setText(c.f.fault, fi.text);
+    setClass(c.f.fault, fi.cls);
+    setText(c.f.gps, (g.fix_now === true ? `${fmt(g.sats_now)} sats` : (g.fix_now === false ? "NO FIX" : "fix --"))
+      + (g.last_fix && !g.fix_fresh ? ` (last ${ageText(g.fix_age_s)})` : ""));
     const loss = (k.loss_pct_1m === null || k.loss_pct_1m === undefined ? "" : ` · loss ${k.loss_pct_1m}%`)
       + (k.via_repeater ? " · via repeater" : "");
     if (MOBILE) {   // rssi/snr = how the pit hears the kart; base_rssi = how the kart hears the pit
-      c.f.rssi.textContent = `pit hears ${fmt(st.rssi, 0)}/${fmt(st.snr, 1, " dB")}${loss}`
-        + (nul(st.base_rssi) ? "" : ` · kart hears ${fmt(st.base_rssi, 0)}`);
+      setText(c.f.rssi, `pit hears ${fmt(st.rssi, 0)}/${fmt(st.snr, 1, " dB")}${loss}`
+        + (nul(st.base_rssi) ? "" : ` · kart hears ${fmt(st.base_rssi, 0)}`));
     } else if (KIOSK) {     // short: the detail sheet has SNR and the rest
-      c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")}` + (nul(k.loss_pct_1m) ? "" : ` · ${k.loss_pct_1m}% loss`) + (k.via_repeater ? " · rep" : "");
+      setText(c.f.rssi, `${fmt(st.rssi, 0, " dBm")}` + (nul(k.loss_pct_1m) ? "" : ` · ${k.loss_pct_1m}% loss`) + (k.via_repeater ? " · rep" : ""));
     } else {
-      c.f.rssi.textContent = `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}` + loss
-        + (st.base_rssi ? ` · pit↑${fmt(st.base_rssi, 0, "")}` : "");
+      setText(c.f.rssi, `${fmt(st.rssi, 0, " dBm")} / ${fmt(st.snr, 1, " dB")}` + loss
+        + (st.base_rssi ? ` · pit↑${fmt(st.base_rssi, 0, "")}` : ""));
     }
-    c.f.out.innerHTML = outcomeText(k.id) || (MOBILE ? '<span class="note">none this session</span>' : "");
+    setHTML(c.f.out, outcomeText(k.id) || (MOBILE ? '<span class="note">none this session</span>' : ""));
+    // badges in priority order; the kiosk card has room for two short ones plus a "+n"
     const b = [];
-    if (st.stopped === true) b.push('<span class="badge stopped">STOPPED</span>');
+    if (st.stopped === true) b.push(`<span class="badge stopped">${KIOSK ? "STOP" : "STOPPED"}</span>`);
     if (fi.bad) b.push('<span class="badge fault">FAULT</span>');
     const onGrid = k.link === "online" && k.vesc_fresh && v.scale === 0 && st.stopped === false;   // race grid hold
-    if (gridSeen[k.id] && !onGrid && k.link === "online") goFlash[k.id] = Date.now() + 2500;
+    if (gridSeen[k.id] && !onGrid && k.link === "online" && st.stopped === false) goFlash[k.id] = Date.now() + 2500;
+    if (st.stopped === true) goFlash[k.id] = 0;      // a STOP ends the hold: that is not a GO
     gridSeen[k.id] = onGrid;
     const ses = session(), fp = ses && ses.finished && ses.finished[String(k.id)];
     if (fp) b.push(`<span class="badge finished">${KIOSK ? "FIN" : "FINISHED"} P${fp}</span>`);   // the flag beats GRID/GO
     else if (onGrid) b.push('<span class="badge grid">GRID</span>');
     else if ((goFlash[k.id] || 0) > Date.now()) b.push('<span class="badge go">GO</span>');
-    if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph} MPH</span>`);
-    if (st.vesc_link === false) b.push('<span class="badge unknown">VESC LINK DOWN</span>');
-    if (st.writes === false) b.push('<span class="badge grey">WRITES OFF</span>');
+    if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph}${KIOSK ? "" : " MPH"}</span>`);
+    if (st.vesc_link === false) b.push(`<span class="badge unknown">${KIOSK ? "NO VESC" : "VESC LINK DOWN"}</span>`);
+    if (st.writes === false) b.push(`<span class="badge grey">${KIOSK ? "WR OFF" : "WRITES OFF"}</span>`);
+    const sm = k.scale_mismatch;     // live scale != requested mode for 10 s (pitcore watch_scales): tap resends the mode
+    if (sm && !nul(sm.mode)) b.push(`<button class="badge warnb" data-c="mode" data-k="${k.id}" data-a="${sm.mode}" title="live scale ${fmt(sm.scale, 2)}, ${MODES[sm.mode]} wants ${fmt(sm.want, 2)}${sm.revert_missed ? "; kart reports a boost that did not revert" : ""}">${KIOSK ? "SCALE≠MODE" : "SCALE ≠ MODE, tap to resend"}</button>`);
+    if (k.reboots && !KIOSK) b.push(`<span class="badge grey" title="kart firmware restarted while the pit was running">REBOOTED${k.reboots > 1 ? " x" + k.reboots : ""}</span>`);
     if (entered.includes(k.id)) b.push('<span class="badge entered">ENTERED</span>');
     if (gameTiming() && k.lap && !fp) b.push(`<span class="badge lap">P${k.lap.pos} L${k.lap.laps}${nul(k.lap.best_s) || KIOSK ? "" : " · " + fmtLap(k.lap.best_s)}</span>`);
-    c.f.badges.innerHTML = b.join("");
-    c.el.querySelectorAll("[data-c]").forEach((btn) => {
-      btn.disabled = !linkUp;
-      if (btn.dataset.c === "mode") btn.classList.toggle("sel", st.mode_req === Number(btn.dataset.a));
+    if (KIOSK && b.length > 2) b.splice(2, b.length - 2, `<span class="badge grey">+${b.length - 2}</span>`);
+    setHTML(c.f.badges, b.join(""));
+    if (!c.btns) c.btns = [...c.el.querySelectorAll("[data-c]")];
+    c.btns.forEach((btn) => {
+      if (btn.disabled !== !linkUp) btn.disabled = !linkUp;
+      if (btn.dataset.c === "mode") {
+        const sel = st.mode_req === Number(btn.dataset.a);
+        if (btn.classList.contains("sel") !== sel) btn.classList.toggle("sel", sel);
+      }
     });
   }
-  $("hiddenNote").textContent = hidden ? `${hidden} hidden` : "";
+  setText($("hiddenNote"), hidden ? `${hidden} hidden` : "");
 }
 
 /* ------------------------------------------------------------ top + fleet */
-function chip(id, text, cls) { const e = $(id); if (e) { e.textContent = text; e.className = "chip " + (cls || ""); } }
+function chip(id, text, cls, hide) {
+  const e = $(id);
+  if (e) { setText(e, text); setClass(e, "chip " + (cls || "") + (hide ? " hidden" : "")); }
+}
 function updateTop() {
   const L = S.server.link, st = S.fleet.stat, base = S.fleet.base, race = S.fleet.race;
   $("simBanner").classList.toggle("hidden", !S.fleet.simulation);
   chip("linkChip", L.connected ? (COMPACT ? "T-Beam OK" : "T-Beam " + L.desc) : "T-BEAM DOWN", L.connected ? "ok" : "bad");
   if (st) {
     const staleStat = (st.age_s || 0) > 5;
-    chip("radioChip", (MOBILE ? `radio ${st.radio}` : KIOSK ? `${st.radio} rx ${st.rx}` : `radio ${st.radio} rx ${st.rx} tx ${st.tx}` + (st.rx_bad ? ` bad ${st.rx_bad}` : "")),
+    chip("radioChip", (MOBILE ? `radio ${st.radio}` : KIOSK ? (st.radio === "none" ? "NO RADIO" : "radio ok") : `radio ${st.radio} rx ${st.rx} tx ${st.tx}` + (st.rx_bad ? ` bad ${st.rx_bad}` : "")),
       st.radio === "none" ? "bad" : (staleStat ? "stale" : "ok"));
   } else chip("radioChip", "radio: no stat", "stale");
   if (base) chip("baseChip", base.fix ? `base GPS ${fmt(base.sats)} sats` : "base GPS no fix", base.fix ? "ok" : "warn");
   const gcorr = S.fleet.gps_correction;
   if ($("corrChip")) {
-    if (!gcorr || !gcorr.marker) chip("corrChip", "GPS corr: no pit marker", "");
+    if (!gcorr || !gcorr.marker) chip("corrChip", "GPS corr: no pit marker", "", KIOSK);   // kiosk: only where it means something
     else if (!gcorr.samples || gcorr.age_s === null || gcorr.age_s > 10) chip("corrChip", gcorr.enabled ? (KIOSK ? "corr: wait" : "GPS corr: waiting for base fix") : (KIOSK ? "corr off" : "GPS corr off"), "");
     else chip("corrChip", `GPS corr ${gcorr.magnitude_m.toFixed(1)} m` + (gcorr.applied ? " ON" : (gcorr.enabled ? " (hold)" : " off")), gcorr.applied ? "ok" : (gcorr.magnitude_m >= 25 ? "warn" : ""));
     $("corrChip").onclick = () => { if (gcorr) post("/gps_correction", { enabled: !gcorr.enabled }); };
   }
   const rp = S.fleet.repeater;
-  if (!rp) chip("repChip", KIOSK ? "no rep" : "no repeater", "");
+  if (!rp) chip("repChip", "no repeater", "", KIOSK);       // kiosk: shown once a repeater is heard
   else if (rp.age_s > 20) chip("repChip", `REPEATER LOST ${ageText(rp.age_s)}`, "bad");
   else {
     const batt = rp.batt_v > 0.5 ? ` ${rp.batt_v.toFixed(2)} V` : " USB";
     const ks = rp.karts && rp.karts.length ? ` · K${rp.karts.join(" K")}` : "";
-    chip("repChip", (COMPACT ? "rep" : "repeater") + ` ${fmt(rp.rssi, 0)} dBm${batt}${ks}`, rp.batt_v > 0.5 && rp.batt_v < 3.5 ? "warn" : "ok");
+    const hz = S.fleet.rate && S.fleet.rate.hz ? ` · ${S.fleet.rate.hz} Hz` : "";      // fleet report rate (1 Hz with a repeater)
+    chip("repChip", (COMPACT ? `rep ${fmt(rp.rssi, 0)} dBm${hz}` : `repeater ${fmt(rp.rssi, 0)} dBm${hz}${batt}${ks}`), rp.batt_v > 0.5 && rp.batt_v < 3.5 ? "warn" : "ok");
   }
   if ($("kartsChip")) {
     const on = S.fleet.karts.filter((k) => k.link === "online").length;
@@ -284,7 +332,7 @@ function updateTop() {
     he.classList.toggle("hidden", !hc);
     if (hc) { he.textContent = hc.text; he.className = "chip " + hc.cls; }
   }
-  chip("raceChip", race.active ? `RACE ${MODES[race.mode]} (${race.entered.length})` : "race off", race.active ? "info" : "");
+  chip("raceChip", race.active ? `RACE ${MODES[race.mode]} (${race.entered.length})` : "race off", race.active ? "info" : "", KIOSK && !race.active);
   $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
   const cb = $("connBanner");
   if (!L.connected) { cb.textContent = "T-BEAM LINK DOWN: telemetry is frozen and commands cannot be sent"; cb.classList.remove("hidden"); }
@@ -306,29 +354,35 @@ let lastOutcomeKey = "";
 function summarize(c) {
   const counts = {};
   Object.values(c.outcomes).forEach((o) => { counts[o] = (counts[o] || 0) + 1; });
-  return Object.entries(counts).map(([o, n]) => `<span class="o-${o}">${n} ${esc(o)}</span>`).join(", ");
+  return Object.entries(counts).map(([o, n]) => `<span class="o-${o}">${n} ${esc(outWord(o))}</span>`).join(", ");
 }
 function updateOutcomes() {
   const C = S.commands;
-  const key = JSON.stringify([C.recent, C.last_fleet]);
+  const key = JSON.stringify([C.recent, C.last_fleet, C.last_wait_ms, S.fleet.stat && [S.fleet.stat.cmd_q, S.fleet.stat.cmd_dropped],
+    C.last_fleet && C.last_fleet.cmd === "start" && S.fleet.karts.map((k) => nul((k.status || {}).mode_req))]);
   if (key === lastOutcomeKey) return;
   lastOutcomeKey = key;
   const lf = C.last_fleet;
   let h = "";
   if (lf) {
-    h += `<div class="sm"><b>Last fleet command:</b> ${esc(cmdLabel(lf.cmd, 255, lf.arg))} &middot; seq ${lf.seq ?? "-"} &middot;
+    h += `<div class="sm"><b>Last fleet command:</b> ${esc(cmdLabel(lf.cmd, 255, lf.arg, lf.arg_name))} &middot; seq ${lf.seq ?? "-"} &middot;
       ${esc(lf.source)} at ${hhmmss(lf.created_wall)} &middot; sent ${lf.tx_count}x (radio ${lf.radio_sent}) &middot; ${esc(lf.state)}</div>
       <div class="ocells">` + [1, 2, 3, 4, 5, 6, 7, 8].map((k) => {
       const o = lf.outcomes[String(k)] || "-";
-      return `<div class="ocell o-${o}"><span class="k">K${k}</span>${esc(o)}</div>`;
+      return `<div class="ocell o-${o}"><span class="k">K${k}</span>${o === "-" ? "-" : esc(kartOutWord(lf.cmd, o, k))}</div>`;
     }).join("") + "</div>";
   } else h += '<div class="sm">No fleet command yet this session.</div>';
+  const st = S.fleet.stat || {};
+  const radio = [];
+  if (!nul(C.last_wait_ms)) radio.push(`last command waited ${C.last_wait_ms} ms in the base queue`);
+  if (!nul(st.cmd_q)) radio.push(`queue ${st.cmd_q}`);
+  if (st.cmd_dropped) radio.push(`<span class="o-rejected">${st.cmd_dropped} dropped</span>`);
+  if (radio.length) h += `<div class="sm radioq">Radio: ${radio.join(" &middot; ")}</div>`;
   h += `<table class="cmds"><tr><th>#</th><th>seq</th><th>command</th><th>by</th><th>outcome</th></tr>` +
     C.recent.slice(0, KIOSK ? 8 : (MOBILE ? 20 : 12)).map((c) => `<tr><td>${c.id}</td><td>${c.seq ?? "-"}</td>
-      <td>${esc(cmdLabel(c.cmd, c.kart, c.arg))}</td><td>${esc(c.source)}<br>${hhmmss(c.created_wall)}</td><td>${summarize(c)}</td></tr>`).join("") +
+      <td>${esc(cmdLabel(c.cmd, c.kart, c.arg, c.arg_name))}</td><td>${esc(c.source)}<br>${hhmmss(c.created_wall)}</td><td>${summarize(c)}</td></tr>`).join("") +
     "</table>";
-  h += `<p class="note">offline = kart not online when sent; no_ack = no echo after retries (outcome unknown);
-    unknown = kart says VESC did not confirm; superseded = a newer command went to that kart; link_lost = T-Beam link dropped (never replayed).</p>`;
+  h += `<p class="note">${OUTCOME_HELP.map(([w, d]) => `<b>${w}</b> = ${d}`).join("; ")}.</p>`;
   $("outcomes").innerHTML = h;
 }
 
@@ -360,7 +414,9 @@ function buildRace() {
     post("/race/start", { secs, laps }).then((j) => { if (j && j.ok) toast(`Race start sent: GO in ${j.secs} s${j.laps ? ", " + j.laps + " laps" : ""} (laps reset)`); });
   };
   holdButton($("raceStop"), 1000, () => post("/race/stop", {}).then((j) => {
-    if (j && j.ok) toast(`Race stopped: ${j.sent.filter((x) => x.arg > 100).length} karts placed, finish sent`);
+    if (!j || !j.ok) return;
+    if (j.aborted) toast("Start aborted: STOP sent to all karts (they stay stopped until START)");
+    else toast(`Race stopped: ${Object.keys(j.session.finished).length} placed, finish sent to ${j.sent.length} kart${j.sent.length === 1 ? "" : "s"} on the air`);
   }));
   // phone: hold 1 s, then a confirm sheet with a big GO button (a pocket tap must never start a race)
   holdButton($("raceStart"), 1000, () => { GKSound.ensure(); if (MOBILE) confirmRace(startRace); else startRace(); });
@@ -385,6 +441,9 @@ function updateRace() {
   document.querySelectorAll("[data-racelaps]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.racelaps) === rl));
   const ses = race.session;
   $("raceStop").disabled = !S.server.link.connected || !ses || ses.state !== "running";
+  // before GO a finish would release the grid hold, so the server turns STOP RACE into STOP ALL
+  const counting = !!(ses && ses.state === "running" && !nul(race.go_in_s) && race.go_in_s > 0);
+  setHTML($("raceStop"), counting ? "ABORT START<small>hold 1 s · sends STOP ALL</small>" : "STOP RACE<small>hold 1 s · final results</small>");
 }
 
 function confirmRace(go) {
@@ -405,7 +464,17 @@ function confirmRace(go) {
 
 /* -------------------------------------------------------------------- log */
 let logBusy = false;
+function baseStatText() {           // T-Beam health from its 1 Hz stat line (firmware 2026-11-07+ fields)
+  const st = S && S.fleet.stat;
+  if (!st) return "T-Beam: no stat line yet";
+  const f = (v) => (nul(v) ? "--" : v);
+  return `T-Beam ${st.fw || "?"} · up ${ageText(st.uptime_s)} · rx ${f(st.rx)} tx ${f(st.tx)} bad ${f(st.rx_bad)}`
+    + ` · beacons ${f(st.beacon_tx)} (skipped ${f(st.beacon_skipped)}) · cmd queue ${f(st.cmd_q)}, dropped ${f(st.cmd_dropped)},`
+    + ` forced ${f(st.cmd_forced)} · heap ${nul(st.heap) ? "--" : Math.round(st.heap / 1024) + " kB"} · sync ${f(st.sync)}`
+    + ` · pit sent ${f(S.server.tx_lines)} lines, got ${f(S.server.rx_lines)} (${f(S.server.rx_bad)} bad)`;
+}
 function refreshLog() {
+  if ($("baseStat") && S) setText($("baseStat"), baseStatText());
   const box = $("log");
   if (!box || box.offsetParent === null || logBusy) return;
   logBusy = true;
@@ -442,6 +511,7 @@ function drPosition(k, now, en) {
   return [d.dispE, d.dispN];
 }
 let mapImg = null, mapImgSrc = null;
+const bgCache = { key: null, cv: null };
 const R_EARTH = 6371000;
 function niceStep(m) { const steps = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000]; return steps.find((s) => s >= m) || 5000; }
 
@@ -488,12 +558,24 @@ function drawMap() {
   }
   const px = (p) => [W / 2 + (p[0] - view.cx) * view.scale, H / 2 - (p[1] - view.cy) * view.scale];
 
-  // georeferenced background (optional; see pit/server/map/README.md)
+  // georeferenced background (optional; see pit/server/map/README.md). Scaling a 3000x3000 photo
+  // every frame was the kiosk's main CPU cost on the Pi 4: it is drawn once per view into an
+  // offscreen canvas the size of the map and copied from there.
   if (M.image && M.bounds) {
-    if (mapImgSrc !== M.image) { mapImgSrc = M.image; mapImg = new Image(); mapImg.src = M.image; }
+    if (mapImgSrc !== M.image) { mapImgSrc = M.image; mapImg = new Image(); mapImg.src = M.image; bgCache.key = null; }
     if (mapImg && mapImg.complete && mapImg.naturalWidth) {
       const a = px(en(M.bounds.north, M.bounds.west)), b = px(en(M.bounds.south, M.bounds.east));
-      ctx.globalAlpha = 0.9; ctx.drawImage(mapImg, a[0], a[1], b[0] - a[0], b[1] - a[1]); ctx.globalAlpha = 1;
+      const key = [mapImgSrc, cv.width, cv.height, a.map((v) => v.toFixed(1)), b.map((v) => v.toFixed(1))].join();
+      if (bgCache.key !== key) {
+        if (!bgCache.cv) bgCache.cv = document.createElement("canvas");
+        bgCache.cv.width = cv.width; bgCache.cv.height = cv.height;
+        const bx = bgCache.cv.getContext("2d");
+        bx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        bx.clearRect(0, 0, W, H);
+        bx.globalAlpha = 0.9; bx.drawImage(mapImg, a[0], a[1], b[0] - a[0], b[1] - a[1]);
+        bgCache.key = key;
+      }
+      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(bgCache.cv, 0, 0); ctx.restore();
     }
   }
   if (M.course && M.course.length > 1) {
@@ -545,8 +627,9 @@ function drawMap() {
     ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(a[0], a[1], 6, 0, 2 * Math.PI); ctx.fill();
     ctx.font = "bold 12px sans-serif"; ctx.fillText("tap the other end", a[0] + 10, a[1] - 8);
   }
-  if (note) note.textContent = `origin: ${o.source === "base" ? "base GPS" : o.source === "kart" ? "first kart fix" : "configured"}`
-    + (M.image ? (M.attribution ? ` | imagery: ${M.attribution}` : " | imagery loaded") : " | no imagery");
+  if (note) setText(note, `origin: ${o.source === "base" ? "base GPS" : o.source === "kart" ? "first kart fix" : "configured"}`
+    + (M.image ? (M.attribution ? ` | imagery: ${M.attribution}` : " | imagery loaded") : " | no imagery")
+    + (S.server.zones_error ? ` | ZONES FILE UNREADABLE (${S.server.zones_error}): game off until zones are saved` : ""));
 }
 
 function setupMapInput() {
@@ -676,7 +759,12 @@ function drawBoostPanel(ctx, c, rpx) {
 }
 /* ------------------------------------------------ pace car / track builder */
 let pace = null, paceBusy = false, paceKey = "";
-function paceOn() { return !!$("paceBar") && (zed.on || !!(S && S.track_rec && S.track_rec.recording)); }
+// operator page: inside the ZONES editor; phone: the PACE CAR panel on the MAP tab (always live)
+function paceOn() {
+  if (!$("paceBar")) return false;
+  if (MOBILE) return $("paceBar").offsetParent !== null || !!(S && S.track_rec && S.track_rec.recording);
+  return zed.on || !!(S && S.track_rec && S.track_rec.recording);
+}
 function pollPace() {
   if (!paceOn() || paceBusy) return;
   paceBusy = true;
@@ -697,7 +785,7 @@ function drawPaceTrail(ctx, px, en) {               // red trail of the recordin
   ctx.restore();
 }
 function updatePace() {
-  if (!$("paceBar") || !zed.on) return;
+  if (!$("paceBar") || (!MOBILE && !zed.on)) return;
   const sel = $("pcKart");
   if (!sel.dataset.touched && S) {                    // default: the first online kart
     const k = S.fleet.karts.find((q) => q.link === "online");
@@ -709,7 +797,7 @@ function updatePace() {
   $("pcRec").disabled = rec;
   $("pcStop").disabled = !rec;
   $("pcClear").disabled = rec || !p.n_points;
-  $("pcStatus").textContent = rec ? `recording K${p.kart}: ${p.n_points} pts, ${p.laps.length} lap${p.laps.length === 1 ? "" : "s"}`
+  $("pcStatus").textContent = !S || !S.server.link.connected ? "T-Beam link down: no fixes are coming in" : rec ? `recording K${p.kart}: ${p.n_points} pts, ${p.laps.length} lap${p.laps.length === 1 ? "" : "s"}`
     : p.n_points ? `K${p.kart} recording stopped: ${p.n_points} pts` : "drive the course with one kart: laps are detected when it returns to its start";
   const laps = p.laps || [];
   const key = JSON.stringify([laps, p.n_points > 0, rec]);
@@ -737,7 +825,7 @@ function paceAction(b) {
       .then((j) => {
         if (!j || !j.ok) return;
         if (S) S.zones = j.zones;
-        zoneEdit(true);                             // reload the editor from the saved document
+        if ($("zoneBar")) zoneEdit(true);           // operator page: reload the editor from the saved document
         toast(`Track saved from ${lap === "all" ? "the whole recording" : "lap " + lap}: ${j.info.points} points`
           + (j.info.lapline ? ", lap line placed" : "") + ` (zones v${j.zones.version})`);
       });
@@ -960,11 +1048,14 @@ function updateZoneBar() {
   $("zRadiusVal").textContent = z && z.shape === "circle" ? `${Math.round(z.r_m)} m` : "--";
   $("zSel").textContent = z ? `${z.type.toUpperCase()} ${z.id}` : "nothing selected";
   const counts = ["boost", "mud", "lapline", "item"].map((t) => zed.draft.filter((q) => q.type === t).length);
-  $("zHint").textContent = zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line" : ZONE_HINT[zed.tool];
+  $("zHint").textContent = zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line"
+    : zed.tool === "track" && zed.track && zed.track.closed ? "Track is a closed loop: new taps add points after the last one (UNDO POINT / OPEN LOOP / CLEAR)"
+      : ZONE_HINT[zed.tool];
   $("zHint").dataset.tool = zed.tool;
   $("zCounts").textContent = `${counts[0]} boost · ${counts[1]} mud · ${counts[3]} item · ${counts[2] ? "lap line" : "no lap line"} · `
     + (zed.track && zed.track.points.length ? `track ${zed.track.points.length} pts${zed.track.closed ? " closed" : ""}` : "no track")
     + (zed.dirty ? " · UNSAVED" : "");
+  setText($("tClose"), zed.track && zed.track.closed ? "OPEN LOOP" : "CLOSE LOOP");
   $("zoneBar").classList.toggle("tooltrack", zed.tool === "track");
   $("zoneBar").classList.toggle("hassel", !!z);
 }
@@ -1269,7 +1360,9 @@ function connect() {
   const es = new EventSource("/events");
   es.onmessage = (ev) => {
     lastMsg = Date.now();
+    const prevZones = S && S.zones;
     try { S = JSON.parse(ev.data); } catch (e) { return; }
+    if (!S.zones && prevZones && prevZones.version === S.zones_version) S.zones = prevZones;   // light frame: zones unchanged
     heal.lastMsg = lastMsg;
     heal.startId = S.server.start_id || null;
     if (!heal.startId0) heal.startId0 = heal.startId;
@@ -1326,11 +1419,12 @@ if (KIOSK || MOBILE) {
 }
 window.addEventListener("resize", () => { if (S) drawMap(); });
 setInterval(watchdog, 1000);
+// smooth kart dots between fixes: 20 fps on the operator page and phone, 10 fps on the Pi kiosk
 setInterval(() => {
   if (!S) return;
   const moving = S.fleet.karts.some((k) => k.link === "online" && k.gps && k.gps.fix_fresh && k.gps.last_fix && (k.gps.last_fix.gps_kph || 0) > 2);
   if (moving) drawMap();
-}, 50);
+}, KIOSK ? 100 : 50);
 setInterval(refreshLog, 2000);
 setInterval(pollPace, 1000);
 if ($("pcKart")) $("pcKart").addEventListener("change", (e) => { e.target.dataset.touched = "1"; });

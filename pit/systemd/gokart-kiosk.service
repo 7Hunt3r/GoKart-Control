@@ -1,4 +1,4 @@
-# Installed by pit/install.sh (@PIT_USER@ is substituted). Untested on hardware.
+# Installed by pit/install.sh (@PIT_USER@ is substituted). Running on the pit Pi 4 since 2026-11-05.
 # cage (single-app Wayland compositor) runs Chromium full screen on tty1 as the
 # pit user. The PAM session (/etc/pam.d/gokart-kiosk -> pam_systemd) registers a
 # logind session on seat0/tty1, which is what lets cage (via libseat's logind

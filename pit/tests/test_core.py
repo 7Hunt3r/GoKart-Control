@@ -21,8 +21,13 @@ sys.path.insert(0, os.path.join(PIT, "tools"))
 import wifi_profiles as wp  # noqa: E402
 
 
+_SEQ = {}
+
+
 def tele(kart, **kw):
-    msg = {"t": "tele", "kart": kart, "seq": 1, "lat": 41.07, "lon": -73.40, "fix": True,
+    """One tele line; seq counts up per kart like the real ones (pitcore drops repeats)."""
+    _SEQ[kart] = (_SEQ.get(kart, 0) + 1) % 256
+    msg = {"t": "tele", "kart": kart, "seq": _SEQ[kart], "lat": 41.07, "lon": -73.40, "fix": True,
            "gps_age_s": 0, "sats": 9, "gps_kph": 30.0, "heading": 90.0, "volts": 78.0,
            "motor_a": 10.0, "batt_a": 5.0, "erpm": 10000, "duty": 0.3, "esc_c": 35.0, "fault": 0,
            "mode_req": 1, "mode_actual": 1, "scale": 0.75, "stopped": False, "vesc_link": True,
@@ -137,6 +142,9 @@ class Staleness(unittest.TestCase):
         self.assertTrue(f2.simulation)
 
 
+ISSUED = 1794000000
+
+
 class Harness:
     """Fleet + CommandManager with a captured send() and a manual clock."""
 
@@ -147,6 +155,7 @@ class Harness:
         self.now = 0.0
         self.last_seq = {k: 0 for k in pc.KART_IDS}
         self.cm = pc.CommandManager(self.fleet, self._send, start_seq=1)
+        self.cm.clock = lambda: ISSUED          # unix seconds the pit stamps as "issued" (base fallback clock)
         for k in online:
             self.hear(k)
 
@@ -190,7 +199,7 @@ class CommandDelivery(unittest.TestCase):
     def test_fleet_stop_eight_outcomes(self):
         h = Harness()
         c = h.cm.submit("stop", 255, source="t", now=h.now)
-        self.assertEqual(h.sent, [{"cmd": "stop", "kart": 255, "seq": 1, "ttl": 10}])
+        self.assertEqual(h.sent, [{"cmd": "stop", "kart": 255, "seq": 1, "ttl": 10, "issued": ISSUED}])
         self.assertEqual(set(c.outcomes.values()), {"pending"})
         for k in range(1, 9):
             h.hear(k, c.seq, 2)
@@ -208,7 +217,7 @@ class CommandDelivery(unittest.TestCase):
         self.assertEqual(c.tx_count, 6)                        # initial + 5 retransmits
         self.assertEqual(len(h.sent), 6)
         # only kart 8 still owed an echo -> retransmits are addressed to it, same seq
-        self.assertTrue(all(s == {"cmd": "stop", "kart": 8, "seq": c.seq, "ttl": 10} for s in h.sent[1:]))
+        self.assertTrue(all(s == {"cmd": "stop", "kart": 8, "seq": c.seq, "ttl": 10, "issued": ISSUED} for s in h.sent[1:]))
         self.assertEqual(c.outcomes[8], "no_ack")
         self.assertEqual(c.state, "done")
 
@@ -234,7 +243,7 @@ class CommandDelivery(unittest.TestCase):
     def test_kart_going_silent_stops_retries(self):
         h = Harness()
         c = h.cm.submit("mode", 3, arg=2, now=h.now)
-        self.assertEqual(h.sent[0], {"cmd": "mode", "kart": 3, "seq": c.seq, "arg": 2, "ttl": 10})
+        self.assertEqual(h.sent[0], {"cmd": "mode", "kart": 3, "seq": c.seq, "arg": 2, "ttl": 10, "issued": ISSUED})
         h.advance(7.0, heard=[k for k in pc.KART_IDS if k != 3])   # kart 3 silent -> stale after 5 s
         self.assertEqual(c.state, "done")
         self.assertEqual(c.outcomes[3], "no_ack")
@@ -258,7 +267,7 @@ class CommandDelivery(unittest.TestCase):
         h.hear(1, a.seq, 2)
         b = h.cm.submit("ping", 1, now=h.now)
         self.assertEqual(b.seq, 1)                             # 255 skipped (kart 2 would ignore it), 0 never used
-        self.assertEqual(h.sent[0], {"cmd": "ping", "kart": 1, "seq": 254})
+        self.assertEqual(h.sent[0], {"cmd": "ping", "kart": 1, "seq": 254, "issued": ISSUED})
 
     def test_per_kart_serialization_and_accept_hold(self):
         h = Harness()
@@ -828,6 +837,7 @@ class RaceLineSender(unittest.TestCase):
         self.assertEqual(len(self.races()), n + 2)
         self.assertEqual(self.logged(), [(1, [0] * 8), (2, [1, 0, 2, 0, 0, 0, 3, 0])])     # once per change
         n = len(self.races())
+        g.session.go_mono = time.monotonic() - 60   # well after GO (before GO, STOP RACE is ABORT START)
         app.race_stop("t")                          # first state-3 line goes out at once
         self.assertEqual(self.races()[-1]["state"], 3)
         t0 = time.monotonic()
@@ -838,11 +848,307 @@ class RaceLineSender(unittest.TestCase):
         self.assertTrue(all(m["state"] == 3 for m in fin))
         self.assertEqual(fin[0]["pos"][:3], [1, 4, 2])                       # final results place kart 2 (no laps) 4th
         app.reset_laps("t")
-        app._race_tick(t + 40)
-        app._race_tick(t + 45)
         self.assertEqual(self.races()[-1], {"t": "race", "state": 0, "pos": [0] * 8})
-        self.assertEqual(sum(1 for m in self.races() if m["state"] == 0), 1)  # state 0 once
+        self.assertEqual(sum(1 for m in self.races() if m["state"] == 0), 1)  # state 0 at once...
+        app._race_tick(time.monotonic() + 0.5)
+        app._race_tick(time.monotonic() + 2.5)
+        app._race_tick(time.monotonic() + 9.0)
+        self.assertEqual(sum(1 for m in self.races() if m["state"] == 0), 2)  # ...and once more 2 s later
         self.assertEqual([s for s, _ in self.logged()], [1, 2, 3, 0])
+
+class RaceStopOnTheWire(unittest.TestCase):
+    """The 2026-11-06 bench bug: after STOP RACE kart 2 showed "running" for 4+ s. The pit wrote eight
+    finish commands (seven to karts never heard) and only then the state-3 line, in one 470-byte burst."""
+
+    def setUp(self):
+        import pit_server as ps
+        self.tmp = tempfile.mkdtemp()
+        self.app = ps.App(dict(ps.DEFAULTS, log_dir=os.path.join(self.tmp, "logs")), os.path.join(self.tmp, "map"))
+        self.link = self.app.link = FakeLink()
+        self.now = time.monotonic()
+        self.app.fleet.ingest(tele(2, lat=None, lon=None, fix=False), self.now, "w")    # only kart 2 is on the air
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_race_line_first_and_no_commands_to_silent_karts(self):
+        app = self.app
+        seq = app.race_start({"secs": 3, "laps": 0}, "t")["command"]["seq"]
+        now = time.monotonic()
+        app.fleet.ingest(tele(2, lat=None, lon=None, fix=False, last_cmd_seq=seq, cmd_result=2), now, "w")
+        app.cmds.on_tele(2, now, "w")                                        # kart 2 took the race start
+        app.fleet.game.session.go_mono = time.monotonic() - 30              # racing
+        self.link.lines.clear()
+        out = app.race_stop("t")
+        self.assertFalse(out["aborted"])
+        self.assertEqual(self.link.lines[0], {"t": "race", "state": 3, "pos": [0, 1, 0, 0, 0, 0, 0, 0]})
+        cmds = [m for m in self.link.lines if "cmd" in m]
+        self.assertEqual([(m["cmd"], m["kart"], m["arg"]) for m in cmds], [("race", 2, 101)])
+        self.assertEqual(sorted(out["skipped"]), [1, 3, 4, 5, 6, 7, 8])
+
+    def test_stop_race_before_go_is_abort_start(self):
+        app = self.app
+        app.race_start({"secs": 10, "laps": 3}, "t")                           # still counting down
+        self.link.lines.clear()
+        out = app.race_stop("t")
+        self.assertTrue(out["aborted"])
+        # STOP ALL (karts stay at zero power; a finish would release the grid hold at once), then idle
+        self.assertEqual(self.link.lines[0]["cmd"], "stop")
+        self.assertEqual(self.link.lines[0]["kart"], 255)
+        self.assertFalse(any(m.get("cmd") == "race" for m in self.link.lines))
+        self.assertEqual(self.link.lines[-1], {"t": "race", "state": 0, "pos": [0] * 8})
+        self.assertIsNone(app.fleet.game.session)
+        st = app.state()
+        self.assertIsNone(st["fleet"]["race"]["go_in_s"])                   # countdown gone on every page
+
+
+class LateCopies(unittest.TestCase):
+    def test_relayed_and_out_of_order_copies_dropped(self):
+        f = pc.Fleet()
+        ks = f.karts[3]
+        f.ingest(tele(3, seq=10, lat=41.0700), 1.0, "w")
+        f.ingest(tele(3, seq=10, lat=41.0700, relayed=True), 1.03, "w")       # repeater copy
+        f.ingest(tele(3, seq=11, lat=41.0701), 1.5, "w")
+        f.ingest(tele(3, seq=10, lat=41.0700, relayed=True), 1.6, "w")         # late repeater copy: older
+        self.assertEqual((ks.relay_dupes, ks.rx_count), (2, 2))
+        self.assertEqual(ks.fix["lat"], 41.0701)                                # never moved back
+        f.ingest(tele(3, seq=11, lat=41.0701), 1.7, "w")                        # direct duplicate
+        self.assertEqual(ks.late_dupes, 1)
+        f.ingest(tele(3, seq=12, lat=41.0702), 2.0, "w")
+        self.assertEqual(ks.seq_gaps, 0)
+        for i, sq in enumerate((250, 251, 252, 253, 254, 255, 0, 1)):            # seq wrap is not a "late copy"
+            f.ingest(tele(3, seq=sq, lat=41.0703 + i * 1e-4), 9.0 + i * 0.5, "w")
+        self.assertAlmostEqual(ks.fix["lat"], 41.071)
+        self.assertEqual(ks.late_dupes, 1)
+
+    def test_reboot_is_accepted_and_counted(self):
+        f = pc.Fleet()
+        f.ingest(tele(4, seq=7, uptime_s=500), 1.0, "w")
+        f.ingest(tele(4, seq=1, uptime_s=3, lat=41.08), 2.0, "w")               # seq went back, so did uptime
+        self.assertEqual(f.karts[4].reboots, 1)
+        self.assertEqual(f.karts[4].fix["lat"], 41.08)
+        self.assertEqual(f.karts[4].late_dupes, 0)
+
+
+class LapEdgeCases(unittest.TestCase):
+    def setUp(self):
+        self.g = pc.Game()
+        self.g.set_doc({"version": 1, "enabled": True,
+                        "zones": [{"id": "lap", "type": "lapline", "shape": "line", "a": at(0, -10), "b": at(0, 10),
+                                   "min_lap_s": 5}]})
+
+    def test_gps_jump_never_counts(self):
+        g = self.g
+        self.assertTrue(g.on_move(1, (*at(-5, 0), 0.0), at(5, 0), 1.0))         # first crossing (10 m/s)
+        # 2 km in 0.5 s across the line: a cold-start jump, ignored
+        self.assertFalse(g.on_move(1, (*at(-1000, 0), 20.0), at(1000, 0), 20.5))
+        self.assertEqual(g.laps[1].laps, 0)
+        self.assertTrue(g.on_move(1, (*at(-5, 0), 30.0), at(5, 0), 31.0))
+        self.assertEqual(g.laps[1].laps, 1)
+
+    def test_line_moved_mid_race_keeps_laps(self):
+        g = self.g
+        g.race_begin(0, 0.0)
+        g.on_move(1, (*at(-5, 0), 1.0), at(5, 0), 2.0)
+        g.on_move(1, (*at(-5, 0), 20.0), at(5, 0), 21.0)
+        self.assertEqual(g.laps[1].laps, 1)
+        g.set_doc({"version": 2, "enabled": True,
+                   "zones": [{"id": "lap", "type": "lapline", "shape": "line", "a": at(3, -10), "b": at(3, 10),
+                              "min_lap_s": 5}]})
+        self.assertEqual(g.laps[1].laps, 1)                                     # the race keeps its laps
+        self.assertEqual(g.line_moves_in_race, 1)
+        self.assertTrue(g.on_move(1, (*at(-5, 0), 40.0), at(5, 0), 41.0))
+        self.assertEqual(g.laps[1].laps, 2)
+        g.reset_laps()
+        g.set_doc({"version": 3, "enabled": True,
+                   "zones": [{"id": "lap", "type": "lapline", "shape": "line", "a": at(0, -10), "b": at(0, 10),
+                              "min_lap_s": 5}]})
+        g.on_move(1, (*at(-5, 0), 60.0), at(5, 0), 61.0)
+        g.set_doc({"version": 4, "enabled": True, "zones": []})                 # no race: practice laps cleared
+        self.assertEqual(g.laps, {})
+
+    def test_no_crossing_counts_before_go(self):
+        g = self.g
+        g.race_begin(0, 10.0)                                                    # GO at t=10
+        self.assertFalse(g.on_move(1, (*at(-1, 0), 8.0), at(1, 0), 8.5))         # rolling over the line on the grid
+        self.assertNotIn(1, g.laps)
+        self.assertTrue(g.on_move(1, (*at(-5, 0), 30.0), at(5, 0), 31.0))        # first crossing after GO starts the clock
+        self.assertEqual(g.laps[1].laps, 0)
+
+    def test_kart_that_never_crosses_blocks_auto_end_until_stop(self):
+        g = self.g
+        g.race_begin(1, 0.0)
+        g.on_move(1, (*at(-5, 0), 1.0), at(5, 0), 2.0)
+        g.on_move(1, (*at(-5, 0), 20.0), at(5, 0), 21.0)                         # kart 1 done
+        self.assertFalse(g.check_end([1, 2]))                                    # kart 2 online, never crossed
+        fin = g.race_stop([1, 2])
+        self.assertIn((2, 102), fin)                                             # placed last on STOP RACE
+
+
+class CommandArgs(unittest.TestCase):
+    def test_bools_refused(self):
+        h = Harness()
+        for kart, arg in ((True, None), (2, True), (2.5, None)):
+            with self.assertRaises(pc.CommandError):
+                h.cm.submit("mode" if arg is not None else "ping", kart, arg, now=0.0)
+        self.assertEqual(h.cm.submit("ping", 2.0, None, now=0.0).kart, 2)
+
+
+class LinkWriter(unittest.TestCase):
+    def test_paced_lines_with_resync_newline(self):
+        import link as lk
+        got = []
+        L = lk.Link(lambda t: None, lambda c, d: None, tcp="127.0.0.1:1", log=lambda m: None)
+        L.connected, L._writer = True, lambda b: got.append((time.monotonic(), b))
+        L._wthread.start()
+        try:
+            for i in range(5):
+                self.assertTrue(L.write_line({"n": i}))
+            deadline = time.monotonic() + 2
+            while len(got) < 5 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            L._stop.set()
+        self.assertEqual([b for _, b in got], [b'\n{"n":%d}\n' % i for i in range(5)])
+        gaps = [b[0] - a[0] for a, b in zip(got, got[1:])]
+        self.assertTrue(all(g >= lk.WRITE_GAP_S * 0.9 for g in gaps), gaps)
+        L.connected = False
+        self.assertFalse(L.write_line({"n": 9}))                                  # link down: nothing queued
+
+
+class SessionLogLimits(unittest.TestCase):
+    def test_rotates_and_prunes_oldest(self):
+        import pit_server as ps
+        tmp = tempfile.mkdtemp()
+        try:
+            for i in range(3):                                                     # 3 old 1 MB logs
+                p = os.path.join(tmp, f"session-2026010{i}-000000.jsonl")
+                with open(p, "w") as f:
+                    f.write("x" * 1024 * 1024)
+                os.utime(p, (1000 + i, 1000 + i))
+            log = ps.SessionLog(tmp, max_file_mb=1, max_total_mb=8)
+            self.assertEqual(log.pruned, [])
+            log.max_total = int(2.5 * 1024 * 1024)
+            for _ in range(1200):
+                log.write("rx", line="y" * 1000)                                  # > 1 MB: rotates
+            self.assertIn("-part2", log.path)
+            names = sorted(os.listdir(tmp))
+            self.assertNotIn("session-20260100-000000.jsonl", names)              # oldest went first
+            self.assertTrue(os.path.exists(log.path))
+        finally:
+            shutil.rmtree(tmp)
+
+
+class ZonesFileRobustness(unittest.TestCase):
+    def test_corrupt_file_ignored_then_kept_aside_on_save(self):
+        import pit_server as ps
+        tmp = tempfile.mkdtemp()
+        try:
+            mp = os.path.join(tmp, "map")
+            os.makedirs(os.path.join(mp, "recordings"))
+            with open(os.path.join(mp, "zones.json"), "w") as f:
+                f.write('{"version": 4, "zones": [')                              # power cut mid-write
+            with open(os.path.join(mp, "recordings", "20260101-000000-k2.json"), "w") as f:
+                f.write("{not json")
+            app = ps.App(dict(ps.DEFAULTS, log_dir=os.path.join(tmp, "logs")), mp)
+            st = app.state()
+            self.assertEqual(st["zones"]["zones"], [])
+            self.assertTrue(st["server"]["zones_error"])
+            self.assertEqual(st["track_rec"]["n_points"], 0)                       # bad recording skipped
+            app.save_zones({"zones": []}, "t")
+            self.assertTrue(any(n.startswith("zones.json.bad-") for n in os.listdir(mp)))
+            self.assertIsNone(app.state()["server"]["zones_error"])
+        finally:
+            shutil.rmtree(tmp)
+
+
+class FleetRatePolicy(unittest.TestCase):
+    def setUp(self):
+        import pit_server as ps
+        self.tmp = tempfile.mkdtemp()
+        self.app = ps.App(dict(ps.DEFAULTS, log_dir=os.path.join(self.tmp, "logs")), os.path.join(self.tmp, "map"))
+        self.link = self.app.link = FakeLink()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def rates(self):
+        return [(m["kart"], m["arg"]) for m in self.link.lines if m.get("cmd") == "rate"]
+
+    def test_one_hz_with_repeater_two_hz_after_it_is_gone(self):
+        app = self.app
+        t0 = app._started_mono
+        with app.lock:
+            app._rate_policy(t0 + 10)
+            self.assertEqual(self.rates(), [])                             # no repeater yet, < 120 s
+            app.fleet.ingest({"t": "repeater", "id": 1, "rssi": -3}, t0 + 20, "w")
+            app._rate_policy(t0 + 20)
+            self.assertEqual(self.rates(), [(255, 1)])                     # at once when it appears
+            app._rate_policy(t0 + 40)
+            self.assertEqual(len(self.rates()), 1)
+            app._rate_policy(t0 + 51)
+            self.assertEqual(self.rates()[-1], (255, 1))                   # every 30 s while heard
+            self.assertEqual(len(self.rates()), 2)
+            app._rate_policy(t0 + 100)                                    # repeater last heard 80 s ago
+            self.assertEqual(len(self.rates()), 2)
+            app._rate_policy(t0 + 141)                                    # 121 s: back to 2 Hz, once
+            app._rate_policy(t0 + 200)
+            self.assertEqual(self.rates()[2:], [(255, 2)])
+        st = app.state()
+        self.assertEqual(st["fleet"]["rate"]["hz"], 2)
+        self.assertIsNone(st["commands"]["last_fleet"])                    # policy commands stay off the cards
+        self.assertTrue(st["commands"]["recent"][0]["auto"])
+
+    def test_rate_args(self):
+        h = Harness()
+        self.assertEqual(h.cm.submit("rate", 255, 1, now=0.0).to_dict()["arg_name"], "1 Hz")
+        for bad in (0, 3, None, "x"):
+            with self.assertRaises(pc.CommandError):
+                h.cm.submit("rate", 255, bad, now=0.0)
+
+    def test_policy_command_never_delays_an_operator_command(self):
+        h = Harness()
+        r = h.cm.submit("rate", 255, 1, now=h.now, auto=True)
+        m = h.cm.submit("mode", 3, 2, now=h.now)
+        self.assertEqual(m.state, "active")                                # not queued behind the rate
+        self.assertEqual(r.outcomes[3], "superseded")
+
+
+class ScaleMismatch(unittest.TestCase):
+    def test_flagged_after_10_s_and_not_when_explained(self):
+        f = pc.Fleet()
+        t = 0.0
+        def hear(**kw):
+            f.ingest(tele(2, **kw), t, "w")
+        ev = []
+        for i in range(25):                                                # SPORT requested, live 0.5714 (ECO)
+            t = i * 0.5
+            hear(mode_req=2, scale=0.5714, stopped=False)
+            ev += f.watch_scales(t)
+            if t < 10:
+                self.assertIsNone(f.karts[2].snapshot(t)["scale_mismatch"])
+        self.assertEqual([e[:2] for e in ev], [(2, "start")])
+        self.assertEqual(f.karts[2].snapshot(t)["scale_mismatch"]["want"], 1.0)
+        hear(mode_req=2, scale=1.0, stopped=False)
+        self.assertEqual([e[:2] for e in f.watch_scales(t + 0.5)], [(2, "end")])
+        # stopped, on the grid, or just boosted: never a mismatch
+        for kw, boosted, grid in (({"stopped": True, "scale": 0.0}, (), False), ({"scale": 0.0}, (), True),
+                                  ({"scale": 1.0, "mode_req": 0}, (2,), False)):
+            g = pc.Fleet()
+            for i in range(30):
+                g.ingest(tele(2, **dict({"mode_req": 2, "stopped": False}, **kw)), i * 0.5, "w")
+                self.assertEqual(g.watch_scales(i * 0.5, boosted, grid), [])
+
+    def test_sent_wait_and_issued_kept_on_retries(self):
+        h = Harness(online=(4,))
+        c = h.cm.submit("mode", 4, 1, now=h.now)
+        h.cm.clock = lambda: ISSUED + 5
+        h.advance(2.0)                                                     # one retry, same issued
+        self.assertEqual({s["issued"] for s in h.sent}, {ISSUED})
+        h.cm.on_sent({"t": "sent", "seq": c.seq, "wait_ms": 37})
+        self.assertEqual(h.cm.snapshot()["last_wait_ms"], 37)
+        self.assertEqual(c.to_dict()["wait_ms"], 37)
+
 
 def circle_fix(i, r=25.0, n=60):
     """Point i on a circle (r m) around LAT0/LON0, n points per lap."""

@@ -218,7 +218,7 @@ class EndToEnd(unittest.TestCase):
             code, body, _ = st.request("POST", "/cmd", {"cmd": "boost", "kart": 1, "arg": 100})
             self.assertEqual(code, 200, body)
             s = st.wait(lambda s: s["fleet"]["karts"][0]["vesc"].get("scale") == 1.0, timeout=10)
-            st.wait(lambda s: s["fleet"]["karts"][0]["vesc"].get("scale") == 0.75, timeout=12)   # auto-revert
+            st.wait(lambda s: abs((s["fleet"]["karts"][0]["vesc"].get("scale") or 0) - 100 / 140) < 1e-3, timeout=12)   # auto-revert to NORMAL
 
             code, body, _ = st.request("POST", "/laps/reset", {})
             self.assertEqual(code, 200, body)
@@ -353,6 +353,55 @@ class EndToEnd(unittest.TestCase):
         finally:
             st.close()
             shutil.rmtree(tmp)
+
+    def test_sse_client_cap_and_light_frames(self):
+        st = Stack(["--offline", "0"], config={"sse_max_clients": 2})
+        socks = []
+        try:
+            def open_stream():
+                s = socket.create_connection(("127.0.0.1", st.http_port), timeout=5)
+                s.sendall(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+                socks.append(s)
+                return s
+
+            def status(s):
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                return int(head.split()[1]), rest
+
+            def read_frames(s, n, buf):
+                frames = []
+                while len(frames) < n:
+                    while b"\n\n" in buf and len(frames) < n:
+                        block, buf = buf.split(b"\n\n", 1)
+                        if block.startswith(b"data: "):
+                            frames.append(json.loads(block[6:]))
+                    if len(frames) < n:
+                        buf += s.recv(65536)
+                return frames
+            a = open_stream()
+            code, rest = status(a)
+            self.assertEqual(code, 200)
+            frames = read_frames(a, 3, rest)
+            self.assertIn("zones", frames[0])                       # first frame: the zones document
+            self.assertNotIn("zones", frames[2])                    # then only its version
+            self.assertEqual(frames[2]["zones_version"], frames[0]["zones"]["version"])
+            self.assertEqual(status(open_stream())[0], 200)
+            self.assertEqual(status(open_stream())[0], 503)         # third live page refused
+            for s in socks:
+                s.close()
+            socks.clear()
+            time.sleep(1.0)                                         # slots are given back
+            self.assertEqual(status(open_stream())[0], 200)
+        finally:
+            for s in socks:
+                s.close()
+            st.close()
 
     def test_health_absent_off_pi(self):
         st = Stack(["--offline", "0"])

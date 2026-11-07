@@ -13,7 +13,7 @@ rsync -av --delete \
   ./ "$U@$HOST:/opt/gokart-pit/"
 # Map folder: map.json presets, README/ZONES.md and imagery are pushed (never deleted on the Pi).
 # zones.json is edited live on the Pi (operator page ZONES) so it is only copied when the Pi has none.
-rsync -av --exclude '.DS_Store' --exclude 'zones.json' --exclude '*.tmp' --exclude 'recordings/' server/map/ "$U@$HOST:/opt/gokart-pit/server/map/"
+rsync -av --exclude '.DS_Store' --exclude 'zones.json' --exclude 'zones.json.*' --exclude '*.tmp' --exclude 'recordings/' server/map/ "$U@$HOST:/opt/gokart-pit/server/map/"
 rsync -av --ignore-existing server/map/zones.json "$U@$HOST:/opt/gokart-pit/server/map/zones.json"
 if [ "${2:-}" = "--install" ]; then
   # Wi-Fi list for the persistent NetworkManager keyfiles (install.sh -> tools/wifi_profiles.py):

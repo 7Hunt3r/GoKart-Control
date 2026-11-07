@@ -41,7 +41,7 @@ import tty
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "server"))
-from pitcore import erpm_for_mph  # noqa: E402
+from pitcore import MODE_SCALES, erpm_for_mph  # noqa: E402
 
 FW = "sim-0.1.0"
 ORIGIN = (41.0727, -73.4047)   # approximate, unsurveyed point near Manresa Island, Norwalk CT
@@ -132,6 +132,7 @@ class SimKart:
         self.boost_scale = None                # timed override (firmware GK_CMD_BOOST), None = off
         self.boost_until = 0.0
         self.grid_until = None                 # race start: zero power until GO (firmware GK_CMD_RACE)
+        self.rate = 2                          # report rate (GK_CMD_RATE); the sim always sends 1 line/s
 
     def silent(self, now):
         if self.offline:
@@ -168,7 +169,7 @@ class SimKart:
         self.motor_a = motor_a
 
     def mode_scale(self):
-        return {0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual, 0.75)
+        return MODE_SCALES.get(self.mode_actual, MODE_SCALES[1])
 
     def tele(self, rx_ms):
         self.seq = (self.seq + 1) % 256
@@ -190,7 +191,7 @@ class SimKart:
             "duty": round(min(0.95, self.v / 14.0), 3) if vl else None,
             "esc_c": round(self.esc_c, 1) if vl else None, "fault": self.fault if vl else None,
             "mode_req": self.mode_req, "mode_actual": self.mode_actual if vl else None,
-            "scale": 0.0 if self.grid_until is not None and not self.stopped else ((self.boost_scale if self.boost_scale is not None else {0: 0.5, 1: 0.75, 2: 1.0}.get(self.mode_actual))
+            "scale": 0.0 if self.grid_until is not None and not self.stopped else ((self.boost_scale if self.boost_scale is not None else MODE_SCALES.get(self.mode_actual))
                       if not self.stopped else 0.0) if vl else None,
             "stopped": self.stopped, "vesc_link": vl,
             "mode_confirmed": vl and self.mode_req is not None and self.mode_req == self.mode_actual,
@@ -209,6 +210,12 @@ class SimKart:
         cmd = msg.get("cmd")
         if cmd == "ping":
             self.cmd_result = 2
+            return
+        if cmd == "rate":                       # firmware GK_CMD_RATE: 1 or 2 Hz, no VESC involvement
+            ok = msg.get("arg") in (1, 2)
+            if ok:
+                self.rate = msg["arg"]
+            self.cmd_result = 2 if ok else 4
             return
         if not self.vesc_link:
             self.cmd_result = 3
@@ -284,7 +291,7 @@ class Sim:
             return
         self.tx += 1
         self.emit({"t": "sent", "seq": msg.get("seq"), "cmd": msg.get("cmd"),
-                   "kart": msg.get("kart"), "arg": msg.get("arg")})
+                   "kart": msg.get("kart"), "arg": msg.get("arg"), "ok": True, "wait_ms": random.randint(0, 40)})
         now = time.monotonic()
         for sk in self.karts:
             if msg.get("kart") not in (sk.k, 255) or sk.silent(now):
@@ -321,7 +328,12 @@ class Sim:
                                "sats": 11, "utc": int(time.time()), "pps": True})
                     self.emit({"t": "stat", "fw": FW, "radio": "sx1262", "rx": self.rx, "tx": self.tx,
                                "rx_bad": 0, "uptime_s": int(now - self.t0), "batt_v": 4.05,
-                               "wifi": None, "karts_online": online})
+                               "wifi": None, "karts_online": online, "beacon_skipped": 0,
+                               "cmd_q": 0, "cmd_dropped": 0, "cmd_forced": 0, "heap": 180000})
+                    if self.args.repeater and int(now - self.t0) % 5 == 0:
+                        self.emit({"t": "repeater", "id": 1, "seq": int(now - self.t0) // 5, "heard": self.rx,
+                                   "relayed": self.rx, "batt_v": 3.95, "pit_rssi": -61, "rssi": -58, "snr": 9.5,
+                                   "uptime_min": int((now - self.t0) / 60), "karts": [sk.k for sk in self.karts if not sk.silent(now)]})
 
     # -- transports ------------------------------------------------------------
     def serve_pty(self):
@@ -403,6 +415,7 @@ def main():
     ap.add_argument("--loss", type=float, default=0.1, help="per-kart command loss fraction")
     ap.add_argument("--seed", type=int)
     ap.add_argument("--track-scale", type=float, default=1.0, help="shrink/grow the oval (0.3 = ~15 s laps)")
+    ap.add_argument("--repeater", action="store_true", help="also emit a LoRa repeater heartbeat every 5 s")
     ap.add_argument("--print-zones", action="store_true", help="print zones.json for this oval and exit")
     args = ap.parse_args()
     global TRACK_SCALE

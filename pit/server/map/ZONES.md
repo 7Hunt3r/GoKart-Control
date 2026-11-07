@@ -92,7 +92,10 @@ like the zones.
 Command `race` with arg 0 (finish, no position) or 100 + position (101-108). The Heltec releases any
 grid hold and prints `{"t":"race","kart":N,"event":"finish","position":P}` (P = 0 when unknown). The
 pit sends it per kart: automatically when a kart completes the race length (`POST /race/start`
-`"laps": N`), and to every kart on STOP RACE (`POST /race/stop`: positions by laps desc, then earliest
-last crossing, karts with no completed lap last by id; `race 0` to karts not in the race). After a
+`"laps": N`), and on STOP RACE (`POST /race/stop`: positions by laps desc, then earliest last crossing,
+karts with no completed lap last by id) to every placed kart heard in the last 15 s; karts not heard get
+nothing (revised 2026-11-07: they only cost beacon slots). Because a finish releases the grid hold at once,
+STOP RACE before GO is ABORT START: the pit sends STOP to all karts instead and clears the race. Lap
+crossings during the grid hold never count. After a
 finish the pit freezes lap timing (final results) until the next race start or lap reset, and the
 kart display shows the checkered FINISH takeover and stops counting laps until the next countdown.

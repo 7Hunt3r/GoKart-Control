@@ -1,4 +1,4 @@
-# Installed by pit/install.sh (@PIT_USER@ is substituted). Untested on hardware.
+# Installed by pit/install.sh (@PIT_USER@ is substituted). Running on the pit Pi 4 since 2026-11-05.
 [Unit]
 Description=GoKart pit server (T-Beam serial link + web UI on :8080)
 After=network.target

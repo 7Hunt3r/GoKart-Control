@@ -4,8 +4,10 @@ Builds a headless Raspberry Pi OS Lite (Trixie 2026-10-06, arm64) card for the
 pit station. Adapted from the working studebaker-headunit kit (same cloud-init
 approach, same `rpi-imager --cli` call, same disk safety checks).
 
-**Status: the kit has not been booted on a Pi yet.** The generator and
-flash.sh refusal checks were exercised on the Mac (see ../README.md).
+**Status: booted on the pit Pi 4 on 2026-11-05** (gokart-pit, kiosk on the 1024x600 panel, T-Beam on
+`/dev/tbeam`; live since then and updated with `deploy.sh`). The 2026-11-06 reboots exposed two first-boot
+problems that `install.sh` now fixes (netplan-backed Wi-Fi profile, volatile journal; see ../README.md
+"If the pit reboots"). A fresh card with today's kit has not been re-flashed since.
 
 ## What first boot does
 

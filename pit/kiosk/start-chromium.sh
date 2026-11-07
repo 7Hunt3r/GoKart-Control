@@ -10,5 +10,5 @@ sed -i 's/"exited_cleanly":false/"exited_cleanly":true/; s/"exit_type":"[^"]*"/"
 exec "$BIN" --kiosk --noerrdialogs --disable-infobars --touch-events=enabled \
   --ozone-platform=wayland --no-first-run --password-store=basic \
   --disable-session-crashed-bubble --disable-features=Translate,TranslateUI \
-  --overscroll-history-navigation=0 --disable-pinch --check-for-update-interval=31536000 \
+  --autoplay-policy=no-user-gesture-required --overscroll-history-navigation=0 --disable-pinch --check-for-update-interval=31536000 \
   --user-data-dir="$PROFILE" "$URL"

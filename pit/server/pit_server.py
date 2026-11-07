@@ -49,6 +49,9 @@ DEFAULTS = {
     "log_dir": None,             # default <pit>/logs
     "health_period_s": health.PERIOD_S,   # vcgencmd get_throttled + CPU temp sample period (Pi only)
     "health_file": None,         # tests/dev: read the get_throttled text from this file instead of vcgencmd
+    "log_max_file_mb": 64,       # a session log longer than this continues in a new -partN file
+    "log_max_total_mb": 1024,    # oldest session logs are deleted beyond this total (the current one never)
+    "sse_max_clients": 24,       # live pages at once; more get HTTP 503 and retry
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
@@ -60,8 +63,16 @@ PAGES = {"/": "index.html", "/index.html": "index.html", "/kiosk": "kiosk.html",
          "/m": "mobile.html", "/mobile": "mobile.html"}
 COOKIE = "gkpit"
 SSE_PERIOD_S = 0.25
+SSE_WRITE_TIMEOUT_S = 10.0   # a page that stops reading for this long is dropped (its thread ends)
+SSE_ZONES_EVERY_S = 30.0     # frames carry the zones document when it changes and at least this often
 RACE_POS_PERIOD_S = 2.0      # {"t":"race"} repeat while a race runs (the base keeps it 30 s)
 RACE_FINISH_REPEATS = (0.0, 3.0, 6.0)   # finished: sent 3 times over 6 s, then left to the base
+RACE_IDLE_REPEATS = (0.0, 2.0)
+# Fleet report rate (firmware GK_CMD_RATE): a 50 ms slot cannot hold a 23 ms packet plus its 23 ms
+# repeater copy, so while a repeater is on the air every kart reports at 1 Hz.
+RATE_REPEAT_S = 30.0         # "rate 1" to all karts this often while a repeater is heard
+REPEATER_FRESH_S = 60.0      # repeater heartbeat heard within this -> repeater in use
+REPEATER_GONE_S = 120.0      # no repeater for this long -> "rate 2" once          # NEW RACE / abort: state 0 twice (one lost line must not leave "3")
 
 
 def wall_iso(ts=None):
@@ -89,23 +100,76 @@ class SessionLog:
     """JSONL log, one new file per server start. Every serial line in both
     directions plus every operator action and event, each timestamped."""
 
-    def __init__(self, log_dir):
+    def __init__(self, log_dir, max_file_mb=64, max_total_mb=1024):
         os.makedirs(log_dir, exist_ok=True)
-        self.path = os.path.join(log_dir, "session-" + time.strftime("%Y%m%d-%H%M%S") + ".jsonl")
+        self.dir = log_dir
+        self.base = "session-" + time.strftime("%Y%m%d-%H%M%S")
+        self.max_file = int(max(1, float(max_file_mb)) * 1024 * 1024)
+        self.max_total = int(max(8, float(max_total_mb)) * 1024 * 1024)
+        self.part = 1
+        self.path = os.path.join(log_dir, self.base + ".jsonl")
         self._f = open(self.path, "a", buffering=1, encoding="utf-8")
+        self._size = self._f.tell()
         self._lock = threading.Lock()
         self.recent_all = deque(maxlen=500)
         self.recent_events = deque(maxlen=300)   # everything except raw rx/tx lines
+        self.pruned = self._prune()
 
     def write(self, kind, **fields):
         rec = {"ts": wall_iso(), "mono": round(time.monotonic(), 3), "kind": kind}
         rec.update(fields)
         line = json.dumps(rec, separators=(",", ":"), default=str)
         with self._lock:
-            self._f.write(line + "\n")
+            try:
+                self._f.write(line + "\n")
+                self._size += len(line) + 1
+                if self._size >= self.max_file:
+                    self._rotate()
+            except (OSError, ValueError):      # full card / closed file: keep running, keep the memory copy
+                pass
             self.recent_all.append(rec)
             if kind not in ("rx", "tx"):
                 self.recent_events.append(rec)
+
+    def _rotate(self):
+        """Continue in <base>-partN.jsonl and drop the oldest logs beyond max_total (lock held)."""
+        self.part += 1
+        old, self.path = self.path, os.path.join(self.dir, f"{self.base}-part{self.part}.jsonl")
+        self._f.write(json.dumps({"ts": wall_iso(), "kind": "event", "what": "log_continues",
+                                  "file": os.path.basename(self.path)}) + "\n")
+        self._f.close()
+        self._f = open(self.path, "a", buffering=1, encoding="utf-8")
+        self._size = 0
+        self._f.write(json.dumps({"ts": wall_iso(), "kind": "event", "what": "log_continued",
+                                  "from": os.path.basename(old)}) + "\n")
+        self._prune()
+
+    def _prune(self):
+        """Delete the oldest session-*.jsonl files until the folder is under max_total. Never the current file."""
+        try:
+            files = []
+            for n in os.listdir(self.dir):
+                if n.startswith("session-") and n.endswith(".jsonl"):
+                    p = os.path.join(self.dir, n)
+                    st = os.stat(p)
+                    files.append((st.st_mtime, p, st.st_size))
+        except OSError:
+            return []
+        files.sort()
+        total = sum(f[2] for f in files)
+        gone = []
+        for _, p, size in files:
+            if total <= self.max_total:
+                break
+            if p == self.path:
+                continue
+            try:
+                os.remove(p)
+                total -= size
+                gone.append(os.path.basename(p))
+            except OSError:
+                pass
+        return gone
 
     def recent(self, n=100, include_lines=False):
         with self._lock:
@@ -118,9 +182,11 @@ class App:
     def __init__(self, cfg, map_dir):
         self.cfg = cfg
         self.map_dir = map_dir
+        self._map_cache = (None, {})            # (mtime_ns, map.json dict)
+        self.zones_error = None                 # why zones.json was ignored at the last load, or None
         self.lock = threading.RLock()
         log_dir = cfg.get("log_dir") or os.path.join(PIT_ROOT, "logs")
-        self.log = SessionLog(log_dir)
+        self.log = SessionLog(log_dir, cfg.get("log_max_file_mb", 64), cfg.get("log_max_total_mb", 1024))
         self.seq_file = os.path.join(log_dir, "cmdseq.json")
         self.sessions = {}                       # cookie token -> operator name
         self.map_cfg = self._load_map()
@@ -139,13 +205,21 @@ class App:
                                            start_seq=self._load_seq(), ttl=int(cfg["cmd_ttl_s"]))
         self.link_since = None
         self._saved_seq = self.cmds.next_seq
-        self._state_cache = (0.0, b"{}")
+        self._state_cache = None                # (mono, full_json, light_json, zones_version)
+        self._sse_clients = 0
+        self._sse_lock = threading.Lock()
         self.stopping = threading.Event()
         self._race_tx = None                    # (state, pos) last sent to the T-Beam
         self._race_tx_mono = 0.0
         self._race_logged = None                # (state, pos) last written to the session log
         self._race_finish_at = []               # pending repeat times (mono) for state 3
-        self._race_idle_pending = False         # NEW RACE / reset: one state-0 line
+        self._race_idle_pending = False         # NEW RACE / reset / abort: state-0 lines due
+        self._race_idle_at = []                 # pending repeat times (mono) for state 0
+        self._rate = None                       # fleet report rate last broadcast (1 / 2 Hz) or None
+        self._rate_tx_mono = 0.0
+        self._rate_wall = None
+        self._started_mono = time.monotonic()
+        self._scale_check_mono = 0.0
         # start_id changes on every server start: the pages reload themselves when it does
         self.start_id = secrets.token_hex(6)
         self.boot_id = _read_boot_id()
@@ -155,6 +229,8 @@ class App:
                        start_id=self.start_id, boot_id=self.boot_id, health=self.health.available,
                        source=cfg.get("tcp") or cfg.get("serial_port") or "auto",
                        start_seq=self.cmds.next_seq)
+        if self.log.pruned:
+            self.log.write("event", what="logs_pruned", files=self.log.pruned)
 
     # -- plumbing ------------------------------------------------------------
     def _console(self, msg):
@@ -189,13 +265,22 @@ class App:
                 pass
 
     def _load_map(self):
+        """map.json, re-read only when its mtime changes (state() asks for it 4-5 times a second)."""
         path = os.path.join(self.map_dir, "map.json")
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            return {}
+        if self._map_cache[0] == mtime:
+            return self._map_cache[1]
         try:
             with open(path) as f:
                 m = json.load(f)
-            return m if isinstance(m, dict) else {}
+            m = m if isinstance(m, dict) else {}
         except (OSError, ValueError):
-            return {}
+            m = {}
+        self._map_cache = (mtime, m)
+        return m
 
     # -- game zones (map/ZONES.md) ------------------------------------------
     def _load_zones(self):
@@ -209,6 +294,7 @@ class App:
             return
         self._zones_mtime = mtime
         if mtime is None:
+            self.zones_error = None
             with self.lock:
                 self.fleet.game.set_doc(pitcore.EMPTY_ZONES)
             return
@@ -218,10 +304,12 @@ class App:
             doc = pitcore.validate_zones(raw)
             ver = raw.get("version", 0)
             doc["version"] = ver if isinstance(ver, int) and not isinstance(ver, bool) and ver >= 0 else 0
-        except (OSError, ValueError) as e:
-            self.log.write("event", what="zones_invalid", path=self.zones_path, error=str(e))
+        except (OSError, ValueError, AttributeError) as e:
+            self.zones_error = str(e) or type(e).__name__
+            self.log.write("event", what="zones_invalid", path=self.zones_path, error=self.zones_error)
             print(f"{wall_iso()} zones.json ignored: {e}", flush=True)
             return
+        self.zones_error = None
         self.zones_comment = raw.get("_comment") if isinstance(raw.get("_comment"), str) else self.zones_comment
         with self.lock:
             self.fleet.game.set_doc(doc)
@@ -242,10 +330,21 @@ class App:
         out.update(version=doc["version"], enabled=doc["enabled"], zones=doc["zones"])
         if doc.get("track"):
             out["track"] = doc["track"]
+        if self.zones_error and os.path.exists(self.zones_path):
+            # the file on disk was unreadable: keep it for a post-mortem instead of silently overwriting it
+            bad = f"{self.zones_path}.bad-{time.strftime('%Y%m%d-%H%M%S')}"
+            try:
+                os.replace(self.zones_path, bad)
+                self.log.write("event", what="zones_invalid_kept", path=bad)
+            except OSError:
+                pass
+            self.zones_error = None
         tmp = self.zones_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(out, f, indent=2)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())                # power cuts happen at the pit: never a 0-byte zones.json
         os.replace(tmp, self.zones_path)
         self._zones_mtime = os.stat(self.zones_path).st_mtime_ns
 
@@ -264,7 +363,7 @@ class App:
             except OSError as e:
                 raise pitcore.ZoneError(f"could not write zones.json: {e}")
             self.fleet.game.set_doc(doc)
-        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
+        self._state_cache = None        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="zones_save", version=doc["version"], enabled=doc["enabled"],
                        zones=[{"id": z["id"], "type": z["type"]} for z in doc["zones"]],
                        track_points=len(doc["track"]["points"]) if doc.get("track") else 0)
@@ -285,7 +384,7 @@ class App:
             except OSError as e:
                 raise pitcore.ZoneError(f"could not write zones.json: {e}")
             self.fleet.game.set_doc(doc)
-        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
+        self._state_cache = None        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="zones_enable", enabled=en, version=doc["version"])
         return {"enabled": en, "version": doc["version"]}
 
@@ -316,7 +415,7 @@ class App:
             race.update(started_wall=wall, go_wall=wall_iso(t + secs), go_epoch=t + secs, go_secs=secs, laps=laps,
                         start_cmd_id=c.id, by=who, changed_wall=wall)
             d = c.to_dict()
-        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
+        self._state_cache = None        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="race_start", secs=secs, laps=laps, id=d["id"], seq=d["seq"],
                        go_wall=wall_iso(t + secs))
         self._race_tick(now, force=True)        # state 1, positions all 0, right away
@@ -339,7 +438,7 @@ class App:
                 out = rec.clear()
             else:
                 raise pitcore.CommandError('action must be "start", "stop" or "clear"')
-        self._state_cache = (0.0, b"{}")
+        self._state_cache = None
         self.log.write("op", who=who, action="track_record", what=action, kart=out["kart"],
                        points=out["n_points"], laps=[(lp["n"], lp["length_m"], lp["time_s"]) for lp in out["laps"]],
                        file=out["file"])
@@ -376,27 +475,54 @@ class App:
             out.append({"kart": kart, "arg": arg, "id": c.id})
         return out
 
+    def _reachable(self, k, now):
+        """A finish command is worth airtime only for a kart heard in the last STALE_S."""
+        return pitcore.link_status(self.fleet.karts[k].last_tele_mono, now) in ("online", "stale")
+
     def race_stop(self, who):
-        """STOP RACE: final results, every kart gets its finish command (ZONES.md "Race finish")."""
+        """STOP RACE: final results, every kart gets its finish command (ZONES.md "Race finish").
+        Before GO it is ABORT START instead: a race finish would release the grid hold at once
+        (kart firmware), so the karts get STOP ALL and stay at zero power until START."""
         if not self.link.connected:
             raise pitcore.CommandError("T-Beam link is down; race stop not sent")
         now, wall = time.monotonic(), wall_iso()
         with self.lock:
-            fin = self.fleet.game.race_stop(self._online(now), wall)
-            sent = self._send_finishes(fin, who, now, wall)
-            res = self.fleet.game.session.snapshot()
-        self._state_cache = (0.0, b"{}")
-        self.log.write("op", who=who, action="race_stop", sent=sent, results=res["results"])
+            ses = self.fleet.game.session
+            if ses is not None and ses.running and ses.go_mono is not None and now < ses.go_mono:
+                c = self.cmds.submit("stop", pitcore.ALL_KARTS, None, source=f"{who} (abort start)", now=now, wall=wall)
+                self.fleet.game.reset_laps()
+                for key in ("go_epoch", "go_wall", "go_secs"):
+                    self.fleet.race.pop(key, None)
+                self.fleet.race.update(aborted_wall=wall, by=who, changed_wall=wall)
+                self._race_idle_pending = True
+                d = c.to_dict()
+                aborted = True
+            else:
+                aborted = False
+                fin = self.fleet.game.race_stop(self._online(now), wall)
+                res = self.fleet.game.session.snapshot()
+        self._state_cache = None
+        if aborted:
+            self.log.write("op", who=who, action="race_abort", stop_id=d["id"], seq=d["seq"])
+            self._race_tick(now)                # state 0 (idle) after the STOP
+            return {"aborted": True, "sent": [], "stop": d, "session": None}
+        # The race line first: the base carries it in its next beacon. Then one finish command per kart
+        # that can hear us (online or stale); karts long gone only cost airtime, and every command skips a
+        # beacon at the base, which is what kept kart 2 on "running" for 4 s on 2026-11-06.
         self._race_tick(now)                    # state 3 with the final positions, right away
-        return {"sent": sent, "session": res}
+        with self.lock:
+            skipped = [k for k, _ in fin if not self._reachable(k, now)]
+            sent = self._send_finishes([(k, a) for k, a in fin if self._reachable(k, now)], who, now, wall)
+        self.log.write("op", who=who, action="race_stop", sent=sent, skipped=skipped, results=res["results"])
+        return {"aborted": False, "sent": sent, "skipped": skipped, "session": res}
 
     def reset_laps(self, who):
         with self.lock:
             self.fleet.game.reset_laps()
             self._race_idle_pending = True
-        self._state_cache = (0.0, b"{}")        # next /api/state and SSE frame show the change
+        self._state_cache = None        # next /api/state and SSE frame show the change
         self.log.write("op", who=who, action="laps_reset")
-        self._race_tick(time.monotonic())       # state 0 once
+        self._race_tick(time.monotonic())       # state 0 now and again in 2 s
         return {"reset": True}
 
     # -- link callbacks (reader thread) --------------------------------------
@@ -428,7 +554,7 @@ class App:
         if fin or ended:
             self.log.write("event", what="race_finish", sent=sent, ended=ended,
                            results=res["results"] if res and ended else None)
-            self._state_cache = (0.0, b"{}")
+            self._state_cache = None
             if ended:
                 self._race_tick(now)
 
@@ -467,10 +593,48 @@ class App:
 
     def _ticker(self):
         while not self.stopping.wait(0.1):
+            events = []
             with self.lock:
-                self.cmds.tick(time.monotonic(), wall_iso())
+                now = time.monotonic()
+                self.cmds.tick(now, wall_iso())
+                self._rate_policy(now)
+                if now - self._scale_check_mono >= 1.0:
+                    self._scale_check_mono = now
+                    events = self._scale_watch(now)
                 self._save_seq()
+            for k, what, info in events:
+                self.log.write("event", what="scale_mismatch" if what == "start" else "scale_mismatch_end",
+                               kart=k, **(info or {}))
             self._race_tick(time.monotonic())
+
+    def _rate_policy(self, now):
+        """Lock held. Repeater heard in the last 60 s: "rate 1" to all karts now and every 30 s.
+        No repeater for 120 s (or since start): "rate 2" once. Auto commands never hide an
+        operator's last command on the cards (pitcore Command.auto)."""
+        if not self.link.connected:
+            return
+        rm = self.fleet.repeater_mono
+        want = None
+        if rm is not None and now - rm <= REPEATER_FRESH_S:
+            if self._rate != 1 or now - self._rate_tx_mono >= RATE_REPEAT_S:
+                want = 1
+        elif now - (rm if rm is not None else self._started_mono) >= REPEATER_GONE_S and self._rate != 2:
+            want = 2
+        if want is None:
+            return
+        wall = wall_iso()
+        c = self.cmds.submit("rate", pitcore.ALL_KARTS, want, source="pit (fleet rate)", now=now, wall=wall, auto=True)
+        if want != self._rate:
+            self.log.write("event", what="fleet_rate", hz=want, id=c.id,
+                           reason="repeater in use" if want == 1 else "no repeater for 120 s")
+            self._rate_wall = wall
+        self._rate, self._rate_tx_mono = want, now
+
+    def _scale_watch(self, now):
+        """Lock held. SCALE != MODE transitions (pitcore Fleet.watch_scales)."""
+        ses = self.fleet.game.session
+        grid = bool(ses is not None and ses.running and ses.go_mono is not None and now < ses.go_mono + 1.5)
+        return self.fleet.watch_scales(now, self.cmds.boosted_recently(now), grid)
 
     def _race_tick(self, now, force=False):
         """Race positions to the T-Beam (SERIAL_PROTOCOL.md "Race positions"): on START RACE (state 1),
@@ -481,23 +645,22 @@ class App:
             cur = (state, tuple(pos))
             send = False
             if state in (1, 2):
-                self._race_finish_at = []
+                self._race_finish_at, self._race_idle_at, self._race_idle_pending = [], [], False
                 send = force or cur != self._race_tx or now - self._race_tx_mono >= RACE_POS_PERIOD_S
             elif state == 3:
+                self._race_idle_at, self._race_idle_pending = [], False
                 if self._race_tx is None or self._race_tx[0] != 3 or (cur != self._race_tx and not self._race_finish_at):
                     self._race_finish_at = [now + d for d in RACE_FINISH_REPEATS]
-                if self._race_finish_at and now >= self._race_finish_at[0]:
-                    while self._race_finish_at and now >= self._race_finish_at[0]:
-                        self._race_finish_at.pop(0)
-                    send = True
+                send = self._due(self._race_finish_at, now)
             else:
                 self._race_finish_at = []
-                send = self._race_idle_pending or force
+                if self._race_idle_pending or force:
+                    self._race_idle_pending = False
+                    self._race_idle_at = [now + d for d in RACE_IDLE_REPEATS]
+                send = self._due(self._race_idle_at, now)
             if not send:
                 return
-            if state == 0:
-                self._race_idle_pending = False
-            ok = self.link.write_line({"t": "race", "state": state, "pos": list(pos)})
+            ok = self._send({"t": "race", "state": state, "pos": list(pos)})
             self._race_tx, self._race_tx_mono = cur, now
             log = cur != self._race_logged
             if log:
@@ -505,36 +668,70 @@ class App:
         if log:
             self.log.write("event", what="race_pos", state=state, pos=list(pos), ok=ok)
 
+    @staticmethod
+    def _due(times, now):
+        """Pop every repeat time that has passed; True if at least one did."""
+        hit = False
+        while times and now >= times[0]:
+            times.pop(0)
+            hit = True
+        return hit
+
     # -- state ---------------------------------------------------------------
     def state(self):
         now = time.monotonic()
         with self.lock:
             fleet = self.fleet.snapshot(now)
+            fleet["rate"] = {"hz": self._rate, "since": self._rate_wall,
+                             "policy": "1 Hz while a repeater is heard, 2 Hz after 120 s without one"}
             ge = fleet["race"].get("go_epoch")
             # seconds until GO (negative after) from the server clock, so every page counts down together
             fleet["race"]["go_in_s"] = None if ge is None else round(ge - time.time(), 2)
             cmds = self.cmds.snapshot()
             rx, bad = self.fleet.rx_lines, self.fleet.rx_bad
+            track_rec = self.fleet.recorder.summary()
+        zones = self.zones_doc()
         return {
             "server": {"version": VERSION, "time": wall_iso(), "log_file": os.path.basename(self.log.path),
                        "start_id": self.start_id, "boot_id": self.boot_id, "health": self.health.snapshot(),
                        "link": {"connected": self.link.connected, "desc": self.link.description,
                                 "since": self.link_since},
-                       "rx_lines": rx, "rx_bad": bad},
+                       "rx_lines": rx, "rx_bad": bad, "zones_error": self.zones_error,
+                       "tx_lines": self.link.lines_written if hasattr(self.link, "lines_written") else None},
             "fleet": fleet,
             "commands": cmds,
             "map": self.map_package(fleet["origin"]),
-            "zones": self.zones_doc(),
-            "track_rec": self.fleet.recorder.summary(),
+            "zones": zones,
+            "zones_version": zones["version"],
+            "track_rec": track_rec,
         }
 
+    def state_frames(self):
+        """(full, light, zones_version) JSON bytes, cached 0.2 s and shared by every client.
+        light = without the zones document (pages keep the last one they got)."""
+        c = self._state_cache
+        if c is not None and time.monotonic() - c[0] < 0.2:
+            return c[1], c[2], c[3]
+        st = self.state()
+        full = json.dumps(st, separators=(",", ":")).encode()
+        st.pop("zones")
+        light = json.dumps(st, separators=(",", ":")).encode()
+        self._state_cache = (time.monotonic(), full, light, st["zones_version"])
+        return full, light, st["zones_version"]
+
     def state_json(self):
-        t, data = self._state_cache
-        if time.monotonic() - t < 0.2:
-            return data
-        data = json.dumps(self.state(), separators=(",", ":")).encode()
-        self._state_cache = (time.monotonic(), data)
-        return data
+        return self.state_frames()[0]
+
+    def sse_enter(self):
+        with self._sse_lock:
+            if self._sse_clients >= int(self.cfg.get("sse_max_clients") or 24):
+                return False
+            self._sse_clients += 1
+            return True
+
+    def sse_leave(self):
+        with self._sse_lock:
+            self._sse_clients -= 1
 
     def map_package(self, origin=None):
         m = self._load_map()
@@ -734,19 +931,35 @@ class Handler(BaseHTTPRequestHandler):
                    {"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'})
 
     def _events(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
+        """~4 Hz state stream. Capped at sse_max_clients; a client that stops reading for
+        SSE_WRITE_TIMEOUT_S is dropped. Frames carry the zones document only when its version
+        changes (and every SSE_ZONES_EVERY_S); the pages keep the last one they received."""
+        app = self.app
+        if not app.sse_enter():
+            return self._send(503, "too many live pages", headers={"Retry-After": "5"})
         try:
+            self.connection.settimeout(SSE_WRITE_TIMEOUT_S)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
             self.wfile.write(b"retry: 2000\n\n")
-            while not self.app.stopping.is_set():
-                self.wfile.write(b"data: " + self.app.state_json() + b"\n\n")
+            sent_zv, sent_at = None, 0.0
+            while not app.stopping.is_set():
+                full, light, zv = app.state_frames()
+                now = time.monotonic()
+                if zv != sent_zv or now - sent_at >= SSE_ZONES_EVERY_S:
+                    data, sent_zv, sent_at = full, zv, now
+                else:
+                    data = light
+                self.wfile.write(b"data: " + data + b"\n\n")
                 self.wfile.flush()
                 time.sleep(SSE_PERIOD_S)
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+            pass                                # includes socket.timeout: a stalled client
+        finally:
+            app.sse_leave()
 
     def do_POST(self):
         p = urlparse(self.path).path

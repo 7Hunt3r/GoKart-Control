@@ -5,7 +5,7 @@
 #
 # Idempotent: safe to re-run after every update. Run from /opt/gokart-pit (first
 # boot does this) or from any copy of pit/ (it is rsynced into /opt/gokart-pit,
-# keeping server/config.json and logs/). UNTESTED ON HARDWARE.
+# keeping server/config.json and logs/). Run on the pit Pi 4 (2026-11-05 onwards; second run checked idempotent 2026-11-06).
 set -uo pipefail
 [ "$(id -u)" -eq 0 ] || exec sudo bash "$0" "$@"
 
@@ -68,8 +68,11 @@ if [ "$SRC" != "$DEST" ]; then
     --exclude 'logs/' --exclude 'server/config.json' --exclude 'server/map/' \
     --exclude 'sdcard/secrets.env' --exclude 'sdcard/build/' --exclude '__pycache__/' \
     "$SRC/" "$DEST/"
-  # map/ holds operator-added imagery: add/refresh files, never delete
-  rsync -a --exclude recordings/ "$SRC/server/map/" "$DEST/server/map/"
+  # map/ holds operator-added imagery: add/refresh files, never delete. zones.json is edited live
+  # on the Pi (operator page ZONES), so it is only copied when the Pi has none.
+  rsync -a --exclude recordings/ --exclude 'zones.json' --exclude 'zones.json.*' --exclude '*.tmp' \
+    "$SRC/server/map/" "$DEST/server/map/"
+  [ -f "$DEST/server/map/zones.json" ] || { [ -f "$SRC/server/map/zones.json" ] && cp "$SRC/server/map/zones.json" "$DEST/server/map/zones.json"; }
 fi
 mkdir -p "$DEST/logs"
 if [ ! -f "$DEST/server/config.json" ]; then

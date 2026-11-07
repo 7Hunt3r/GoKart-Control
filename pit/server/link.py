@@ -4,6 +4,14 @@ One reader thread owns the connection, reconnects forever, and hands every
 line to `on_line(text)`. `write_line(obj)` is safe from any thread and returns
 False when the link is down (the caller decides what that means; commands are
 never queued for replay after a reconnect).
+
+Writes are paced by a writer thread: one line every WRITE_GAP_S, each preceded by
+a bare newline. Measured 2026-11-06 on the pit Pi: a burst of nine lines (STOP RACE
+= eight finish commands + the race line, ~470 bytes in 7 ms) lost its tail inside
+the T-Beam's USB CDC receive buffer while the base was busy transmitting, and the
+leftover fragment then turned the next line into "bad json". Pacing keeps the
+buffer from overflowing; the leading newline terminates any fragment so the next
+line always parses (the base ignores empty lines).
 """
 from __future__ import annotations
 
@@ -12,7 +20,9 @@ import json
 import os
 import socket
 import sys
+import queue
 import threading
+import time
 
 try:
     import serial                      # pyserial
@@ -24,6 +34,8 @@ except ImportError:                    # TCP/simulator mode still works without 
 TBEAM_VID, TBEAM_PID = 0x303A, 0x1001
 MAX_LINE = 4096
 RECONNECT_S = 2.0
+WRITE_GAP_S = 0.02                     # >= 20 ms between lines (~55 bytes each) to the T-Beam
+WRITE_QUEUE_MAX = 200                  # lines; beyond this the link is treated as stuck
 
 
 def find_tbeam_port():
@@ -61,25 +73,57 @@ class Link:
         self._closer = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="tbeam-link", daemon=True)
+        self._outq = queue.Queue(maxsize=WRITE_QUEUE_MAX)
+        self._gen = 0                       # connection generation: lines queued for an old one are dropped
+        self._wthread = threading.Thread(target=self._write_loop, name="tbeam-write", daemon=True)
+        self.write_gap_s = WRITE_GAP_S
+        self.lines_written = 0
+        self.write_errors = 0
 
     def start(self):
         self._thread.start()
+        self._wthread.start()
 
     def stop(self):
         self._stop.set()
         self._close()
 
     def write_line(self, obj):
-        data = (json.dumps(obj, separators=(",", ":")) + "\n").encode()
-        with self._wlock:
-            if not self.connected or self._writer is None:
-                return False
+        """Queue one JSON line for the T-Beam. True = queued on a live link (written within
+        a few tens of ms, in order); False = link down (nothing queued, nothing replayed later)."""
+        data = b"\n" + (json.dumps(obj, separators=(",", ":")) + "\n").encode()
+        # no lock here: the writer thread may hold _wlock for up to write_timeout, and callers hold the app lock
+        gen = self._gen
+        if not self.connected or self._writer is None:
+            return False
+        try:
+            self._outq.put_nowait((gen, data))
+            return True
+        except queue.Full:
+            self.write_errors += 1
+            self.log("link write queue full: line dropped")
+            return False
+
+    def _write_loop(self):
+        last = 0.0
+        while not self._stop.is_set():
             try:
-                self._writer(data)
-                return True
-            except Exception as e:          # noqa: BLE001 - any write error means link down
-                self.log(f"link write failed: {e}")
-                return False
+                gen, data = self._outq.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            wait = last + self.write_gap_s - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            with self._wlock:
+                if gen != self._gen or self._writer is None:
+                    continue                # queued for a connection that has since dropped
+                try:
+                    self._writer(data)
+                    self.lines_written += 1
+                except Exception as e:      # noqa: BLE001 - the reader thread notices the dead port
+                    self.write_errors += 1
+                    self.log(f"link write failed: {e}")
+            last = time.monotonic()
 
     # -- internals -----------------------------------------------------------
     def _set_state(self, connected, desc):
@@ -93,6 +137,7 @@ class Link:
     def _close(self):
         with self._wlock:
             self._writer = None
+            self._gen += 1                  # anything still queued is for the dead connection
             closer, self._closer = self._closer, None
         if closer:
             try:

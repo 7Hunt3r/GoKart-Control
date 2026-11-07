@@ -34,6 +34,10 @@ KART_COLORS = {
 }
 
 MODE_NAMES = {0: "ECO", 1: "NORMAL", 2: "SPORT"}
+# Current scale each mode writes (firmware/kart-heltec-v4/config.h MODES: 80 A, 100 A, 140 A of 140 A)
+MODE_SCALES = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}
+SCALE_MISMATCH_TOL = 0.05     # live scale this far from the requested mode's scale ...
+SCALE_MISMATCH_S = 10.0       # ... for this long (not stopped, not on the grid, no boost) -> SCALE != MODE
 CMD_RESULT_NAMES = {0: "received", 1: "accepted", 2: "applied", 3: "no_vesc",
                     4: "rejected", 5: "unknown"}
 
@@ -121,8 +125,10 @@ def _age(last_mono, now):
 VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "ah", "scale")
 STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "slow_mph", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
-                 "base_rssi", "rssi", "snr", "rx_ms")
+                 "base_rssi", "rssi", "snr", "rx_ms", "revert_missed")
 TRAIL_POINTS = 30
+LATE_WINDOW_S = 3.0      # a packet up to LATE_SEQS behind the last one, within this time, is a late copy
+LATE_SEQS = 16
 
 
 class KartState:
@@ -146,14 +152,40 @@ class KartState:
         self.via_repeater = False       # last counted packet came through the LoRa repeater
         self.relay_only = 0             # packets that only arrived via the repeater (direct copy lost)
         self.relay_dupes = 0            # repeater copies dropped because the direct copy was already counted
+        self.late_dupes = 0             # other repeats / out-of-order packets dropped (would move the kart back)
+        self.reboots = 0                # kart uptime went backwards (kart firmware restarted)
+        self.mismatch_since = None      # mono when the live scale started to differ from the mode's scale
+        self.mismatch_reported = False  # the "start" event has been logged
+
+    def is_late_copy(self, msg, now):
+        """True for a packet the pit already has or that is older than the newest one: the same seq
+        again or up to LATE_SEQS behind it, within LATE_WINDOW_S of the last packet, from the same
+        boot (uptime not going backwards). Relayed copies of a packet heard directly arrive ~25 ms
+        later; a repeater queue can deliver one after the next direct packet. Applying either would
+        move the kart back along its path (and, for laps, across the line twice)."""
+        seq, prev = msg.get("seq"), self.status.get("seq")
+        if not isinstance(seq, int) or not isinstance(prev, int) or self.last_tele_mono is None:
+            return False
+        if now - self.last_tele_mono >= LATE_WINDOW_S:
+            return False
+        up, prev_up = msg.get("uptime_s"), self.status.get("uptime_s")
+        if isinstance(up, (int, float)) and isinstance(prev_up, (int, float)) and up + 2 < prev_up:
+            return False                # rebooted: a fresh seq counter, not a late copy
+        return seq == prev or 1 <= (prev - seq) % 256 <= LATE_SEQS
 
     def ingest_tele(self, msg, now, wall):
         seq = msg.get("seq")
         prev = self.status.get("seq")
         relayed = msg.get("relayed") is True
-        if relayed and seq == prev and self.last_tele_mono is not None and now - self.last_tele_mono < 0.4:
-            self.relay_dupes += 1       # repeater copy of a packet the pit heard directly 25 ms earlier
+        if self.is_late_copy(msg, now):
+            if relayed:
+                self.relay_dupes += 1   # repeater copy of a packet the pit heard directly
+            else:
+                self.late_dupes += 1
             return
+        up, prev_up = msg.get("uptime_s"), self.status.get("uptime_s")
+        if isinstance(up, (int, float)) and isinstance(prev_up, (int, float)) and up + 2 < prev_up:
+            self.reboots += 1
         if relayed:
             self.relay_only += 1
         self.via_repeater = relayed
@@ -183,7 +215,43 @@ class KartState:
             self.gps_age_at_rx = None if age in (None, 255) else float(age)
             self.last_fix_mono = now
             if not self.trail or (self.trail[-1][1], self.trail[-1][2]) != (lat, lon):
-                self.trail.append((now, lat, lon))
+                self.trail.append((now, round(lat, 6), round(lon, 6)))     # 0.1 m: plenty for a trail
+
+    def _mismatch(self, now):
+        if self.mismatch_since is None:
+            return None
+        if now - self.mismatch_since < SCALE_MISMATCH_S and self.status.get("revert_missed") is not True:
+            return None                 # (the kart's own revert_missed flag shows it at once)
+        mr = self.status.get("mode_req")
+        return {"since_s": round(now - self.mismatch_since, 1), "scale": self.vesc.get("scale"),
+                "want": round(MODE_SCALES[mr], 3) if mr in MODE_SCALES else None, "mode": mr,
+                "revert_missed": self.status.get("revert_missed") is True}
+
+    def scale_off(self, now, boosted, on_grid):
+        """True when this kart's live scale disagrees with its requested mode right now (and nothing
+        explains it: not stopped, not on the race grid, no boost from the pit in the last few seconds)."""
+        st, mr, sc = self.status, self.status.get("mode_req"), self.vesc.get("scale")
+        if link_status(self.last_tele_mono, now) != "online" or self.last_vesc_mono is None \
+                or now - self.last_vesc_mono > ONLINE_S:
+            return False
+        if mr not in MODE_SCALES or not isinstance(sc, (int, float)) or st.get("stopped") is not False:
+            return False
+        if boosted or on_grid:
+            return False
+        return abs(sc - MODE_SCALES[mr]) > SCALE_MISMATCH_TOL
+
+    def _trail(self, now, max_age_s=30.0, max_gap_s=3.0):
+        """Recent path for the map: the last max_age_s, starting after the newest gap longer than
+        max_gap_s (a kart that dropped out for 8 s would otherwise get a straight line across the course)."""
+        out, last_t = [], None
+        for t, lat, lon in self.trail:
+            if now - t > max_age_s:
+                continue
+            if last_t is not None and t - last_t > max_gap_s:
+                out = []
+            out.append([lat, lon])
+            last_t = t
+        return out
 
     def _loss_pct(self, now, window_s):
         rx = lost = 0
@@ -214,6 +282,9 @@ class KartState:
             "via_repeater": self.via_repeater,
             "relay_only": self.relay_only,
             "relay_dupes": self.relay_dupes,
+            "late_dupes": self.late_dupes,
+            "reboots": self.reboots,
+            "scale_mismatch": self._mismatch(now),
             "status": dict(self.status),
             "mode_req_name": MODE_NAMES.get(mr) if mr is not None else None,
             "mode_actual_name": MODE_NAMES.get(ma) if ma is not None else None,
@@ -236,7 +307,7 @@ class KartState:
                 "fix_age_s": fix_age,
                 "fix_fresh": fix_age is not None and fix_age <= ONLINE_S,
             },
-            "trail": [[lat, lon] for (t, lat, lon) in self.trail if now - t <= 30.0],
+            "trail": self._trail(now),
         }
 
 
@@ -371,6 +442,26 @@ class Fleet:
     def is_online(self, k, now):
         return link_status(self.karts[k].last_tele_mono, now) == "online"
 
+    def watch_scales(self, now, boosted=(), grid=False):
+        """Update each kart's SCALE != MODE timer. boosted: karts the pit boosted in the last few
+        seconds; grid: a race start is holding karts. Returns [(kart, "start"|"end", info)] transitions
+        (the start is reported once the mismatch has lasted SCALE_MISMATCH_S)."""
+        out = []
+        for k, ks in self.karts.items():
+            off = ks.scale_off(now, k in boosted, grid)
+            if off and ks.mismatch_since is None:
+                ks.mismatch_since = now
+            elif not off and ks.mismatch_since is not None:
+                ks.mismatch_since = None
+                if ks.mismatch_reported:
+                    ks.mismatch_reported = False
+                    out.append((k, "end", None))
+                continue
+            if off and not ks.mismatch_reported and ks._mismatch(now) is not None:
+                ks.mismatch_reported = True
+                out.append((k, "start", ks._mismatch(now)))
+        return out
+
     def snapshot(self, now):
         base_age = _age(self.base_mono, now)
         laps = self.game.board(now)
@@ -420,7 +511,7 @@ HISTORY = 40
 ECHOED = {"received", "accepted", "applied", "no_vesc", "rejected", "unknown"}
 FINAL = {"applied", "no_vesc", "rejected", "unknown", "no_ack", "offline",
          "superseded", "cancelled", "link_lost"}
-VALID_CMDS = {"mode", "stop", "start", "ping", "slow", "boost", "race"}
+VALID_CMDS = {"mode", "stop", "start", "ping", "slow", "boost", "race", "rate"}
 BOOST_MIN_PCT, BOOST_MAX_PCT = 10, 100   # firmware GK_CMD_BOOST: scale percent, lasts 5 s
 
 
@@ -441,6 +532,7 @@ MAX_ZONES = 64
 MAX_POLY_POINTS = 64
 MIN_LINE_M = 4.0
 DEFAULT_MIN_LAP_S = 20.0
+MAX_MOVE_MPS = 40.0       # a fix-to-fix move faster than this (90 mph) is a GPS jump: it never counts a lap
 EMPTY_ZONES = {"version": 0, "enabled": False, "zones": []}
 
 
@@ -662,6 +754,7 @@ class Game:
         self.laps = {}                       # kart -> LapState
         self.session = None                  # RaceSession from START RACE until NEW RACE / reset
         self._line = None                    # (a_en, b_en, project, min_lap_s) or None
+        self.line_moves_in_race = 0          # lap line edited while a race session existed (laps kept)
 
     def set_doc(self, doc):
         """Install a validated document ({"version","enabled","zones"}). Lap state is
@@ -674,7 +767,12 @@ class Game:
         new = self._lapline()
         key = lambda z: None if z is None else (tuple(z["a"]), tuple(z["b"]), z.get("min_lap_s"))  # noqa: E731
         if key(old) != key(new):
-            self.laps = {}
+            if self.session is None:
+                self.laps = {}               # practice timing restarts against the new line
+            else:
+                # A race is on (or its results are showing): completed laps stay. The next crossing of
+                # the new line counts against the previous crossing of the old one (min_lap_s applies).
+                self.line_moves_in_race += 1
         if new is None:
             self._line = None
         else:
@@ -766,11 +864,16 @@ class Game:
         ses = self.session
         if ses is not None and kart in ses.finished:
             return False                     # this kart has finished: its laps stop counting
+        if ses is not None and ses.go_mono is not None and now < ses.go_mono:
+            return False                     # grid hold: nothing counts before GO (karts may still roll over the line)
         a, b, proj, min_lap = self._line
-        t = segment_cross(proj(prev[0], prev[1]), proj(cur[0], cur[1]), a, b)
+        p0, p1 = proj(prev[0], prev[1]), proj(cur[0], cur[1])
+        t = segment_cross(p0, p1, a, b)
         if t is None:
             return False
         pm = prev[2]
+        if pm is not None and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > MAX_MOVE_MPS * max(0.2, now - pm):
+            return False                     # GPS jump (cold start after a reboot, multipath): not a crossing
         at = pm + t * (now - pm) if pm is not None and 0 <= now - pm <= 5.0 else now
         st = self.laps.setdefault(kart, LapState())
         if st.started_mono is not None:
@@ -858,24 +961,41 @@ class Command:
         self.last_tx_mono = None
         self.tx_count = 0
         self.radio_sent = 0             # `sent` lines from the T-Beam for this seq
+        self.wait_ms = None             # base queue wait of the last `sent` line (firmware 2026-11-07+)
+        self.issued = None              # unix seconds at first transmit; the base uses it without GPS time
+        self.auto = False               # sent by a pit policy (fleet rate), not an operator
         self.id = None                  # stable id independent of seq reuse
 
     def wire(self, kart=None):
         obj = {"cmd": self.cmd, "kart": self.kart if kart is None else kart, "seq": self.seq}
-        if self.arg is not None:            # mode/slow/boost/race: the base sends arg 0 when it is missing
+        if self.arg is not None:            # mode/slow/boost/race/rate: the base sends arg 0 when it is missing
             obj["arg"] = self.arg
         if self.cmd != "ping":
             obj["ttl"] = self.ttl
+        if self.issued is not None:         # same value on every retry: TTL and race GO count from the first send
+            obj["issued"] = self.issued
         return obj
+
+    def arg_name(self):
+        if self.cmd == "mode":
+            return MODE_NAMES.get(self.arg)
+        if self.cmd == "slow":
+            return f"{self.arg or 5} mph"
+        if self.cmd == "boost":
+            return f"{self.arg}%"
+        if self.cmd == "race":
+            return race_arg_name(self.arg)
+        if self.cmd == "rate":
+            return f"{self.arg} Hz"
+        return None
 
     def to_dict(self):
         return {
             "id": self.id, "seq": self.seq, "cmd": self.cmd, "kart": self.kart, "arg": self.arg,
-            "arg_name": (MODE_NAMES.get(self.arg) if self.cmd == "mode" else (f"{self.arg or 5} mph" if self.cmd == "slow"
-                         else (f"{self.arg}%" if self.cmd == "boost" else (race_arg_name(self.arg) if self.cmd == "race" else None)))),
+            "arg_name": self.arg_name(),
             "ttl": self.ttl, "source": self.source, "state": self.state,
             "created_wall": self.created_wall, "first_tx_wall": self.first_tx_wall,
-            "tx_count": self.tx_count, "radio_sent": self.radio_sent,
+            "tx_count": self.tx_count, "radio_sent": self.radio_sent, "wait_ms": self.wait_ms, "auto": self.auto,
             "outcomes": {str(k): v for k, v in self.outcomes.items()},
             "echo_wall": {str(k): v for k, v in self.echo_wall.items()},
         }
@@ -900,12 +1020,18 @@ class CommandManager:
         self.history = deque(maxlen=HISTORY)    # all commands, newest last
         self.queue = []                         # queued (not yet transmitted), FIFO
         self._ids = 0
+        self.last_wait_ms = None                # base queue wait of the latest `sent` line
+        self.clock = time.time                  # unix seconds for "issued" (tests may replace it)
 
     # -- public API ----------------------------------------------------------
-    def submit(self, cmd, kart, arg=None, source="?", now=0.0, wall=None):
+    def submit(self, cmd, kart, arg=None, source="?", now=0.0, wall=None, auto=False):
         cmd = str(cmd).lower()
         if cmd not in VALID_CMDS:
             raise CommandError(f"unknown cmd {cmd!r}")
+        if isinstance(kart, bool) or isinstance(arg, bool):
+            raise CommandError("kart and arg must be numbers, not true/false")
+        if isinstance(kart, float) and not kart.is_integer():
+            raise CommandError("kart must be 1-8 or 255")
         try:
             kart = int(kart)
         except (TypeError, ValueError):
@@ -933,6 +1059,13 @@ class CommandManager:
                 raise CommandError("boost: scale percent must be 10-100")
             if not BOOST_MIN_PCT <= arg <= BOOST_MAX_PCT:
                 raise CommandError("boost: scale percent must be 10-100")
+        elif cmd == "rate":
+            try:
+                arg = int(arg)
+            except (TypeError, ValueError):
+                raise CommandError("rate: arg must be 1 or 2 (Hz)")
+            if arg not in (1, 2):
+                raise CommandError("rate: arg must be 1 or 2 (Hz)")
         elif cmd == "race":
             # 1-30 = grid hold, GO in arg s; 0 = finish (no position); 101-108 = finish in position arg-100
             try:
@@ -944,6 +1077,7 @@ class CommandManager:
         else:
             arg = None
         c = Command(None, cmd, kart, arg, self.ttl, source, now, wall)
+        c.auto = bool(auto)
         self._ids += 1
         c.id = self._ids
         self.history.append(c)
@@ -979,6 +1113,9 @@ class CommandManager:
         c = self._latest_with_seq(msg.get("seq"))
         if c is not None:
             c.radio_sent += 1
+            if isinstance(msg.get("wait_ms"), (int, float)):
+                c.wait_ms = msg["wait_ms"]
+                self.last_wait_ms = msg["wait_ms"]
 
     def on_link_down(self, now, wall=None):
         """Serial link lost: stop retrying, never replay after reconnect."""
@@ -1009,16 +1146,32 @@ class CommandManager:
         self._pump(now, wall)
 
     def snapshot(self):
-        cmds = [c.to_dict() for c in reversed(self.history)]
-        last_fleet = next((c for c in cmds if c["kart"] == ALL_KARTS), None)
+        cmds, seen_auto = [], False
+        for c in reversed(self.history):     # policy commands (fleet rate every 30 s): only the newest is listed
+            if c.auto:
+                if seen_auto:
+                    continue
+                seen_auto = True
+            cmds.append(c.to_dict())
+        last_fleet = next((c for c in cmds if c["kart"] == ALL_KARTS and not c["auto"]), None)
         per_kart = {}
         for c in reversed(self.history):
+            if c.auto:
+                continue                        # the fleet-rate policy never hides an operator's last command
             for k in c.addressed:
                 if str(k) not in per_kart and c.outcomes.get(k) not in ("cancelled",):
                     per_kart[str(k)] = {"id": c.id, "seq": c.seq, "cmd": c.cmd, "arg": c.arg,
-                                        "outcome": c.outcomes[k]}
+                                        "arg_name": c.arg_name(), "outcome": c.outcomes[k]}
         return {"recent": cmds[:15], "last_fleet": last_fleet, "per_kart": per_kart,
-                "next_seq": self.next_seq, "queued": len(self.queue)}
+                "next_seq": self.next_seq, "queued": len(self.queue), "last_wait_ms": self.last_wait_ms}
+
+    def boosted_recently(self, now, window_s=7.0):
+        """Karts a pit BOOST may still be acting on (5 s override + margin)."""
+        out = set()
+        for c in self.history:
+            if c.cmd == "boost" and c.first_tx_mono is not None and now - c.first_tx_mono <= window_s:
+                out |= set(c.addressed)
+        return out
 
     # -- internals -----------------------------------------------------------
     def _latest_with_seq(self, seq):
@@ -1047,6 +1200,8 @@ class CommandManager:
         kart has accepted but not yet confirmed)."""
         busy = set()
         for c in self.history:
+            if c.auto:
+                continue                     # a policy command (fleet rate) never delays an operator's command
             for k in c.addressed:
                 o = c.outcomes.get(k)
                 if c.state == "active" and o == "pending":
@@ -1094,6 +1249,14 @@ class CommandManager:
                         c.outcomes[k] = "superseded"
 
     def _transmit_first(self, c, now, wall):
+        if not c.auto:                       # an operator command wins over a policy command still in flight
+            for h in self.history:
+                if h.auto and h.state == "active":
+                    for k in set(h.addressed) & set(c.addressed):
+                        h.superseded.add(k)
+                        if h.outcomes[k] not in FINAL and h.outcomes[k] not in ECHOED:
+                            h.outcomes[k] = "superseded"
+        c.issued = int(self.clock())
         c.seq = self._alloc_seq()
         c.state = "active"
         c.first_tx_mono = now

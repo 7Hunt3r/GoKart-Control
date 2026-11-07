@@ -38,16 +38,21 @@ uncalibrated until the drivetrain numbers are physically verified.
 
 ## Host -> T-Beam
 
-One JSON object per line:
+One JSON object per line. The pit (pit/server/link.py) writes each line preceded by a bare
+newline and paces them at least 20 ms apart: on 2026-11-06 a 470-byte burst (STOP RACE = eight
+finish commands + the race line in 7 ms) lost its tail in the base's USB receive buffer while the
+base was transmitting, and the leftover fragment turned the next line into `bad json`. The base
+ignores empty lines, so the leading newline also terminates any such fragment.
 
 ```json
-{"cmd":"mode","kart":3,"arg":1,"seq":17,"ttl":10}
+{"cmd":"mode","kart":3,"arg":1,"seq":17,"ttl":10,"issued":1794016260}
 {"cmd":"stop","kart":255,"seq":18,"ttl":10}
 {"cmd":"start","kart":255,"seq":19,"ttl":10}
 {"cmd":"ping","kart":1,"seq":20}
 {"cmd":"slow","kart":2,"arg":5,"seq":21,"ttl":10}
 {"cmd":"boost","kart":3,"arg":100,"seq":22,"ttl":10}
 {"cmd":"race","kart":255,"arg":5,"seq":23,"ttl":10}
+{"cmd":"rate","kart":255,"arg":1,"seq":24,"ttl":10}
 {"t":"race","state":2,"pos":[2,1,0,3,0,0,0,0]}
 ```
 
@@ -60,6 +65,7 @@ One JSON object per line:
 | `slow` | mph 1-60 (0/absent = 5) | ERPM cap at that speed until START (firmware 2026-11-06+) |
 | `race` | 1-30 = grid hold now, GO `arg` s after `issued_utc_s`; 0 or 101-108 = finish (position `arg`-100) | See pit/server/map/ZONES.md "Race start" / "Race finish". The kart prints `{"t":"race",...}` events on USB |
 | `boost` | scale percent 10-100 | Timed current-scale override for 5 s, then auto-reverts to the mode scale; never above 1.0; rejected while stopped; STOP/START cancel it (firmware 2026-11-06+). The USB form `boost SECS SCALE` on the kart sets other durations (game zones) |
+| `rate` | 1 or 2 (Hz) | Telemetry report rate, saved on the kart; no VESC involvement (firmware 2026-11-07+). The pit sends `rate 1` to all karts while a repeater heartbeat is heard (now, then every 30 s) and `rate 2` once after 120 s without one: a 50 ms slot cannot hold a 23 ms packet and its 23 ms repeater copy |
 | (`"t":"race"`) | `state` 0-3, `pos[8]` | Not a command (no seq, no echo, no reply): race state + running positions carried in the base's beacons for 30 s, see "Race positions" below |
 
 - `kart`: 1-8 or 255 for all karts.
@@ -83,6 +89,9 @@ One JSON object per line:
   (room for a repeater copy).
 - `ttl`: seconds. Karts with GPS or beacon time reject a command older than this
   (`cmd_result` 4). 0 or absent = no expiry. The base stamps `issued_utc_s` from its own GPS.
+- `issued` (optional, unix seconds): used by the base as `issued_utc_s` when it has no GPS time
+  (indoors), so TTL and race GO still work. The pit always sends it, with the same value on every
+  retry of a command (the time of its first transmission).
 - Delivery policy belongs to the host: retransmit every 1.5 s, up to 5 times,
   until every addressed kart that is online reports the seq, then read
   `cmd_result`. A fleet command has eight individual outcomes, never one flag.
@@ -98,11 +107,20 @@ Plain-text lines are also accepted for maintenance: `status`, `help`,
 Each kart prints `{"t":"race","kart":N,"event":"position","position":P,"state":S}` when its own value changes
 and carries `race_pos`/`race_state` on its USB `self` line, so the kart display can show "P3" with no Wi-Fi.
 
-Pit host schedule (pit/server/pit_server.py `_race_tick`, 2026-11-06): state 1 with all positions 0 the moment
-START RACE is pressed, then every 2 s while the race runs (state 1 until GO, then 2, positions from the live
+Pit host schedule (pit/server/pit_server.py `_race_tick`, revised 2026-11-07): state 1 with all positions 0 the
+moment START RACE is pressed, then every 2 s while the race runs (state 1 until GO, then 2, positions from the live
 leaderboard: finished karts keep their finishing place, the rest by completed laps desc then earliest last
-crossing, no completed lap = 0), state 3 with the final positions 3 times over 6 s when the race ends, and
-state 0 once on NEW RACE / reset laps. The session log records one `race_pos` event per change, not each repeat.
+crossing, no completed lap = 0). On STOP RACE the state-3 line with the final positions goes out FIRST, then one
+finish command (`race` 100 + position) per kart heard in the last 15 s (karts not heard get none: every command
+costs a beacon slot at the base); state 3 is repeated at 3 s and 6 s. STOP RACE before GO is ABORT START: STOP to
+all karts (a finish would release the grid hold at once), no finish commands, then state 0. NEW RACE / reset laps /
+abort send state 0 twice (now and 2 s later). Every line is in the session log as `tx`; `race_pos` events record
+each change once.
+
+Kart 2 kept showing state 2 for 4+ s after STOP RACE on 2026-11-06 (log session-20261106-204606): the old order
+(eight finish commands, seven of them to karts never heard, then the race line, in one burst) lost the race line in
+the base's USB buffer, the 3 s repeat arrived glued to the leftover fragment (`bad json`), and the operator pressed
+NEW RACE before the 6 s repeat. Pit-side fix as above; the kart side is not involved.
 
 ## Map package endpoint (host side, for the kart Pis later)
 
