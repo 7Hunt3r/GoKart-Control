@@ -29,6 +29,11 @@ Scenario flags: --kart 2 --nofix (own GPS never fixes) --novesc (VESC link down)
 --fault N (VESC fault code) --pitloss (pit link drops 20 s of every 60 s)
 --pit-stop-at S / --pit-start-at S (the pit sends STOP/START at those seconds)
 --pit-slow-at S (the pit sends SLOW 8 at that second).
+--race-pos "3,2,2,1" (--race-pos-step 10): the pit beacon's running position for this kart,
+stepping through the list every N s (from GO when a race countdown runs, else from start; with
+--race-at nothing before that countdown; the last value holds). Like the race firmware: self lines carry "race_pos" (0 = none) and "race_state"
+(0 idle, 1 countdown, 2 running, 3 finished), and {"t":"race","event":"position","position":P,
+"state":S} is printed whenever either changes.
 `race [secs]` (USB, SIMULATION ONLY; the driver page never sends it): like the race firmware's
 GK_CMD_RACE, holds the kart at zero power at once (stopped stays false), prints
 {"t":"race","event":"countdown","go_in_ms":...} and {"t":"race","event":"go"} at release;
@@ -219,6 +224,19 @@ class SimKart:
                 "rssi": rssi, "snr": snr, "rx_ms": rx_ms, **(extra or {})}
 
 
+def parse_pos_seq(text):
+    """"3,2,2,1" -> [3, 2, 2, 1] (each 0-8); empty/None -> []."""
+    if not text:
+        return []
+    out = []
+    for x in str(text).split(","):
+        p = int(x.strip())
+        if not 0 <= p <= 8:
+            raise ValueError(f"race position {p} not in 0-8")
+        out.append(p)
+    return out
+
+
 def sim_args(**over):
     """Default command-line options as a namespace, for in-process use."""
     a = build_parser().parse_args([])
@@ -236,6 +254,14 @@ class Sim:
         self.t0 = time.monotonic()
         self.usb_seq = 0
         self.boost_secs = 0
+        self.pos_seq = parse_pos_seq(getattr(args, "race_pos", None))
+        self.pos_step = float(getattr(args, "race_pos_step", None) or 10.0)
+        self.pos_t0 = time.monotonic()
+        # with a scheduled race (--race-at) the beacon has no position until the countdown
+        self.pos_wait = getattr(args, "race_at", None) is not None
+        self.race_seen = bool(self.pos_seq) and not self.pos_wait
+        self.race_finished = False
+        self.race_pos, self.race_state = 0, 0
         self.me = SimKart(args.kart, 15.0 if args.course and path is None else 0.0, nofix=args.nofix,
                           novesc=args.novesc, fault=args.fault, path=path, full_mph=full_mph)
         if args.course:
@@ -246,6 +272,28 @@ class Sim:
         L = self.me.path.length
         self.fleet = [SimKart(others[0], 45.0 % L, mode=2, path=path), SimKart(others[1], 120.0 % L, mode=0, path=path)]
         self.pit_done = set()
+
+    def position_at(self, now):
+        """(race_pos, race_state) the beacon would give this kart at `now`."""
+        if self.race_finished:
+            state = 3
+        elif self.me.race_go is not None:
+            state = 1
+        elif self.race_seen:
+            state = 2
+        else:
+            state = 0
+        if not self.pos_seq or (self.pos_wait and not self.race_seen):
+            return 0, state
+        if now < self.pos_t0:
+            return self.pos_seq[0], state
+        return self.pos_seq[min(len(self.pos_seq) - 1, int((now - self.pos_t0) / self.pos_step))], state
+
+    def update_position(self, now):
+        p, st = self.position_at(now)
+        if (p, st) != (self.race_pos, self.race_state):
+            self.race_pos, self.race_state = p, st
+            self.emit({"t": "race", "kart": self.me.k, "event": "position", "position": p, "state": st})
 
     def uptime(self):
         return int(time.monotonic() - self.t0) + self.args.uptime0
@@ -297,6 +345,7 @@ class Sim:
             self.boost_secs = 0
         elif cmd == 7 and (arg == 0 or 101 <= arg <= 108):  # race finish (0 = no position, 100 + P)
             k.race_go = None
+            self.race_finished = True
             self.emit({"t": "race", "kart": k.k, "event": "finish", "position": 0 if arg == 0 else arg - 100})
             self.log(f"race: finish P{0 if arg == 0 else arg - 100}")
         elif cmd == 7:                                       # race: grid hold, GO arg seconds later
@@ -304,6 +353,7 @@ class Sim:
                 res = 4
             else:
                 k.race_go, k.ov = time.monotonic() + arg, None
+                self.pos_t0, self.race_seen, self.race_finished = k.race_go, True, False
                 self.emit({"t": "race", "kart": k.k, "event": "countdown", "go_in_ms": arg * 1000, "secs": arg,
                            "go_utc": 0})
                 self.log(f"race: grid hold, GO in {arg * 1000} ms")
@@ -411,6 +461,7 @@ class Sim:
                     self.me.race_go = None
                     self.emit({"t": "race", "kart": self.me.k, "event": "go"})
                     self.log("race: GO")
+                self.update_position(now)
                 if self.me.ov and now >= self.me.ov[1]:
                     self.me.ov = None
                     self.log(f"boost over, back to {self.me.eff_scale():.2f}")
@@ -428,7 +479,8 @@ class Sim:
                     blat, blon = en_to_latlon(3.0, 2.0)
                     extra = {"hdop": 99.0 if self.args.nofix else self.args.hdop, "fix_age_ms": 999999 if self.args.nofix else 150,
                              "gps_hz": 5, "base_lat": round(blat, 7) if up else None,
-                             "base_lon": round(blon, 7) if up else None, "base_fix_age_s": 1 if up else None}
+                             "base_lon": round(blon, 7) if up else None, "base_fix_age_s": 1 if up else None,
+                             "race_pos": self.race_pos, "race_state": self.race_state}
                     self.emit(self.me.tele("self", rx_ms=int(el * 1000), uptime=self.uptime(),
                                            base_rssi=-71 + random.randint(-6, 6) if up else 0, extra=extra))
                 for i, f in enumerate(self.fleet):
@@ -533,6 +585,8 @@ def build_parser():
     ap.add_argument("--nogpsline", action="store_true", help="no 5 Hz gps lines (firmware `gpsline off`)")
     ap.add_argument("--hdop", type=float, default=0.9, help="reported HDOP (> 4 = poor: the game ignores it)")
     ap.add_argument("--race-at", type=float, help="the pit sends `race 5` at this second")
+    ap.add_argument("--race-pos", help='running positions from the pit beacon, e.g. "3,2,2,1"')
+    ap.add_argument("--race-pos-step", type=float, default=10.0, help="seconds per --race-pos entry")
     return ap
 
 

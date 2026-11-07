@@ -114,7 +114,7 @@ def _age(last_mono, now):
 VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "ah", "scale")
 STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
-                 "base_rssi", "rssi", "snr", "rx_ms")
+                 "base_rssi", "rssi", "snr", "rx_ms", "race_pos", "race_state")
 
 
 class KartState:
@@ -445,6 +445,7 @@ ITEM_COOLDOWN_S = 15.0
 # Item box roll (ZONES.md "Item boxes"): (name, probability, secs, scale); empty = nothing sent
 ITEM_TABLE = (("boost", 0.45, 5, 1.0), ("super", 0.15, 8, 1.0), ("mud", 0.25, 3, 0.5), ("empty", 0.15, None, None))
 RACE_GO_GRACE_S = 0.0        # the overlay/laps follow the computed GO instant; the go line only confirms it
+RACE_STATES = {0: "idle", 1: "countdown", 2: "running", 3: "finished"}
 HEADING_SLEW_DPS = 120.0     # heading-up map: max rotation rate
 ZONE_TYPES = ("boost", "mud", "item", "lapline")
 MUD_DEFAULT_SCALE = 0.5
@@ -956,7 +957,10 @@ class GameEngine:
         self.rng = rng or random.Random()
         self.race = {"hold": False, "go_at": None, "secs": None, "rx": None, "go_mono": None,
                      "go_confirmed": False, "how": None, "go_utc": None,
-                     "finished": False, "position": None, "finish_mono": None, "finish_lap": None}
+                     "finished": False, "position": None, "finish_mono": None, "finish_lap": None,
+                     # running position from the pit beacon (race firmware 2026-11-06 20:30+)
+                     "pos": 0, "state": 0, "pos_changed_wall": None, "pos_changed_mono": None,
+                     "pos_prev": 0, "last_pos": 0, "position_source": None}
         self.filter = GpsFilter()
         self.corr = BaseCorrection(gps_correction)
         self.gps_line_mono = None   # last {"t":"gps"} line
@@ -1053,7 +1057,11 @@ class GameEngine:
         return recs
 
     # -- telemetry ----------------------------------------------------------------
-    def on_self(self, msg, now):
+    def on_self(self, msg, now, wall=None):
+        pos_recs = self.race_position(msg.get("race_pos"), msg.get("race_state"), now, wall)
+        return pos_recs + self._on_self(msg, now)
+
+    def _on_self(self, msg, now):
         self.stopped = msg.get("stopped")
         self.mode_req = msg.get("mode_req")
         self.scale = msg.get("scale") if msg.get("vesc_link") is True else None
@@ -1211,7 +1219,27 @@ class GameEngine:
         self._rec(recs, "lap", now, zone=L.id, lap=lap["count"], lap_s=lap_s, best=best)
 
     # -- race start (ZONES.md "Race start") -------------------------------------------
-    def on_race(self, msg, now):
+    def race_position(self, pos, state, now, wall=None, recs=None):
+        """Running position P (0 = none, 1-8) and race state from the self line / position event.
+        A change records a "race_position" event: dir "up" (better), "down" (worse), "new", "gone"."""
+        recs = [] if recs is None else recs
+        r = self.race
+        if _num(state) and 0 <= int(state) <= 3:
+            r["state"] = int(state)
+        if not _num(pos) or not 0 <= int(pos) <= 8:
+            return recs
+        p = int(pos)
+        if p == r["pos"]:
+            return recs
+        prev = r["pos"]
+        d = "new" if prev == 0 else "gone" if p == 0 else "up" if p < prev else "down"
+        r.update(pos=p, pos_prev=prev, pos_changed_mono=now, pos_changed_wall=wall)
+        if p:
+            r["last_pos"] = p
+        self._rec(recs, "race_position", now, pos=p, prev=prev, dir=d, state=r["state"])
+        return recs
+
+    def on_race(self, msg, now, wall=None):
         """{"t":"race","event":"countdown","go_in_ms":N,"secs":S,"go_utc":U} / {"event":"go"}.
         GO = arrival + go_in_ms (the overlay and the lap reset do not wait for the go line,
         which only confirms it). Laps count from the first crossing after GO."""
@@ -1222,7 +1250,8 @@ class GameEngine:
             go_in = msg.get("go_in_ms")
             go_in = max(0.0, float(go_in) / 1000.0) if _num(go_in) else float(msg.get("secs") or 5)
             r.update(hold=True, go_at=now + go_in, secs=msg.get("secs"), rx=now, go_confirmed=False, how=None,
-                     go_utc=msg.get("go_utc"), finished=False, position=None, finish_mono=None, finish_lap=None)
+                     go_utc=msg.get("go_utc"), finished=False, position=None, finish_mono=None, finish_lap=None,
+                     position_source=None)
             self._rec(recs, "race_countdown", now, go_in_s=round(go_in, 2), secs=msg.get("secs"))
             if go_in <= 0:
                 self._go(now, now, "clock", recs)
@@ -1231,12 +1260,18 @@ class GameEngine:
                 self._go(now, now, "line", recs)
             r["go_confirmed"] = True
             self._rec(recs, "race_go_line", now)
+        elif ev == "position":
+            self.race_position(msg.get("position"), msg.get("state"), now, wall, recs)
         elif ev == "finish":
             # the pit's race finish (arg 0 / 100 + position): the firmware releases any hold; the HUD
             # shows the FINISH takeover and the laps freeze until the next countdown
             pos = msg.get("position")
             pos = int(pos) if _num(pos) and 0 < int(pos) <= 8 else 0
+            src = "finish" if pos else None
+            if not pos and r["last_pos"]:                # firmware sent no position: last beacon position
+                pos, src = r["last_pos"], "beacon"
             lap = self.lap
+            r.update(position_source=src)
             r.update(hold=False, finished=True, position=pos, finish_mono=now,
                      finish_lap={"laps": lap["count"], "best_s": lap["best_s"], "last_s": lap["last_s"]})
             lap.update(running=False)
@@ -1301,6 +1336,13 @@ class GameEngine:
         out["position"] = r["position"]
         out["finish_age_s"] = round(now - r["finish_mono"], 2) if r["finish_mono"] is not None else None
         out["finish_lap"] = r["finish_lap"]
+        out["position_source"] = r["position_source"]
+        out["pos"] = r["pos"]
+        out["state"] = r["state"]
+        out["state_name"] = RACE_STATES.get(r["state"])
+        out["pos_changed_wall"] = r["pos_changed_wall"]
+        out["pos_prev"] = r["pos_prev"]
+        out["pos_changed_age_s"] = round(now - r["pos_changed_mono"], 2) if r["pos_changed_mono"] is not None else None
         return out
 
     def snapshot(self, now):

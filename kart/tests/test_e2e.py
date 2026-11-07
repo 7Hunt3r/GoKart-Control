@@ -347,14 +347,26 @@ class DemoMode(unittest.TestCase):
             tmp.cleanup()
 
     def test_sim_race_countdown_over_tcp(self):
-        st = Stack(["--course", "--race-at", "3"])
+        st = Stack(["--course", "--race-at", "3", "--race-pos", "3,2,1", "--race-pos-step", "2"])
         try:
             s = st.wait(lambda s: s["game"]["race"]["hold"], what="grid hold from the sim's race line")
             self.assertFalse(s["self"]["status"]["stopped"])               # grid hold is not STOPPED
+            self.assertEqual((s["game"]["race"]["pos"], s["game"]["race"]["state_name"]), (3, "countdown"))
             self.assertLessEqual(s["game"]["race"]["go_in_s"], 5.0)
             s = st.wait(lambda s: s["game"]["race"]["go_confirmed"], timeout=10, what="GO line")
             self.assertFalse(s["game"]["race"]["hold"])
             self.assertEqual(st.request("POST", "/cmd", {"cmd": "race", "arg": 5})[0], 409)   # never from the screen
+            s = st.wait(lambda s: s["game"]["race"]["pos"] == 1 and s["self"]["status"]["race_pos"] == 1, timeout=10,
+                        what="P3 -> P2 -> P1 after GO (event, then the next self line)")
+            r = s["game"]["race"]
+            self.assertEqual((r["state"], r["pos_prev"]), (2, 2))
+            self.assertIsNotNone(r["pos_changed_wall"])
+            self.assertEqual(s["self"]["status"]["race_pos"], 1)
+            self.assertEqual(s["rx_bad"], 0)
+            with open(os.path.join(st.logs, os.listdir(st.logs)[0])) as f:
+                recs = [json.loads(x) for x in f]
+            dirs = [r["dir"] for r in recs if r["kind"] == "game" and r.get("ev") == "race_position"]
+            self.assertEqual(dirs, ["new", "up", "up"])
         finally:
             st.close()
 

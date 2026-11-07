@@ -203,6 +203,17 @@ with a fix, plus a 4 Hz tick):
   lasts until GO, or until a STOP/START echo (the firmware clears the hold).
   During the hold no zone command is sent and lap-line crossings are ignored;
   laps reset at GO and count from the first crossing after it.
+- **Running position** (race firmware 2026-11-06 20:30+, from the pit beacon): the
+  `self` line's `race_pos` (0 = none, 1-8) and `race_state` (0 idle, 1 countdown,
+  2 running, 3 finished), and `{"t":"race","event":"position","position":P,"state":S}`
+  on every change. `/api/state` `game.race` has `pos`, `state`, `state_name`,
+  `pos_prev`, `pos_changed_wall`; each change is a `race_position` game event
+  (`dir`: new / up / down / gone). The FINISH takeover uses the firmware's finish
+  position and falls back to the last beacon position (`position_source`).
+  The page shows a 72 px "P3" badge in the kart's colour next to the lap panel
+  (hidden at 0) that pops on change, with an ascending two-note when the position
+  improves and a descending one when it drops (tones live in app.js because
+  sound.js must stay identical to the pit's copy).
 - **Gates for every zone command**: game on, kart not STOPPED, not in grid hold,
   a usable GPS sample (hdop <= 4, sats >= 5, not an outlier). Zones may be as
   small as `r_m` 3 (pads are typically 5 m).
@@ -303,7 +314,8 @@ is one, else through the centre of every boost/mud/item zone of the pit's
 current zones (forced on: it is a simulation) and across the lap line (a detour
 is added when a loop would be shorter than `min_lap_s`), or around a built-in
 demo course at the kart's position when the pit has no zones. It starts with
-`race 5`, and after 3 laps the simulated pit flags it home in P1 (`race 101`), so the FINISH
+`race 5`; the "beacon" position cycles P3 -> P2 -> P1, one step per lap after GO, and after
+3 laps the simulated pit flags it home in P1 (`race 101`), so the FINISH
 takeover can be seen on the real panel. The SIMULATION banner says DEMO with the time left. While demoing,
 every line the server would send (game commands, mode taps, status polls) goes
 to the simulator and the real Heltec's lines are logged (`ignored: "demo"`) but
@@ -313,7 +325,9 @@ real link without a restart (lap timing starts fresh).
 
 **Simulator race**: `race [secs]` / `finish [P]` on its console (or `--race-at S`) does what the
 race firmware does (grid hold at zero power, countdown and go lines, STOP/START
-cancel). The driver page never sends `race`.
+cancel). The driver page never sends `race`. `--race-pos "3,2,2,1"` (`--race-pos-step 10`)
+plays the beacon's running position for this kart like the race firmware (self fields and
+position events; with `--race-at` the sequence starts at the countdown).
 
 **Safety notes.** Zones only change the current scale (motor torque limit)
 inside the firmware's own limits and never above 1.0; ECO/NORMAL karts do get up

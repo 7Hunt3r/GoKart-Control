@@ -301,11 +301,11 @@ class App:
                                    result=res["result_name"])
             elif t == "self":
                 self.cmds.on_self(msg)
-                game = self.game.on_self(msg, now)
+                game = self.game.on_self(msg, now, wall)
             elif t == "gps":
                 game = self.game.on_gps(msg, now)
             elif t == "race":
-                game = self.game.on_race(msg, now)
+                game = self.game.on_race(msg, now, wall)
             d = self.demo
             demo_finish = (demo and d is not None and not self.game.race["finished"]
                            and any(r.get("ev") == "lap" and r.get("lap", 0) >= DEMO_FINISH_LAPS for r in game))

@@ -4,7 +4,8 @@ moving. SIMULATION ONLY.
 
 The simulated kart drives a loop built from the zones (kartcore.demo_path: the track when
 there is one, else through every boost/mud/item centre and across the lap line) at ~15 mph,
-with a `race 5` countdown at the start. Its lines go through a queue and a reader thread
+with a `race 5` countdown at the start, and the pit beacon's running position cycling
+P3 -> P2 -> P1, one step per lap after GO. Its lines go through a queue and a reader thread
 (like a serial link), so no lock is ever held across the simulator and the server.
 Everything the server "sends" while demoing goes to the simulator: the caller (kart_server)
 routes writes here instead of to the real Heltec, which is never written to.
@@ -24,6 +25,12 @@ import kartcore  # noqa: E402
 
 DEMO_MPH = 15.0
 DEMO_MAX_S = 180.0
+DEMO_POSITIONS = (3, 2, 1)
+
+
+def demo_lap_s(path_m, mph=DEMO_MPH):
+    """Seconds per lap of the demo loop at the cruise speed (position steps once per lap)."""
+    return max(5.0, float(path_m) / (mph * 0.44704))
 
 
 def _sim_module():
@@ -43,7 +50,10 @@ class Demo:
         self.on_line = on_line
         self._q = queue.Queue()
         self._stop = threading.Event()
-        args = sh.sim_args(kart=int(kart_id or 2), uptime0=600)
+        # running position from the "pit beacon": P3 -> P2 -> P1, one step per lap (from GO)
+        self.lap_s = demo_lap_s(self.path["length_m"], mph)
+        args = sh.sim_args(kart=int(kart_id or 2), uptime0=600, race_pos=",".join(map(str, DEMO_POSITIONS)),
+                           race_pos_step=self.lap_s)
         self.sim = sh.Sim(args, path=sh.PolyPath(self.path["points"]),
                           full_mph=mph / sh.MODE_SCALE[1], start_mph=0.0)
         self.sim.out.append(self._q.put)

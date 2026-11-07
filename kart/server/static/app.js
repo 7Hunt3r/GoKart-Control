@@ -218,7 +218,59 @@ function renderGame(game, fresh, st) {
     $("lsBest").textContent = lapTime(lap.best_s);
     $("lsBest").classList.toggle("best", !nul(lap.best_s));
   }
+  renderPosition((game && game.race) || {});
   gameEvents(game);
+}
+
+/* running position (pit beacon): big "P3" badge next to the lap panel, hidden at 0 */
+const posUi = { shown: null };
+function textOn(hex) {                       // black or white text on the kart colour
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+  if (!m) return "#000";
+  const [r, g, b] = m.slice(1).map((x) => parseInt(x, 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5 ? "#000" : "#fff";
+}
+function posChange(prev, pos) {              // mirrors kartcore race_position dir
+  return !prev ? "new" : !pos ? "gone" : pos < prev ? "up" : pos > prev ? "down" : "same";
+}
+/* ascending two-note when the position improves, descending when it drops. Kept here, not in
+   sound.js, because sound.js is shared byte-for-byte with the pit page. Respects mute/sound config. */
+function posSound(d) {
+  if (!Snd.enabled || Snd.muted) return;
+  const ctx = Snd.ensure();
+  if (!ctx || ctx.state !== "running") return;
+  try {
+    const t = ctx.currentTime + 0.01;
+    [[0, 0.11, 784], [0.12, 0.25, d === "up" ? 1175 : 523]].forEach(([dt, dur, f]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "square"; o.frequency.setValueAtTime(f, t + dt);
+      g.gain.setValueAtTime(0.0001, t + dt);
+      g.gain.exponentialRampToValueAtTime(0.18, t + dt + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dt + dur);
+      o.connect(g); g.connect(ctx.destination); o.start(t + dt); o.stop(t + dt + dur + 0.05);
+    });
+  } catch (e) { /* sound is a nicety */ }
+}
+function renderPosition(race) {
+  const badge = $("posBadge"), pos = Number(race.pos) || 0;
+  if (!pos) { show("posBadge", false); posUi.shown = 0; return; }
+  const color = (S.self && S.self.color) || "#3cb44b";
+  badge.style.setProperty("--kc", color);
+  badge.style.setProperty("--kfg", textOn(color));
+  const lp = $("lapPanel"), gc = $("gameChip");
+  const anchor = !lp.classList.contains("hidden") ? lp : !gc.classList.contains("hidden") ? gc : null;
+  badge.style.left = (anchor ? anchor.offsetLeft + anchor.offsetWidth + 10 : 8) + "px";
+  show("posBadge", true);
+  if (posUi.shown !== pos) {
+    const d = posChange(posUi.shown, pos);
+    $("posNum").textContent = String(pos);
+    if (posUi.shown !== null && posUi.shown !== 0 && (d === "up" || d === "down")) {   // not on page load
+      badge.classList.remove("pop", "up", "down"); void badge.offsetWidth;
+      badge.classList.add("pop", d);
+      posSound(d);
+    }
+    posUi.shown = pos;
+  }
 }
 
 let lastEvSeq = null;

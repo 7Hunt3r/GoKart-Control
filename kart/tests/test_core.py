@@ -965,5 +965,108 @@ class DemoPath(unittest.TestCase):
         self.assertEqual(p["points"], kc.parse_track(doc)["points"])
 
 
+class RacePosition(unittest.TestCase):
+    def test_self_fields_and_change_detection(self):
+        g = kc.GameEngine()
+        self.assertEqual(g.on_self(fix(0, 0, race_pos=0, race_state=0), 1.0, "w1"), [])     # nothing yet
+        r = g.on_self(fix(0, 0, race_pos=3, race_state=2), 2.0, "w2")
+        self.assertEqual([(x["ev"], x["pos"], x["prev"], x["dir"]) for x in r], [("race_position", 3, 0, "new")])
+        self.assertEqual(g.on_self(fix(0, 0, race_pos=3, race_state=2), 2.5, "w3"), [])     # unchanged: no event
+        r = g.on_self(fix(0, 0, race_pos=2, race_state=2), 3.0, "w4")
+        self.assertEqual(r[0]["dir"], "up")
+        r = g.on_race({"t": "race", "kart": 2, "event": "position", "position": 4, "state": 2}, 4.0, "w5")
+        self.assertEqual((r[0]["pos"], r[0]["dir"]), (4, "down"))
+        rs = g.snapshot(5.0)["race"]
+        self.assertEqual((rs["pos"], rs["state"], rs["state_name"], rs["pos_prev"], rs["pos_changed_wall"]),
+                         (4, 2, "running", 2, "w5"))
+        self.assertEqual(rs["pos_changed_age_s"], 1.0)
+        r = g.on_self(fix(0, 0, race_pos=0, race_state=0), 6.0, "w6")
+        self.assertEqual(r[0]["dir"], "gone")
+        self.assertEqual(g.snapshot(6.0)["race"]["state_name"], "idle")
+
+    def test_bad_values_ignored(self):
+        g = kc.GameEngine()
+        for bad in (9, -1, "3", None, 2.5e9):
+            self.assertEqual(g.race_position(bad, 7, 1.0), [], bad)
+        rs = g.snapshot(1.0)["race"]
+        self.assertEqual((rs["pos"], rs["state"]), (0, 0))
+        d = kc.KartDisplay(configured_id=2)
+        d.ingest(self_line(race_pos=3, race_state=2), 1.0, "w")
+        self.assertEqual(d.snapshot(1.0)["self"]["status"]["race_pos"], 3)
+
+    def test_finish_prefers_firmware_position_then_beacon(self):
+        g = kc.GameEngine()
+        g.on_self(fix(0, 0, race_pos=2, race_state=2), 1.0)
+        g.on_race({"t": "race", "event": "finish", "position": 1}, 2.0)
+        rs = g.snapshot(2.0)["race"]
+        self.assertEqual((rs["position"], rs["position_source"]), (1, "finish"))
+        g2 = kc.GameEngine()
+        g2.on_self(fix(0, 0, race_pos=3, race_state=2), 1.0)
+        g2.on_self(fix(0, 0, race_pos=0, race_state=3), 1.5)      # beacon may drop the position at the flag
+        g2.on_race({"t": "race", "event": "finish", "position": 0}, 2.0)
+        rs = g2.snapshot(2.0)["race"]
+        self.assertEqual((rs["position"], rs["position_source"]), (3, "beacon"))
+        g3 = kc.GameEngine()
+        g3.on_race({"t": "race", "event": "finish", "position": 0}, 2.0)
+        self.assertEqual(g3.snapshot(2.0)["race"]["position"], 0)
+
+    def test_js_change_direction_matches(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not installed")
+        cases = [[0, 3], [3, 2], [2, 4], [4, 0], [2, 2]]
+        prog = js_function("posChange") + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(c=>posChange(c[0],c[1]))));"
+        out = json.loads(subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20).stdout)
+        self.assertEqual(out, ["new", "up", "down", "gone", "same"])
+
+
+class SimRacePositions(unittest.TestCase):
+    def sim(self, **kw):
+        sim = sim_heltec.Sim(sim_heltec.sim_args(**kw))
+        lines = []
+        sim.out.append(lambda b: lines.append(json.loads(b)))
+        return sim, lines
+
+    def test_parse_sequence(self):
+        self.assertEqual(sim_heltec.parse_pos_seq("3, 2,2,1"), [3, 2, 2, 1])
+        self.assertEqual(sim_heltec.parse_pos_seq(""), [])
+        with self.assertRaises(ValueError):
+            sim_heltec.parse_pos_seq("3,9")
+
+    def test_steps_every_10_s_and_holds_the_last(self):
+        sim, lines = self.sim(race_pos="3,2,2,1")
+        t0 = sim.pos_t0
+        self.assertEqual([sim.position_at(t0 + x) for x in (0, 9.9, 10.1, 25, 31, 500)],
+                         [(3, 2), (3, 2), (2, 2), (2, 2), (1, 2), (1, 2)])
+        for x in (0, 10.1, 20.1, 30.1, 40):
+            sim.update_position(t0 + x)
+        ev = [(l["position"], l["state"]) for l in lines if l.get("event") == "position"]
+        self.assertEqual(ev, [(3, 2), (2, 2), (1, 2)])          # one line per change, not per step
+
+    def test_race_countdown_and_finish_states(self):
+        sim, lines = self.sim(race_pos="2,1", race_pos_step=5)
+        sim.handle_line("race 5")
+        go = sim.me.race_go
+        self.assertEqual(sim.position_at(go - 1), (2, 1))       # countdown: state 1, first position
+        sim.me.race_go = None
+        self.assertEqual(sim.position_at(go + 1), (2, 2))
+        self.assertEqual(sim.position_at(go + 6), (1, 2))
+        sim.handle_line("finish 1") if False else sim.command(0, 7, 101)
+        self.assertEqual(sim.position_at(go + 7), (1, 3))
+        self.assertEqual([l for l in lines if l.get("event") == "finish"][0]["position"], 1)
+
+    def test_demo_cycles_p3_p2_p1_over_the_laps(self):
+        sys.path.insert(0, os.path.join(KART, "server"))
+        import demo
+        self.assertEqual(demo.DEMO_POSITIONS, (3, 2, 1))
+        lap = demo.demo_lap_s(198.5)
+        self.assertAlmostEqual(lap, 198.5 / (15 * 0.44704), places=3)
+        sim, _ = self.sim(race_pos="3,2,1", race_pos_step=lap)
+        sim.handle_line("race 5")
+        go = sim.me.race_go
+        sim.me.race_go = None
+        self.assertEqual([sim.position_at(go + x * lap + 1)[0] for x in range(4)], [3, 2, 1, 1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
