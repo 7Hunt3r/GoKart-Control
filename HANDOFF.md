@@ -1,263 +1,220 @@
 # Collaborator handoff
 
-Updated November 5, 2026. Start with this file, then read the linked baseline
-report before implementing VESC commands.
+Updated 2026-11-06 (night), branch `eamon/firmware-lora-starter`. Read this, then
+[README.md](README.md) for the architecture and quick starts. Each component has its own
+README with full detail: [firmware](firmware/README.md), [pit](pit/README.md),
+[kart](kart/README.md), [tools](tools/README.md).
 
-## What we are building
+Labels used below: **owner decision** (recorded as decided), **proposal** (built or suggested,
+awaiting a decision), **verified** (seen on real hardware, with who/when), **simulated** (tests
+and headless renders on a Mac only).
 
-An eight-kart system at Manresa Island, CT. The Heltec owns each kart's VESC
-BLE connection, telemetry, GPS, LoRa and eventual supervisory profile logic.
-Each Pi 3 B only runs the touchscreen interface/map, connected to the Heltec
-through proposed USB serial. The Pi 4 pit server owns fleet/race state and the base-station radio;
-multiple password-authenticated browsers share control through that server.
-There are one to three development karts planned, including one each for the
-owner and Eamon. Do not assume all eight karts have identical configurations.
+## What it is
 
-The owner's latest instruction is explicit: **use the connected kart as the
-starting point, ahead of the original GitHub app.** Preserve existing behavior
-while establishing a trustworthy telemetry and configuration baseline.
+Eight electric karts at Manresa Island, CT. Each kart has a VESC 6.00 motor controller with
+wired throttle/reverse and mechanical brakes, a Heltec WiFi LoRa 32 V4.3 with a Quectel L76K GPS
+that owns the VESC link over BLE, and a Raspberry Pi 3 B with a 7-inch LESOWN L7 1024x600 touch
+panel that is display only. The pit has a Raspberry Pi 4 with a touch panel and a LilyGo T-Beam
+S3 Core as the LoRa modem; a second T-Beam can act as a one-hop repeater. On top runs an
+optional game layer (boost pads, mud, item boxes, laps, race start/finish, running positions,
+synthesized sounds).
 
-## What is completed
+One to three development karts are planned, including one each for the owner and Eamon. Do not
+assume all eight karts are configured identically. The owner's standing instruction: **the
+connected kart is the starting point, ahead of the original GitHub app.**
 
-- Repository scaffold, requirements, architecture and hardware inventory.
-- Eight owner hardware photos archived with hashes and an identification guide.
-  Display: LESOWN L7 family, 7-inch 1024×600 per manual, HDMI + USB touch.
-  Radio/GPS: Heltec HTIT-WB32LAF V4.3 with Quectel L76K and patch antenna.
-  Board pictured: Pi 3 Model B V1.2. These are identifications, not live tests.
-- USB read-only inspection of one controller on `/dev/cu.usbmodem3041` on this Mac.
-  That path is session-specific; do not hardcode it into application code.
-- Runtime configuration and a stationary telemetry sample captured and decoded.
-- Raw response payloads, capture manifest/hashes and schema provenance retained.
-- Read-only capture/offline decode tools, and tests against the real baseline.
+Hardware in hand (from the bench logs):
 
-No controller settings were written. No firmware update, reboot, motor test,
-CAN enumeration, terminal command or motor actuation was performed. Telemetry
-queries can reset the controller's averaging accumulators as part of ordinary
-GET_VALUES behavior, but do not change drive settings.
+| Unit | Board | State |
+| --- | --- | --- |
+| Kart 1 | Colin's Heltec, kart build flashed by Colin 2026-11-05 | Transmits with VESC linked; receives nothing (see Known issues) |
+| Kart 2 | Eamon's Heltec V4.3 (`gokart-2.local`, 192.168.151.44) + Pi 3 B `gokart-kart-2` | Running; GPS daughterboard dead |
+| Colin's VESC | the baseline controller (fw 6.00, `75_100_V2`, id 69) | Used for both kart 1 and kart 2 tests, one Heltec at a time |
+| Pit | Pi 4 `gokart-pit.local` (192.168.151.240 on McLab) + T-Beam S3 on `/dev/tbeam` | Running; rebooted several times 2026-11-06 |
+| Repeater | second T-Beam S3 | Running an older build; needs reflash |
 
-The application has not been built. BLE operation with a Heltec, LoRa coverage,
-GPS reception, touchscreen behavior and failure recovery remain untested.
+## Current state (2026-11-06)
 
-## Firmware starter (branch `eamon/firmware-lora-starter`, November 5, 2026)
+### Verified on hardware (all at 50 Day St, bench distances)
 
-Eamon's branch adds the first runnable firmware; see [firmware/README.md](firmware/README.md).
+- **VESC baseline** (2026-11-05, USB, read-only): firmware 6.00, hardware `75_100_V2`, controller
+  id 69; 189 motor and 187 app fields decoded with schema signatures verified; stationary sample
+  76.4 V, ESC 22.3 C, no fault. No settings written.
+- **Pit station** (2026-11-05): Pi 4 kiosk at the panel's 1024x600, pit server, T-Beam on
+  `/dev/tbeam`, card made with `pit/sdcard`.
+- **LoRa link** (2026-11-05): kart 2 received by the pit at 1 Hz, consecutive sequence numbers,
+  zero loss, RSSI -13 dBm / SNR 13.5 dB side by side; later at 2 Hz with 50 ms slots. Kart 2 also
+  hears kart 1 directly (kart-to-kart positions work).
+- **Commands** (2026-11-05, kart 2): `ping` applied in 1-2 s, `stop` -> `no_vesc` and `start` ->
+  `rejected` with no VESC attached (the honest answers).
+- **Kart 1 over BLE** (2026-11-05, Colin): kart build at 2 Hz with the VESC linked over BLE,
+  78.4 V, ESC 24 C, fault 0, received by the pit and kart 2.
+- **First remote STOP on a real VESC** (2026-11-05 17:40, Eamon's Heltec as kart 2 pinned to
+  Colin's controller by address + UUID, Colin's Heltec unplugged): each ramp step acknowledged and
+  read back (scale 0.5, 0.2, 0.0); START restored 1.0.
+- **OTA** (2026-11-05): kart 2 updated over WiFi (ArduinoOTA) into the BLE build.
+- **Repeater** (2026-11-06): relays 100 % of kart 2's packets and every beacon, zero drops; pit
+  drops the duplicate copies, loss stays 0 %; ping via the pit applied in 0.3 s with the repeater
+  on; heartbeat chip at 16:43 showed repeater id 1, -3 dBm, carrying kart 2, age ~1 s.
+- **Kart Pi 3 B** (2026-11-06 16:26): card from `kart/sdcard` booted, ~6 min to services up;
+  cage + Chromium on the 1024x600 HDMI panel; `/dev/heltec` link reading kart 2; shop map pulled
+  from the pit. HDMI audio: the vc4-hdmi PCM runs (IEC958, 48 kHz, 2 ch) while the page plays;
+  nobody has listened yet.
+- **Live chain bench** (2026-11-06, `tools/bench/e2e_bench.py`, kart 2): 16 checks pass (commit
+  cc5c406). The kart-display race check was corrected afterwards (8146fd3); no run of the
+  corrected check is recorded.
+- **Kart 2 GPS outdoors** (2026-11-05 evening): fix with 5-11 satellites, shown on the shop map.
 
-- `firmware/kart-heltec-v4`: Heltec V4.3 kart node. VESC link (wired UART by default,
-  BLE build available), 5 Hz telemetry poll, read-only GET_MCCONF reconciliation of
-  the live current scale, GPS with PPS-aligned LoRa slot, one 46-byte telemetry packet
-  per second, OLED status, USB JSON lines for the kart Pi, WiFi credentials in flash,
-  ArduinoOTA. Mode/stop/start are applied only on an explicit pit or USB command;
-  nothing is written on boot, reconnect or retransmit (reliability rule honored).
-  **Deviation flagged for owner review:** the default build has VESC writes enabled
-  (`ENABLE_VESC_WRITES=1`) because pit start/stop/mode is the feature Eamon is testing;
-  `docs/requirements.md` still says writes stay disabled until validated. A `0` build
-  answers every write `rejected`.
-- `firmware/base-tbeam-s3`: pit LoRa modem on the LilyGo T-Beam S3 Core, JSON over USB
-  per [SERIAL_PROTOCOL.md](firmware/base-tbeam-s3/SERIAL_PROTOCOL.md), "karts online"
-  OLED, ArduinoOTA.
-- `firmware/libraries/`: shared packet format and a self-contained VESC 6.00 UART layer
-  (the old Core2 sketch needed a hand-edited VescUart; this does not).
-- `pit/`: Pi 4 pit station. `pit/server` (Python stdlib + pyserial): T-Beam serial link
-  with reconnect, fleet state with explicit online/stale/offline and null-not-zero,
-  command delivery with retries and eight per-kart outcomes, JSONL session logs,
-  password-protected operator page plus a 1024x600 touch kiosk page (per-kart
-  ECO/NORMAL/SPORT/STOP/START, hold-to-fire STOP ALL, race entry filters and race
-  mode, local-meters map with optional georeferenced imagery). `pit/sim` fakes eight
-  karts over a pty so the whole loop runs on a laptop; 26 unit/end-to-end tests pass.
-  `pit/sdcard` is a cloud-init SD kit (hostname gokart-pit, kiosk via cage+Chromium,
-  udev `/dev/tbeam`, systemd units). Tested only on the Mac against the simulator;
-  nothing has run on a Pi yet. See [pit/README.md](pit/README.md).
+### Simulated only (tests + headless renders on the Mac)
 
-Verified: both sketches compile (esp32 core 3.3.8); temp-limit payload checked against
-bldc release_6_00; mcconf offsets computed from the pinned schema; the base firmware
-boots on Eamon's T-Beam S3 with PMU, SX1262 and GNSS detected and USB JSON flowing;
-the pit server drove it over USB and a command was transmitted over LoRa.
-Not verified: any received LoRa packet, GPS fix/PPS, the kart node on hardware.
+- Game layer end to end: zones editor, GAME ON/OFF, boost / mud / item / lap line / track, laps
+  and leaderboard on the pit, geofence engine and racing HUD on the kart. Real pit zones were
+  `enabled: false` at deploy; nobody has driven through a zone.
+- Race finish, STOP RACE, final results, race length, running positions carried in the beacon
+  (27-byte beacon, committed 20:33) and the kart "P3" badge (committed 20:45).
+- Kart GPS fusion (5 Hz `gps` line, hdop/sats gating, outlier rejection, 1.2 s dead reckoning),
+  pit GPS correction (off by default), demo mode (rendered headless against kart 2's server).
+- Pit reboot hardening (persistent Wi-Fi keyfiles + eth0 fallback, persistent journal, health
+  chip, check timer, page self-reload, `why_rebooted.sh`): committed and deployed to the live pit
+  2026-11-06 20:59 (1227ab4); not yet proven across a real power cut. See
+  [pit/README.md](pit/README.md) "If the pit reboots".
+- Pace car track recorder (record a kart's laps on the pit, use one as the track route):
+  committed + deployed 20:59 (1227ab4), simulator-tested, never driven.
+- Test counts at the last commits: pit 53 core + 6 e2e, kart 78 core + 9 mapsync + 5 e2e, VESC
+  tools 8 (`tools/run_tests.sh`, all passing 2026-11-06 with the working tree as it stood).
 
-Radio reconciliation with Colin's `firmware/heltec-bench-ota` (PR #2): this branch now
-uses the bench radio settings (915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8) and
-the T-Beam decodes the bench 47-byte `GK` frame alongside GoKartProtocol frames (byte 0
-distinguishes them), emitting it as a `tele` line with `"bench":true`. So Colin's
-installed transmitter and Eamon's receiver can be tested without reflashing the Heltec.
-Which frame becomes the fleet protocol is still an open decision for the integration PR. The proposed VESC transport is wired UART from the Heltec (the
-BLE module comes off the COMM port); `docs/architecture.md` still prefers BLE, so this
-is a second point to settle with the owner.
+### Open (not started or not yet tried)
 
-## Bench results, 2026-11-05 16:20 (Eamon, at 50 Day St)
+- SLOW, BOOST and the race grid hold against a live VESC; wheels-up throttle check under STOP.
+- Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
+- Touch, map redraw speed and demo mode by eye on the Pi 3 B panel.
+- Formal bench validation of link loss / reconnect (requirements acceptance checks) before
+  enabling profile writes; saved-flash VESC baseline; controller commercial model and ratings.
+- Drift-cutoff logging (see below).
 
-Verified on hardware today, all on branch `eamon/firmware-lora-starter`:
+## How to operate a session
 
-- **Pit station live:** Pi 4 `gokart-pit.local` with the touch kiosk at the panel's native
-  1024x600, pit server, T-Beam S3 on `/dev/tbeam`. October 2026 satellite imagery
-  (SkyFi, local-only) on the map with site presets for the shop and Manresa Island.
-- **First over-the-air link:** Eamon's Heltec V4.3 running `kart-heltec-v4` (kart id 2)
-  is received by the T-Beam at 1 Hz with consecutive sequence numbers and zero loss,
-  RSSI -13 dBm / SNR 13.5 dB side by side. GPS detected at 9600 baud (no fix indoors).
-- **Command loop:** from the pit UI, `ping` came back `applied` in about one second on
-  the first transmission; `stop` came back `no_vesc` and `start` `rejected`, the honest
-  answers with no VESC attached. Per-kart outcomes show on the kiosk.
-- **OTA:** the kart node took a WiFi firmware update (`gokart-2.local`, ArduinoOTA) and
-  rebooted into the BLE build. No cable needed for kart firmware from here on.
-- **Owner decision (Eamon, in person): BLE from the Heltec to the VESC on every kart.**
-  `./build.sh kart` now builds the BLE transport by default; `kart-uart` is the wired
-  alternative. The kart connects **only** to the VESC address pinned with `vescmac`;
-  unpinned it scans, reports candidates (`{"t":"ble",...}` over USB and on the OLED)
-  and never connects. With Colin's bench image holding its VESC's connection, the
-  scan sees no VESC at all, as expected (a connected BLE peripheral stops advertising).
+**Pit boot.** Power the Pi 4 with the official 5.1 V 3 A supply, T-Beam on USB, panel on HDMI0
+with its touch USB on "5V IN + TOUCH". The kiosk opens by itself (`gokart-pit` +
+`gokart-kiosk` services). Top bar: radio link, repeater chip (if one is out), GAME chip, SOUND
+chip, and a health chip only when something is wrong (UNDERVOLT, throttled, had undervolt). If
+the code changed since the last session, run `pit/deploy.sh` from the Mac first (last deployed
+2026-11-06 20:59, 1227ab4).
 
-Later the same evening (17:00-17:30):
-- Kart 2 got a GPS fix outside (5-11 satellites) and appeared on the shop map; the
-  SkyFi cut proved 25-40 m off at the shop (registration extrapolated from the island),
-  so the bench preset uses the state ortho there. The dot still looked off to Eamon;
-  the kart's reading is 27 m east of the geocoded "50 Day St" point and both fall on
-  the Harborside block, so the address point itself may be the wrong building. A phone
-  reading at the Heltec's spot would settle it.
-- Pit beacon (1 Hz), beacon-sync for karts without PPS, 2 Hz reporting with 50 ms
-  slots, VESC UUID pin, loss counter and dead reckoning on the kiosk, and a phone page
-  at `/m` are in and deployed. A base build that queued commands for the tail window
-  delayed them by up to 20 s; commands now go out immediately unless the base has PPS.
-  One base build (queue dedupe + a different window expression) stopped receiving
-  entirely and was reverted; cause not yet understood.
-- Full command loop verified on kart 2 with the fixed base: ping applied in 2 s, stop
-  -> no_vesc in 1 s, start -> rejected (no VESC attached). Kart 2 also receives kart 1's
-  packets directly (kart-to-kart positions will work).
-- **Colin flashed his Heltec with the kart build:** kart 1 transmits at 2 Hz with the
-  VESC link up over BLE (78.4 V, ESC 24 C, fault 0) and is received by both the pit and
-  kart 2, but it receives nothing itself: no beacon, no commands. Same firmware as kart 2,
-  so suspect the board (antenna, front-end variant V4.2 vs V4.3, or an older build).
-  Needs its console `status` (lora_rx, lora_rx_bad, built) or a bench swap of boards.
+**Kart boot.** Power the kart Pi and the Heltec (a separate regulated 5 V for the Heltec is the
+target, not the VESC 3.3 V pin). The Heltec connects only to its pinned VESC; its OLED and the
+driver page show the link. The driver page's PIT chip shows how well the kart hears the pit
+(`base_rssi`; NO PIT at 0). Maps and zones arrive whenever the kart Pi reaches the pit over Wi-Fi
+and survive reboots on the track. In the pit, `ping` each kart once.
 
-**17:40, first verified remote STOP on a real VESC.** Eamon's Heltec (kart 2) was pinned to
-Colin's controller (address + UUID check) with Colin's own Heltec unplugged. Root cause of
-the earlier silent writes: the VESC BLE UART module negotiates MTU 23, so the 42-byte
-temp-config write has to be sent in 20-byte chunks. Each ramp step was then acknowledged
-and read back (scale 0.5, 0.2, 0.0); START restored 1.0. Writes now echo the limits read
-from that specific controller at link-up, never capture constants.
+**Start a race.** Zones drawn and saved on the operator page (ZONES), GAME ON. In the race panel
+(operator page, kiosk RACE tab, or phone): choose 3 / 5 / 10 s and the laps (OPEN, 3, 5, 10), then
+hold START RACE 1 s. Every kart holds at zero current (GRID) and gets GO at the same GPS-clock
+instant; pages show the five-light countdown.
 
-**SLOW** (cap speed to N mph via the ERPM limit, using the controller's own poles/gear/wheel)
-was added for the pit, kiosk and phone page. **Regen on STOP**: the Heltec now also sends a
-brake request to an on-VESC LispBM script, `firmware/vesc-lisp/gokart_brake.lisp`; without
-the script, or with Motor Current Max Brake = 0 (this fleet's baseline), it is a no-op and the
-kart coasts. Loading the script and enabling brake current are per-kart VESC Tool steps and an
-owner decision; see `firmware/vesc-lisp/README.md`.
+**Stop a race.** Hold STOP RACE 1 s: laps freeze, karts are placed and shown FINISH, final
+results appear; NEW RACE clears them. STOP RACE does not stop karts. To stop karts use STOP per
+kart or the hold-to-fire STOP ALL; START releases. GAME OFF is the race director's kill for zone
+effects.
 
-Not yet: wheels-up throttle check during STOP (next), the brake script on any kart, a range
-test, PPS at the base (indoors), alignment field check, kart 1's receive problem.
+**Demo mode.** Kart display: hold the KART badge 3 s (config `demo: true`, the default). A
+simulated kart drives the pit's track or zones on the real panel for up to 180 s; nothing is
+written to the real Heltec. Hold again to end. Pit side: run the simulators on a laptop
+(README quick start).
 
-**For Colin, to run the command-capable build on his kart (his decision):** a prebuilt
-image and the console steps are in [firmware/releases/README.md](firmware/releases/README.md); or build it:
+**When something breaks.**
 
-```sh
-cd firmware && ./build.sh kart upload /dev/cu.usbmodemXXXX   # BLE build
-# on the board's USB console:
-id 1
-vescmac <address>      # the address your bench image logs as ble_candidate address=...
-```
+| Symptom | Do this |
+| --- | --- |
+| Pit page frozen or blank | Pages reload themselves when the server restarts or their event stream dies for 20 s; else `ssh pit@gokart-pit.local sudo systemctl restart gokart-pit gokart-kiosk`. A JS error once killed every page (duplicate `gc`, fixed in 5ee4b76): check the browser console |
+| Pit rebooted / no Wi-Fi | `sudo /opt/gokart-pit/tools/why_rebooted.sh` (add `-2` for the boot before); an UNDERVOLT / "had undervolt" chip means supply or cable. Wi-Fi by hand: pit/README.md "If the pit reboots" |
+| Kart missing on the pit | Kart console `status`: `lora_rx`, `lora_rx_bad`, `sync`, `built`. Repeater LOST: check it is powered and reflashed |
+| Kart not hearing the pit | Same `status`; compare firmware build with kart 2's; swap boards to isolate (kart 1 case) |
+| No VESC link | `blescan`; a VESC connected to anything else (VESC Tool, another Heltec, Colin's bench image) does not advertise. `vescmac` must match |
+| No GPS | `gpspin` (edges on RX and PPS), `gpsdump`, `gpstest 9600`, `gpsrecover`, `gpscold`. Indoor fixes are ~200 m off and frozen: test outside |
+| Command `no_ack` | Kart offline or out of range; outcome unknown, nothing is replayed. Re-send by hand |
+| OTA cannot find `gokart-N.local` | `espota.py -i <ip> -p 3232` (arduino-cli mDNS discovery fails; espota by IP works) |
+| T-Beam will not take an upload | Still on Meshtastic: 1200-baud touch (firmware/README.md "Repeater"). Base re-flash from the Pi: `esptool --no-stub`, app only at 0x10000 |
+| SD card flash stops at the boot partition | flash.sh now waits 5 min; both real cards needed a manual copy before that fix |
+| No sound | Pit: tap once (TAP FOR SOUND, no autoplay flag). Kart: `GET /api/sound-test?alsa=1` from the Pi |
+| Shop map dot looks off | Expected 25-40 m with SkyFi at the shop (use the CT ECO preset); also see History 2026-11-05 |
 
-Close the bench image's connection first (or power its board off) so the VESC
-advertises again. First test with the drive wheels off the ground. Rollback is your
-`pio run -t upload`. Open integration item: your image verifies the VESC UUID from
-FW_VERSION; mine pins the BLE address instead. Both is best; worth adding to mine.
+## Known issues
 
-## Bench test with Colin, 2026-11-05 evening: link first, then kill switch (proposal to Colin)
+1. **Kart 2 GPS board dead** (2026-11-06): the L76K daughterboard no longer drives its TX line
+   (0 edges after a 5 s cold power-off; PPS still ticking). Hardware: replace the GNSS board. Most
+   likely damaged by the earlier swapped-pin search driving the module's TX; the firmware now never
+   swaps UART pins (6c3bf58).
+2. **Repeater needs a reflash** after the beacon change (cfa4796): its build predates the 27-byte
+   beacon, so its `gkValidate` rejects the new beacons and it will not relay them (nor send its
+   heartbeat, which rides behind the beacon copy). `./build.sh repeater upload ...`.
+3. **Pit reboot cause unknown.** On 2026-11-06 the pit Pi rebooted several times, came back with no
+   Wi-Fi profile, and the logs were gone (volatile journal; netplan-backed profiles left as 0-byte
+   files; the Wi-Fi loss was at 18:10). Wi-Fi and log loss are fixed by 1227ab4 (deployed); the
+   reboot itself is not explained. Next occurrence: `why_rebooted.sh`, check for under-voltage.
+4. **Kart 1 receives nothing** (Colin's board, 2026-11-05): transmits fine, but hears no beacon and
+   no commands. Same firmware as kart 2, so suspect the board (antenna, V4.2 vs V4.3 front end, or
+   an older build). Needs its console `status` (`lora_rx`, `lora_rx_bad`, `built`) or a board swap.
+   It also must be rebuilt from this branch (decision 2 below).
+5. **Nothing has been driven through a real zone yet.** All game evidence is simulated.
+6. **Boost and race have not run on a live VESC.** First test: one boost pad on a straight, kart in
+   ECO, wheels up, confirm the scale read-back rises and drops after 5 s; then a race with one kart.
+7. The 27-byte beacon base build and the kart P-badge firmware are committed but their flashing is
+   not recorded (the pit server sends race positions to the base since 1227ab4).
+8. One base build (queue dedupe + a different window expression) stopped receiving entirely on
+   2026-11-05 and was reverted; cause not understood.
+9. `base_rssi` 0 means "not heard", but side by side the true RSSI is 0 to -1 dBm, so the pit can
+   show 0 on the bench. Outdoors it reads normally.
 
-The pit side is running: Pi 4 (`gokart-pit.local`, 192.168.151.240 on McLab) with the
-touch kiosk, the pit server and the T-Beam S3 modem on `/dev/tbeam`, listening on the
-bench radio settings (915.0 MHz, BW500, SF7, CR4/5, sync 0x12). It decodes your
-47-byte `GK` frame as well as the GoKartProtocol frame.
+## Decisions for Colin
 
-**Step 1, no decision needed: prove reception.** On your Heltec's USB console:
+1. **Regen on STOP** (proposal). STOP currently ramps the current scale to zero and the kart
+   coasts. The Heltec also sends a brake request to an on-VESC LispBM script
+   (`firmware/vesc-lisp/gokart_brake.lisp`), which is a no-op unless the script is loaded and Motor
+   Current Max Brake is above 0 (this fleet's baseline is 0 A). Loading the script and enabling
+   brake current are per-kart VESC Tool steps and an owner decision; see
+   [firmware/vesc-lisp/README.md](firmware/vesc-lisp/README.md).
+2. **Rebuild kart 1 from this branch** (request). Its build predates the relay bit, the 47-byte
+   telemetry, `slow_mph`, BOOST, RACE and the 27-byte beacon. Prebuilt image and console steps:
+   [firmware/releases/README.md](firmware/releases/README.md) (that image is 0.1.0 and also
+   predates them: build from source with `./build.sh kart`). Rollback: `pio run -t upload` from
+   your branch.
+3. **BLE binding: one Heltec per VESC** (owner decision 2026-11-05, recorded by Eamon in person:
+   BLE on every kart). The Heltec connects only to the address pinned with `vescmac`, optionally
+   also checking the UUID (`vescuuid`); unpinned it scans and never connects. A VESC connected to
+   one Heltec does not advertise to another, so a spare board cannot silently grab a kart. Your
+   bench image checks the UUID from FW_VERSION; this branch now pins both. Confirm this is the
+   fleet rule and how pins are recorded per kart.
+4. **VESC writes enabled by default** (deviation flagged for owner review). `ENABLE_VESC_WRITES=1`
+   because pit STOP/START/mode is the feature under test; `docs/requirements.md` still says
+   profile writes stay disabled until link-loss behaviour is validated. A `0` build answers every
+   write `rejected`.
+5. **Fleet frame** (open): the base decodes both your 47-byte `GK` bench frame and the
+   GoKartProtocol frame; which becomes the fleet protocol is for the integration PR. Your
+   `integration/command-config` branch last merged this branch at d98c41d (2026-11-05 16:58);
+   everything since is only here.
+6. **Game layer** (proposal): ECO/NORMAL karts get up to SPORT torque on a 1.0 boost pad. Whether
+   the game is wanted, and the pad scale, are owner calls.
 
-```
-id 1
-tx on antenna-confirmed
-```
+## Doc drift to reconcile
 
-Kart 1 should appear on the pit screen within two seconds with your VESC voltage,
-GPS state and RSSI/SNR. The pit logs every line to `pit/logs/session-*.jsonl` on the
-Pi, so we get a loss count from your sequence numbers.
+These were found during the 2026-11-06 hygiene pass and are outside this file:
 
-**Step 2, your decision: remote stop needs command-capable firmware on the kart.**
-`firmware/heltec` (your bench image) cannot receive commands and has no VESC write
-path, by design. The only way to stop/start/change mode from the pit is to run
-`firmware/kart-heltec-v4` on the kart's Heltec, in its BLE variant, which uses the
-same VESC BLE UART module your image uses. What it does, precisely:
-
-- Writes to the VESC only on an explicit pit or USB command (`stop`, `start`,
-  `mode N`). Never on boot, reconnect, link loss or retransmit (your reliability rule).
-- `stop` = COMM_SET_MCCONF_TEMP with `store=0`, ramping `l_current_max_scale`
-  0.6, 0.3, 0.1, 0 over about 1.5 s; the baseline ERPM/duty/watt limits are echoed back
-  unchanged and battery current limits are not sent. Mechanical brakes and the
-  hardwired throttle are untouched; the kart coasts. `start` re-applies the requested
-  mode or the scale observed before the stop. A VESC power cycle returns to saved config.
-- After every write it asks for an ack and re-reads GET_MCCONF, and reports
-  `applied` only if the live scale matches; otherwise `unknown`.
-- Identity: connects only when exactly one `VESC BLE UART` is in range, or to a pinned
-  address (`vescmac AA:BB:CC:DD:EE:FF` on the console). It does not check the UUID
-  the way your image does; that is a gap worth closing in the integration.
-- It has never run on hardware. Your image is backed up and rebuilds from your branch,
-  so this is reversible in a minute.
-
-Suggested first test: kart on a stand or drive wheels off the ground, one person at
-the kart, the other at the pit screen. Press STOP on Kart 1; expect `accepted` then
-`applied` and the STOPPED badge. Press START; expect the same. Then try a throttle
-blip with the wheels in the air under STOP (no torque expected) and after START.
-
-**How to flash it** (either works):
-
-- From Eamon's Mac: plug the Heltec in and run `cd firmware && ./build.sh kart-ble upload /dev/cu.usbmodemXXXX`,
-  then on its console `id 1` (and `wifi <ssid> <pw>` + `reboot` if you want OTA later).
-- From your Mac, with arduino-cli: see "Build on a new machine" in [firmware/README.md](firmware/README.md).
-
-Going back: `pio run -d firmware/heltec -t upload` from your branch, as documented in your README.
-
-## 2026-11-06 afternoon (Eamon, 50 Day St): repeater, SLOW in telemetry, kart display kit
-
-- **LoRa repeater built and running** on the second T-Beam S3 Core (`firmware/repeater-tbeam-s3`,
-  see firmware/README.md "Repeater"). Bench: hears kart 2 and the pit beacon, relays 100 % with
-  zero drops. Pit counts the copies (`relay_dupes`) and drops them; loss stays 0 %; ping via the
-  pit applied in 0.3 s with the repeater on. Range and a real dead-zone test are still to do.
-  Protocol change: header version byte bit 0x80 marks a relayed packet; every receiver now
-  masks it (`gkValidate`). **Colin: rebuild kart 1 from this branch** or it will not understand
-  the 47-byte telemetry/relay bit (old 46-byte packets are still accepted by the pit).
-- **SLOW is now in telemetry** (`slow_mph`, 0 = off) so the pit shows a `SLOW n MPH` badge and the
-  kart display no longer has to infer it from command replies. Not exercised against a live VESC
-  today (Colin's VESC was off: `vesc_link false`).
-- **Kart Pi 3 B display kit** under `kart/` (server on :8081, driver page with map from the pit,
-  SD card kit, simulator, 29 tests). **First boot on the real Pi 3 B worked 2026-11-06 16:26**
-  (card flashed from `kart/sdcard`, ~6 min to services up): cage + Chromium on the 1024x600 HDMI
-  panel, `/dev/heltec` link up reading kart 2, shop map pulled from the pit into the cache.
-  Driver-page rendering, touch and map speed on the Pi 3 B still need eyes-on checks.
-  Open points from the build: Pi 3 B is 2.4 GHz only (does McLab offer 2.4 GHz?), Heltec power
-  from the Pi's USB vs separate, pre-loading a map before first pit contact.
-- Repeater OLED quirk: on the second T-Beam the QMC6310 compass answers at 0x3C and the screen is at
-  0x3D; the repeater now reads register 0 of 0x3C (0x80 = compass) and picks the address itself.
-- Boards: base re-flashed from the Pi (`esptool --no-stub`, app only at 0x10000), kart 2 by
-  `espota.py -i 192.168.151.44 -p 3232` (arduino-cli's mDNS discovery of gokart-2.local fails;
-  espota by IP works).
-
-## 2026-11-06 evening: game layer ("Mario Kart"), GPS upgrades, repeater heartbeat
-
-- **Game layer is in, off by default.** Contract: pit/server/map/ZONES.md. Pit: ZONES editor on the
-  operator page (boost pad, mud, lap line), GAME ON/OFF on every page, BOOST per kart / BOOST ALL,
-  laps + leaderboard from telemetry. Kart Pi: zones arrive with the map package, geofence engine
-  runs on the kart's own 5 Hz GPS, sends `boost SECS SCALE` to the Heltec, racing HUD (speedo,
-  gear, boost meter, laps, flash + sound). Firmware: GK_CMD_BOOST timed scale override, auto-revert,
-  STOP/START cancel, never above 1.0. 36+48 unit tests, 3+3 e2e. **Not yet driven**: no zones drawn,
-  boost never run against a live VESC. First test: draw one boost pad on a straight, kart in ECO,
-  wheels-up, confirm the scale read-back rises and drops after 5 s.
-- **GPS**: L76K now GPS+BDS+GLONASS, GGA+RMC only, 5 Hz at 115200 (configured after every
-  (re)detect); `{"t":"gps"}` USB line per fix; self line adds hdop/fix_age_ms/gps_hz and the pit
-  radio's fix (`base_lat/lon`). Kart Pi gates on hdop/sats, rejects jumps, holds heading below
-  1.5 m/s, dead-reckons 1.2 s. Pit: measured position-domain correction (pit radio fix vs the
-  surveyed `pit` marker) shown as a chip, applied only when tapped on and under 25 m with >= 6 sats.
-  Indoor bench fixes are 200 m off and frozen; that is the building, not the map (OSM puts
-  50 Day St within 30 m of the marker).
-- **Repeater heartbeat** (GK_MSG_REPEATER_INFO every 5 s behind the beacon copy): pit shows a
-  repeater chip with RSSI, battery and which karts it carries; LOST after 20 s. Repeater OLED needed
-  address detection (compass at 0x3C on the second T-Beam, screen at 0x3D).
-- Bench note: `base_rssi` 0 in telemetry means "not heard" but side by side the real RSSI is 0 to
-  -1 dBm, so the pit may show 0 on the bench; outdoors it reads normally.
+- `docs/requirements.md` and `AGENTS.md` still list remote stop and geofence enforcement as
+  deferred and profile writes as disabled; this branch implements remote STOP, SLOW, BOOST, RACE
+  and game zones (zones are not enforcement). Owner decision needed before the docs change.
+- `firmware/README.md`: header says "not yet run on hardware"; protocol paragraph says 46-byte
+  packets at 1 Hz in 100 ms slots (now 47 bytes, 2 Hz, 50 ms slots, 27-byte beacon); STOP ramp
+  listed as 0.6/0.3/0.1/0 over 1.5 s (code: 0.5/0.2/0.0 at 150 ms steps); "Not verified" list is
+  stale; the table omits the repeater.
+- Kart `help` text omits `gpscold`, `gpspin` and `gpsline`.
+- `pit/README.md` status table and "Kiosk approach" still say the T-Beam link, first boot and
+  kiosk are untested on hardware; `pit/sdcard/README.md` says the kit has not been booted.
+- `kart/README.md` status table says first boot, `/dev/heltec` and the kiosk are untested on a
+  Pi 3 B (verified 2026-11-06 16:26); its SLOW bullet still describes inference only.
+- `tools/bench/e2e_bench.py` promises no write to a kart with a linked VESC without
+  `--allow-writes`, but its race check always sends `race 3` (a 3 s grid hold at scale 0).
+- `config/project.json` status is still `hardware_baseline_captured_application_not_implemented`.
 
 ## The connected kart: findings that matter
 
@@ -275,89 +232,140 @@ See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.
 | CAN multi-ESC enabled; controller ID 69 | Configuration does not prove a second controller is physically present. |
 | 14 poles, ratio ~2.76923, wheel diameter 0.406 m | Configured values only; physically verify before using for MPH limits. |
 
-GET_MCCONF/GET_APPCONF capture current runtime settings. The saved flash
-configuration has not been independently established. The current runtime scale
-is 1.0, but that alone does not prove there are no temporary overrides elsewhere.
+GET_MCCONF/GET_APPCONF capture current runtime settings. The saved flash configuration has not
+been independently established. The runtime scale was 1.0, but that alone does not prove there
+are no temporary overrides elsewhere. Telemetry queries can reset the controller's averaging
+accumulators as part of ordinary GET_VALUES behaviour, but do not change drive settings.
 
-## Agreed behavior
+## Agreed behaviour (owner decisions)
 
 - The owner approved the [initial telemetry fields](docs/requirements.md#agreed-telemetry-fields):
-  kart identity/time, separate wheel/GPS speed, battery voltage/current, motor
-  current, ESC temperature, faults, GPS position/quality and connection status.
-  Motor temperature remains unavailable. Proposed units and validity conventions
-  are documented there; schema, update rates and stale thresholds remain open.
-- The Heltec owns the BLE VESC link and kart supervisory logic; the Pi is display
-  only. USB VESC access remains available for inspection. This supersedes the
-  earlier Pi-owned VESC architecture. See [architecture](docs/architecture.md).
+  kart identity/time, separate wheel/GPS speed, battery voltage/current, motor current, ESC
+  temperature, faults, GPS position/quality and connection status. Motor temperature remains
+  unavailable. Schema, update rates and stale thresholds were left open (this branch uses 2 Hz
+  radio, online <= 5 s, stale <= 15 s: proposals).
+- The Heltec owns the VESC link and kart supervisory logic; the Pi is display only. USB VESC
+  access remains available for inspection. See [architecture](docs/architecture.md).
 - Preserve hardwired driver inputs and mechanical brakes.
-- Keep three profile names. Desired eventual behavior is top-speed limits with
-  strong acceleration, but do not replace current limits based on historical code.
+- Keep three profile names (ECO / NORMAL / SPORT). Desired eventual behaviour is top-speed limits
+  with strong acceleration; do not replace current limits based on historical code.
 - Losing the pit radio link should not stop the kart.
-- **Reliability first:** loss of display, Heltec, BLE, GPS or pit communication
-  must leave the ESC running its installed firmware and current active settings.
-  This supersedes the earlier saved-configuration restore requirement. Do not
-  change profiles, reset, stop or write settings because a link drops or returns.
-  Reconnect read-only, reconcile actual state, and never replay cached commands.
-  Hardwired inputs and normal ESC protections remain authoritative; bench
-  verification is still required. See [acceptance checks](docs/requirements.md#reliability-and-link-loss-behavior).
+- **Reliability first:** loss of display, Heltec, BLE, GPS or pit communication must leave the ESC
+  running its installed firmware and current active settings. This supersedes the earlier
+  saved-configuration restore requirement. Do not change profiles, reset, stop or write settings
+  because a link drops or returns. Reconnect read-only, reconcile actual state, never replay cached
+  commands. Hardwired inputs and normal ESC protections remain authoritative; bench verification
+  is still required. See [acceptance checks](docs/requirements.md#reliability-and-link-loss-behavior).
 - Drivers see their own and other kart positions, with online and race-entry filters.
 - MPH. Beginner mode hides driver-facing fault alerts, while pit/logging retains them.
-- Driver messages, gradual remote stop and geofence enforcement are deferred.
-- A future geofence should operate locally without a pit link. The current
-  Heltec/BLE architecture cannot guarantee enforcement after Heltec/BLE failure.
-
-## Next work, in order
-
-1. Identify the controller's commercial model, motor/battery/BMS ratings and BLE
-   module. Check whether all development karts match. Display/GPS photos are now
-   available in [the hardware evidence folder](hardware/photos/2026-11-05/README.md);
-   connect display USB to 5V IN + TOUCH, not the neighboring power-only port.
-2. Establish the saved-config baseline without overwriting settings or disrupting
-   driving; coordinate a controlled inspection with the owner. Do not power-cycle
-   or change firmware merely to fill a documentation gap.
-3. Run a read-only Heltec BLE telemetry spike against this kart. Confirm intended
-   device selection, packet fragmentation and reconnect. Measure latency while
-   GPS, LoRa and USB display traffic run concurrently; verify display loss does
-   not block VESC servicing. Validate independent Heltec power/reset behavior.
-4. Build an explicitly labeled eight-kart simulator and responsive kart/pit views.
-   Test filtering, stale/no-fix states, shared browser state and command outcomes.
-5. Implement the Heltec serial contract and a two-radio bench link, then load-test
-   eight-kart traffic before choosing field update rates.
-6. Bench-verify brief/sustained accessory and link failures plus reconnect:
-   no state-changing commands, unchanged active settings and uninterrupted
-   hardwired input response with normal protections. Validate this before
-   enabling profile writes. Treat actual ESC reboot/persistence separately.
-7. Investigate drift cutoff with logs, then propose any tuning as a separate change.
-
-The [requirements](docs/requirements.md) contain broader acceptance criteria.
+- Driver messages, gradual remote stop and geofence enforcement were deferred (see Doc drift and
+  decision 4). A future geofence should work locally without a pit link; the Heltec/BLE design
+  cannot guarantee enforcement after a Heltec/BLE failure.
+- BLE from the Heltec to the VESC on every kart (2026-11-05, see decision 3).
 
 ## Drift cutoff: what is known vs unknown
 
-The owner reports torque cutting out during sustained drifting. We have only
-one stationary sample, with no active fault. That does not rule out transient
-faults, current/voltage limiting or thermal issues during driving.
+The owner reports torque cutting out during sustained drifting. We have one stationary sample
+with no active fault, which does not rule out transient faults, current/voltage limiting or
+thermal issues while driving. Log motor/battery current, pack voltage, ERPM, duty, ESC
+temperature, throttle where available, fault state and requested/applied profile together. Read
+BMS status only if a BMS is actually connected. Drift wheel speed and GPS ground speed differ; a
+wheel-RPM limiter can cut propulsion during a drift at modest ground speed. Do not conclude that
+higher current or fault thresholds are the fix without an event log and verified ratings.
 
-Log motor/battery current, pack voltage, ERPM, duty, ESC temperature, throttle
-where available, fault state and requested/applied profile together. Motor
-temperature is unavailable on these motors. Read existing BMS status if a BMS
-is actually connected; its configuration entry alone does not prove one is.
+## Earlier next-work list (2026-11-05, still valid where not done)
 
-Drift wheel speed and GPS ground speed differ. A wheel-RPM limiter can reduce
-propulsion during a drift even at modest ground speed. Do not conclude that
-higher battery current, motor current or fault thresholds are the fix without
-an event log and verified component ratings.
+1. Identify the controller's commercial model, motor/battery/BMS ratings and BLE module; check
+   whether all development karts match. Display USB goes to "5V IN + TOUCH", not the power-only port.
+2. Establish the saved-config baseline without overwriting settings; do not power-cycle or change
+   firmware merely to fill a documentation gap.
+3. Heltec BLE telemetry spike: device selection, fragmentation and reconnect done on the bench;
+   latency under concurrent GPS/LoRa/USB load and independent Heltec power/reset still to measure.
+4. Eight-kart simulator and kart/pit views: done (simulated).
+5. Heltec serial contract and two-radio bench link: done; eight-kart load test still to do.
+6. Bench-verify accessory/link failures and reconnect (no state change, unchanged active settings,
+   hardwired input response) before enabling profile writes.
+7. Investigate drift cutoff with logs, then propose any tuning as a separate change.
+
+## History
+
+Condensed from the dated sections this file accumulated. Times are local (ET).
+
+**2026-11-05**
+- Repository scaffold, requirements, architecture, hardware inventory (Colin). Eight owner photos
+  archived: LESOWN L7 7" 1024x600, Heltec HTIT-WB32LAF V4.3 with L76K, Pi 3 Model B V1.2.
+- USB read-only VESC capture on `/dev/cu.usbmodem3041` (session-specific; never hardcode it).
+  No writes, firmware update, reboot, motor test, CAN enumeration or terminal command.
+- Eamon's firmware starter: kart node, base, shared libraries, pit station (26 tests). Both
+  sketches compile (esp32 core 3.3.8); temp-limit payload checked against bldc `release_6_00`;
+  mcconf offsets from the pinned schema. Base boots on the T-Beam S3 (PMU, SX1262, GNSS
+  detected); the T-Beam shipped with Meshtastic and needed a 1200-baud touch for the first flash.
+- Radio aligned to Colin's bench transmitter (915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8);
+  the base also decodes his 47-byte `GK` frame (`"bench": true`).
+- 16:20 bench: pit live (kiosk 1024x600, SkyFi imagery local-only, site presets); kart 2 received
+  at 1 Hz with zero loss, -13 dBm / 13.5 dB; GPS detected at 9600 (no fix indoors); ping applied in
+  ~1 s; OTA into the BLE build. **Owner decision: BLE on every kart**; pinned-address-only
+  connection (`./build.sh kart` builds BLE; `kart-uart` remains as the wired alternative, which
+  was the earlier proposal). Colin's bench image held its VESC so the scan saw none, as expected.
+- Bench plan proposed to Colin: prove reception first with his bench image (`id 1`,
+  `tx on antenna-confirmed`), then run the command-capable kart build wheels-up. He flashed the
+  kart build the same evening.
+- 17:00-17:30: kart 2 fix outside (5-11 sats). SkyFi cut 25-40 m off at the shop (registration
+  extrapolated from the island), bench preset uses the state ortho; the kart reading is 27 m east of
+  the geocoded "50 Day St" point, both on the Harborside block, so the address point may be the
+  wrong building (a phone reading at the Heltec's spot would settle it). Pit beacon (1 Hz),
+  beacon sync, 2 Hz reporting with 50 ms slots, VESC UUID pin, loss counter, dead reckoning, phone
+  page `/m`. A base build that queued commands for the tail window delayed them up to 20 s;
+  commands now go out immediately unless the base has PPS. Ping applied in 2 s, stop -> no_vesc
+  in 1 s, start -> rejected. Colin's kart 1 at 2 Hz with VESC over BLE (78.4 V, 24 C, fault 0),
+  received by pit and kart 2, receives nothing itself.
+- 17:40: first remote STOP on a real VESC. Root cause of earlier silent writes: the VESC BLE UART
+  module negotiates MTU 23, so the 42-byte temp-config write is sent in 20-byte chunks. Writes echo
+  the limits read from that controller at link-up, never capture constants. SLOW (ERPM cap from
+  the controller's own poles/gear/wheel) and the regen brake request added.
+- Colin's branches the same afternoon: `firmware/heltec-bench-ota` (bench BLE telemetry, LoRa TX,
+  GPS, authenticated OTA), `diagnostics/removable-bench-control` (direct BLE motor-test evidence),
+  `integration/command-config` (integrates this stack up to d98c41d, OLED status, gated writes).
+
+**2026-11-06**
+- Afternoon: repeater built (relay bit 0x80, one hop, 25 ms delay inside the slot); 100 % relayed,
+  0 drops, ping 0.3 s. `slow_mph` in telemetry (47-byte packet; 46-byte still accepted); not
+  exercised on a live VESC (Colin's VESC was off, `vesc_link false`). Base re-flashed from the Pi
+  (`esptool --no-stub`, app at 0x10000); kart 2 by `espota.py -i 192.168.151.44 -p 3232`.
+- 16:26: kart Pi 3 B first boot (see Verified). Open points: Pi 3 B Wi-Fi is 2.4 GHz only (does
+  McLab offer 2.4 GHz?), Heltec power from the Pi's USB vs separate, pre-loading a map before the
+  first pit contact.
+- Repeater OLED: on the second T-Beam the QMC6310 compass answers at 0x3C (register 0 reads 0x80)
+  and the screen sits at 0x3D; the repeater now picks the address itself.
+- 16:43: repeater heartbeat (GK_MSG_REPEATER_INFO every 5 s); pit chip, LOST after 20 s.
+- 16:53-17:22: game layer (boost override in firmware, zones contract, pit editor + laps, kart
+  geofence + HUD; built partly by subagents), GPS upgrades (GPS+BDS+GLONASS, GGA+RMC, 5 Hz, `gps`
+  USB line, hdop/fix_age/base fix on the self line), pit GPS correction (gated >= 6 sats, < 25 m).
+  Indoor bench fixes were 200 m off and frozen: the building, not the map (OSM puts 50 Day St
+  within 30 m of the marker).
+- 17:31: duplicate `gc` declaration in the pit's `updateTop` was a SyntaxError that killed every
+  pit page; fixed.
+- 17:33-17:54: shop demo track in the lot south of 50 Day St; race start (grid hold +
+  synchronized GO on the shared clock), item boxes, track route; base keeps `issued_utc` on
+  retransmits so late receivers launch on the same GO; kart remembers the GPS baud and hard-resets
+  the L76K when no baud locks for 48 s. Live bench tool: 16 checks pass.
+- 18:19: GPS settled at 9600 baud at 5 Hz (the earlier 115200 setting is superseded), pins never
+  swapped, console diagnostics; kart 2's L76K found dead (Known issue 1).
+- 18:37: UI polish, shared synthesized sounds, STOP RACE, race length, final results, HDMI audio.
+  Kart 2 deployed and checked live; pit not deployed (Pi down). Tests then: pit 43 + 3, kart 70 +
+  9 + 5.
+- Evening: pit Pi reboots; Wi-Fi lost at 18:10 and logs gone (Known issue 3).
+- 20:33: beacon carries race state and positions (27 bytes; 22-byte beacons still accepted).
+- 20:45: kart HUD race-position badge with chimes (78 kart core tests).
+- 20:59: pit hardening (root cause of the Wi-Fi loss: firstboot's `nmcli modify` turned the
+  cloud-init profile into `/etc/netplan/90-NM-*.yaml`, which the power cuts truncated to 0 bytes;
+  journald was `Storage=volatile`), race positions to the base, pace car recorder; 53 core + 6 e2e
+  pit tests; deployed live.
 
 ## Collaboration and delivery state
 
-The documentation, inspection tools, baseline capture and hardware photos are
-versioned together in this repository. Collaborators should clone or update from
-`git@github.com:colinfost3r/GoKart-Control.git` and start with README.md and this
-handoff. Use `git status` to distinguish subsequent local work from committed
-project state. The owner now requests ongoing pushes for collaboration with
-Eamon: publish coherent, checked milestones and fetch/reconcile remote changes
-before pushing. Use focused branches/PRs for parallel implementation. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for source ownership and conflict handling.
-
-No team members have been invited and no messages have been sent. Use the
-owner's chosen GitHub access process when they request it. Do not put credentials
-or a shared pit password into source control.
+Repository: `git@github.com:colinfost3r/GoKart-Control.git`. The owner requests ongoing pushes
+of coherent, checked milestones; fetch and reconcile before pushing; focused branches and PRs
+for parallel work ([CONTRIBUTING.md](CONTRIBUTING.md)). No team members have been invited by
+this project and no messages sent on anyone's behalf. Never put credentials or the pit password
+into source control.

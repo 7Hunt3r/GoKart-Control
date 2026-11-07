@@ -1,21 +1,59 @@
+# Repo-wide safety net. pit/, kart/ and firmware/ keep their own .gitignore with the
+# precise paths; the patterns here catch the same things anywhere else in the tree.
+
 # Dependencies
 node_modules/
 vendor/
 .venv/
 venv/
 __pycache__/
+*.pyc
 *.egg-info/
 
-# Build output
+# Build output (firmware/build/, pit|kart/sdcard/build/ hold compiled images and secrets)
 dist/
 build/
 out/
 target/
-*.log
 
-# Secrets & local config
+# Secrets & local config: never commit passwords, Wi-Fi keys, tokens or SSH keys.
+# Tracked templates are secrets.env.example and server/config.example.json.
 .env
 .env.local
 *.local
+secrets.env
+**/server/config.json
+*.pem
+*.key
+id_ed25519*
+id_rsa*
 
-# OS / editor noise is handled by the global gitignore
+# Runtime logs and state (session logs, command sequence, kart map cache)
+*.log
+logs/
+cache/
+session-*.jsonl
+
+# Licensed imagery: SkyFi satellite cuts are local-only and must never be committed.
+# (course.jpg and course_shop_cteco.jpg are public CT ECO orthoimagery and are tracked.)
+course_skyfi.jpg
+course_shop.jpg
+*skyfi*
+
+# Pace car / track recordings (runtime data; only the folder placeholder is tracked)
+**/map/recordings/*
+!**/map/recordings/.gitkeep
+
+# Sliced 3D-print output and slicer projects (keep source CAD, not machine output)
+*.gcode
+*.bgcode
+*.gcode.3mf
+
+# Screen and audio recordings from bench sessions
+*.mov
+*.mp4
+*.m4a
+*.wav
+
+# OS / editor noise (also in most global gitignores)
+.DS_Store

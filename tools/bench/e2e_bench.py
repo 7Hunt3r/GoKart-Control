@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """End-to-end bench test for the live fleet: pit server -> T-Beam -> LoRa -> kart Heltec -> kart Pi.
 
-Run ON the pit Pi (localhost is trusted by the pit server):
-    ssh pit@gokart-pit.local 'python3 /opt/gokart-pit/tools/e2e_bench.py --kart 2'
-or copy it there first:  scp tools/bench/e2e_bench.py pit@gokart-pit.local:/tmp/ && ssh pit@gokart-pit.local python3 /tmp/e2e_bench.py --kart 2
+Run ON the pit Pi (the pit server trusts localhost, so no login is needed). deploy.sh does not
+copy tools/, so copy the script over first:
+    scp tools/bench/e2e_bench.py pit@gokart-pit.local:/tmp/
+    ssh pit@gokart-pit.local python3 /tmp/e2e_bench.py --kart 2
 
-Checks (each prints PASS/FAIL/SKIP):
+Checks (each prints PASS/FAIL/SKIP; exit status 1 if any FAIL):
   pit link, radio stat fresh, beacon counter moving, kart online with low loss, repeater (if any),
-  ping round trip, race countdown + GO spacing on the kart Pi, zones/package served and synced to the
-  kart, kart Pi services, gps line rate and quality, and (only with --allow-writes, or when no VESC is
-  linked, where they must come back no_vesc) slow/boost/stop/start.
-Never sends a write command to a kart whose VESC is linked unless --allow-writes is given.
+  ping round trip, race countdown + GO on the kart Pi, zones/package served and synced to the
+  kart, gps line rate and quality, and (only with --allow-writes, or when no VESC is linked, where
+  they must come back no_vesc) slow/boost/stop/start.
+
+VESC writes: slow/boost/stop/start are never sent to a kart whose VESC is linked unless
+--allow-writes is given. The race check is NOT gated: it always sends `race 3`, which on a kart
+with a linked VESC holds the current scale at 0 for about 3 s and then restores it. Run it with
+the drive wheels off the ground or the VESC unlinked.
 """
 import argparse, json, sys, time, urllib.request
 
@@ -103,8 +108,12 @@ def main():
     except Exception as e:
         kst = None; rec("kart Pi api", False, str(e))
 
-    # ---- race countdown through the whole chain
-    try:
+    # ---- race countdown through the whole chain (a race hold writes scale 0 to a linked VESC: gated like the writes)
+    if vesc_linked and not a.allow_writes:
+        rec("race command outcome", True, "VESC linked: skipped without --allow-writes", skip=True)
+        rec("kart display saw countdown + GO", True, "skipped with the race command", skip=True)
+    else:
+      try:
         r = post(pit + "/cmd", {"cmd": "race", "kart": k, "arg": 3}); t_send = time.time()
         c = wait_outcome(pit, r["command"]["id"], timeout=10)
         want = {"applied", "accepted"} if (vesc_linked and a.allow_writes) else ({"no_vesc"} if not vesc_linked else {"rejected", "no_vesc", "applied", "accepted"})
@@ -115,7 +124,7 @@ def main():
             rs = (kst2.get("game") or {}).get("race") or kst2.get("race") or {}
             seen = bool(rs) and (rs.get("go_confirmed") is True or (rs.get("go_age_s") is not None and rs.get("go_age_s") < 30))
             rec("kart display saw countdown + GO", seen, f"race block: {json.dumps(rs)[:160]}" if rs else "no race block in kart /api/state")
-    except Exception as e:
+      except Exception as e:
         rec("race command outcome", False, str(e))
 
     # ---- write commands

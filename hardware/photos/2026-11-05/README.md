@@ -64,3 +64,20 @@ that every device can be powered reliably through one Pi USB port.
 - [Heltec expansion reference](https://heltec.org/project/wifi-lora-32-v4-expansion-housing/): Quectel L76K option; not a claim that the pictured separate module is the complete expansion housing kit.
 - LESOWN primary evidence is the supplied photographed manufacturer guide above;
   no matching exact-suffix online datasheet was established.
+
+## Later bench observations (added 2026-11-06; the photos and the sections above are unchanged)
+
+Recorded in [HANDOFF.md](../../../HANDOFF.md); these are bench results with the project's own
+firmware, not new evidence from the photos.
+
+- **Display:** a Pi 3 B kart display (kart 2) runs cage + Chromium on the L7 at 1024x600 over
+  HDMI (2026-11-06 16:26). The kart install pins `video=HDMI-A-1:1024x600M@60` because the panel
+  presents no usable EDID. Touch operation, mounted orientation and the exact product suffix are
+  still unconfirmed. HDMI audio to the panel's speakers streams (PCM running) but has not been
+  listened to.
+- **Heltec / GPS:** kart 2's Heltec V4.3 runs `firmware/kart-heltec-v4`; its L76K was detected at
+  9600 baud and got outdoor fixes with 5-11 satellites (2026-11-05). On 2026-11-06 that L76K
+  stopped driving its TX line (PPS still ticking) and needs replacing; see HANDOFF Known issues.
+- **Radio:** the project configures 915.0 MHz, BW500, SF7, CR4/5, sync 0x12, SX1262 at 10 dBm
+  plus the V4.3 front end. Antenna specification and transmit power at the antenna are not measured.
+- **Power:** still not established; the Heltec should not be powered from the VESC's 3.3 V COMM pin.

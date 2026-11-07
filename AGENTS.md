@@ -1,6 +1,7 @@
 # GoKart Control project conventions
 
-- Canonical project: ~/Projects/50 Day/GoKart Control/. Reuse this repository.
+- Canonical project: ~/Projects/50 Day/GoKart Control/ (Eamon's clone: ~/GoKart-Control).
+  Reuse this repository.
 - Read README.md and HANDOFF.md before implementation; inspect local git status.
 - The connected kart's measured baseline takes precedence over the old M5Stack
   repository for existing hardware/settings. User requirements govern desired behavior.
@@ -18,6 +19,10 @@
   Reconnect read-only and reconcile actual state. Existing ESC protections remain
   intact. This supersedes the earlier saved-configuration fallback requirement.
 - Driver messages, gradual remote stop and geofence enforcement are deferred.
+  Status note (2026-11-06, facts only, not a rule change): branch eamon/firmware-lora-starter
+  builds the kart with pit-commanded temporary (store=0) writes enabled for STOP/START/mode/
+  SLOW/BOOST/RACE and an optional game layer; this is flagged for owner review against the
+  rules above (HANDOFF.md, Decisions for Colin). Until the owner decides, the rules stand.
 - The owner now explicitly authorizes ongoing commits/pushes at coherent, checked
   milestones so Colin and Eamon share current work. This supersedes the earlier
   per-commit request rule for this project. Fetch before work and again before push;
@@ -26,4 +31,5 @@
 - Keep requirements, architecture, config and handoff consistent. Preserve evidence;
   distinguish owner decisions from proposed details and verified implementation.
 - No sub-agent delegation is required by this file.
-- Run offline checks described in CONTRIBUTING.md for inspection-tool changes.
+- Run offline checks described in CONTRIBUTING.md for inspection-tool changes, and
+  tools/run_tests.sh (all suites) before every push.
