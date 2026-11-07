@@ -371,5 +371,187 @@ class DemoMode(unittest.TestCase):
             st.close()
 
 
+class ServerPieces(unittest.TestCase):
+    """Session log rotation, config validation, the Heltec link, SSE deltas: no processes."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(KART, "server"))
+        import kart_server
+        import link
+        cls.ks, cls.link = kart_server, link
+
+    def test_session_log_rotates_and_prunes(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "session-20000101-000000.jsonl")
+            with open(old, "w") as f:
+                f.write("x" * 50000)
+            log = self.ks.SessionLog(d, max_mb=0.06, part_mb=0.01)      # 60 KB total, 10 KB parts
+            for i in range(600):
+                log.write("rx", line="y" * 100, i=i)
+            log.flush()
+            files = sorted(os.listdir(d))
+            self.assertNotIn(os.path.basename(old), files)            # oldest went first
+            self.assertGreater(log.part, 3)
+            self.assertIn(os.path.basename(log.path), files)          # the open part is never deleted
+            total = sum(os.path.getsize(os.path.join(d, f)) for f in files)
+            self.assertLess(total, 0.06 * 1024 * 1024 + 12000)
+            log.write("event", what="x")                              # non-rx records are flushed at once
+            with open(log.path) as f:
+                self.assertIn('"what":"x"', f.read())
+            log.close()
+
+    def test_session_log_unwritable_dir_falls_back(self):
+        log = self.ks.SessionLog("/proc/definitely/not/here", max_mb=10)
+        log.write("event", what="ok")
+        log.close()
+        self.assertTrue(os.path.exists(log.path))
+
+    def test_config_validation(self):
+        cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS, map_fps=500, kart_id=9, sound="yes", bogus=1,
+                                              map_orientation="sideways", rotate=90, pit_urls="http://x"))
+        self.assertEqual((cfg["map_fps"], cfg["kart_id"], cfg["sound"], cfg["map_orientation"], cfg["rotate"]),
+                         (10, 2, True, "heading_up", 0))
+        self.assertEqual(cfg["pit_urls"], ["http://x"])
+        self.assertEqual(len(w), 6, w)
+        cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS))
+        self.assertEqual(w, [])
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "c.json")
+            with open(p, "w") as f:
+                f.write("{broken")
+            cfg, w = self.ks.load_config(p)
+            self.assertEqual(cfg["kart_id"], 2)
+            self.assertIn("using the defaults", w[0])
+        with open(os.path.join(KART, "server", "config.example.json")) as f:
+            ex = json.load(f)
+        self.assertEqual({k for k in ex if not k.startswith("_")}, set(self.ks.DEFAULTS))   # example complete
+        self.assertEqual(set(ex["_doc"]) - {"_"}, set(self.ks.DEFAULTS))                  # and documented
+        self.assertEqual(self.ks.validate_config({k: v for k, v in ex.items() if k != "_doc"})[1], [])
+
+    def test_link_garbage_partial_reconnect_no_replay(self):
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+        lines, states = [], []
+        L = self.link.Link(lines.append, lambda c, d: states.append(c), tcp=f"127.0.0.1:{port}", log=lambda m: None)
+        L.start()
+        try:
+            c, _ = srv.accept()
+            c.sendall(b"\xff\xfe garbage\n{\"t\":\"self\",")                 # garbage, then half a line
+            time.sleep(0.2)
+            c.sendall(b"\"kart\":2}\r\n" + b"z" * 5000)                     # rest of it, then overlong junk
+            deadline = time.time() + 3
+            while len(lines) < 3 and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(lines[1], '{"t":"self","kart":2}')
+            self.assertIn("overlong", lines[2])
+            self.assertEqual(L.state, "up")
+            self.assertTrue(L.write_text("status"))
+            c.settimeout(2)
+            self.assertEqual(c.recv(100), b"status\n")
+            c.close()                                                   # unplug
+            deadline = time.time() + 3
+            while L.state != "reconnecting" and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(L.state, "reconnecting")
+            self.assertFalse(L.write_text("mode 1"))                    # refused while down: never queued
+            c2, _ = srv.accept()                                        # reconnect within RECONNECT_S
+            c2.settimeout(1.0)
+            deadline = time.time() + 3
+            while L.state != "up" and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(L.state, "up")
+            with self.assertRaises(socket.timeout):
+                c2.recv(100)                                            # nothing replayed after the reconnect
+            self.assertEqual(states, [True, False, True])
+            self.assertTrue(L.write_text("ping", wait=False))           # queued from the reader thread: no wait
+            self.assertEqual(c2.recv(100), b"ping\n")
+            c2.close()
+        finally:
+            L.stop()
+            srv.close()
+
+    def test_sse_sends_deltas(self):
+        st = Stack(["--nofix"])
+        try:
+            st.wait(lambda s: s["self"]["link"] == "online", what="self online")
+            c = http.client.HTTPConnection("127.0.0.1", st.port, timeout=5)
+            c.request("GET", "/events")
+            r = c.getresponse()
+            frames = []
+            while len(frames) < 4:
+                line = r.fp.readline().decode()
+                if line.startswith("data: "):
+                    frames.append(json.loads(line[6:]))
+            c.close()
+            self.assertNotIn("_d", frames[0])
+            self.assertIn("map", frames[0])
+            self.assertNotIn("heltec", frames[0])                       # /api/state only
+            self.assertTrue(all(f.get("_d") == 1 for f in frames[1:]))
+            self.assertTrue(all("map" not in f and "config" not in f for f in frames[1:]))   # unchanged: not resent
+            self.assertIn("heltec", st.state())
+        finally:
+            st.close()
+
+    def test_demo_lines_after_stop_are_dropped(self):
+        tmp = tempfile.TemporaryDirectory()
+        real_link = self.ks.Link
+        self.ks.Link = FakeLink
+        try:
+            cfg = dict(self.ks.DEFAULTS, log_dir=os.path.join(tmp.name, "logs"), cache_dir=os.path.join(tmp.name, "cache"),
+                       pit_urls=[f"http://127.0.0.1:{free_port()}"], map_poll_s=60)
+            app = self.ks.App(cfg)
+            real = FakeLink.instances[-1]
+            app.demo_start("test")
+            d = app.demo
+            app.demo_stop("test")
+            app._on_demo_line('{"t":"self","kart":2,"fix":true,"lat":1.0,"lon":1.0}', d)   # late line from the old demo
+            self.assertIsNone(app.state()["self"]["gps"]["last_fix"])
+            real.on_line('{"t":"self","kart":2,"fix":true,"lat":41.09,"lon":-73.41}')
+            self.assertEqual(app.state()["self"]["gps"]["last_fix"]["lat"], 41.09)
+            app.maps.stop()
+        finally:
+            self.ks.Link = real_link
+            tmp.cleanup()
+
+    def test_game_timing_survives_server_restart(self):
+        doc = {"version": 1, "enabled": True, "zones": [
+            {"id": "lap", "type": "lapline", "shape": "line", "a": [41.0, -73.0], "b": [41.0001, -73.0], "min_lap_s": 2}]}
+        with tempfile.TemporaryDirectory() as d:
+            cache = os.path.join(d, "cache", "map")
+            os.makedirs(cache)
+            with open(os.path.join(cache, "package.json"), "w") as f:
+                json.dump({"version": 1, "zones_version": 1}, f)
+            with open(os.path.join(cache, "zones.json"), "w") as f:
+                json.dump(doc, f)
+            real_link = self.ks.Link
+            self.ks.Link = FakeLink
+            try:
+                cfg = dict(self.ks.DEFAULTS, log_dir=os.path.join(d, "logs"), cache_dir=cache,
+                           pit_urls=[f"http://127.0.0.1:{free_port()}"], map_poll_s=60)
+                a1 = self.ks.App(cfg)
+                a1.start()
+                time.sleep(0.4)                                          # ticker loads the zones
+                real = FakeLink.instances[-1]
+                for lon, dt in ((-73.00005, 0), (-72.99995, 0.3), (-72.9998, 2.5), (-73.0001, 2.5)):   # start, away, lap 1
+                    time.sleep(dt)
+                    real.on_line(json.dumps({"t": "self", "kart": 2, "fix": True, "lat": 41.00005, "lon": lon,
+                                             "gps_kph": 20, "heading": 90, "stopped": False}))
+                self.assertEqual(a1.state()["game"]["lap"]["count"], 1)
+                a1.stopping.set(); a1.maps.stop()
+                self.assertTrue(os.path.exists(a1.game_state_path))
+                a2 = self.ks.App(cfg)                                    # "restart"
+                a2.start()
+                time.sleep(0.6)
+                lap = a2.state()["game"]["lap"]
+                self.assertEqual((lap["count"], lap["running"]), (1, True))
+                a2.stopping.set(); a2.maps.stop()
+            finally:
+                self.ks.Link = real_link
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

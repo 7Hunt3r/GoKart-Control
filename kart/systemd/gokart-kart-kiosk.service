@@ -1,6 +1,7 @@
 # Installed by kart/install.sh (@KART_USER@ is substituted).
-# Same recipe as pit/systemd/gokart-kiosk.service, which ran on the pit Pi 4 on
-# 2026-11-05; UNTESTED on a Pi 3 B.
+# Same recipe as pit/systemd/gokart-kiosk.service (pit Pi 4, 2026-11-05); running on kart 2
+# (Pi 3 B) since 2026-11-06. kiosk/start-chromium.sh has a watchdog: Chromium exiting or the page's
+# heartbeat stopping ends the service, and Restart=always brings it back.
 # cage (single-app Wayland compositor) runs Chromium full screen on tty1 as the
 # kart user. The PAM session (/etc/pam.d/gokart-kart-kiosk -> pam_systemd)
 # registers a logind session on seat0/tty1, which is what lets cage (libseat's
@@ -12,6 +13,7 @@ After=gokart-kart.service getty@tty1.service
 Wants=gokart-kart.service dbus.socket systemd-logind.service
 Conflicts=getty@tty1.service
 ConditionPathExists=/dev/tty1
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -35,6 +37,7 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -fs -o /dev/null http://1
 ExecStart=/usr/bin/cage -d -s -- /opt/gokart-kart/kiosk/start-chromium.sh
 Restart=always
 RestartSec=3
+TimeoutStopSec=15
 
 [Install]
 WantedBy=graphical.target

@@ -23,7 +23,14 @@ function ageText(a) {
   if (a < 3600) return Math.floor(a / 60) + " min";
   return Math.floor(a / 3600) + " h";
 }
-function setChip(id, text, cls) { const e = $(id); e.textContent = text; e.className = "chip " + (cls || ""); }
+/* DOM writes only when the value changes: the page re-renders 5x a second on a Pi 3 B, and every
+   textContent/className/style write invalidates style + layout even when the value is the same */
+const domCache = new Map();
+function txt(id, v) { v = String(v); const k = "t:" + id; if (domCache.get(k) !== v) { domCache.set(k, v); $(id).textContent = v; } }
+function cls(el, v) { if (el.className !== v) el.className = v; }
+function sty(el, prop, v) { v = String(v); const k = el.id + ":" + prop; if (domCache.get(k) !== v) { domCache.set(k, v); el.style[prop] = v; } }
+function svgCls(el, v) { if (el.getAttribute("class") !== v) el.setAttribute("class", v); }
+function setChip(id, text, c) { txt(id, text); cls($(id), "chip " + (c || "")); }
 function show(id, on) { $(id).classList.toggle("hidden", !on); }
 function cfg(k, d) { return S && S.config && !nul(S.config[k]) ? S.config[k] : d; }
 /* pit chip colour from how well the kart hears the pit (base_rssi, dBm): > -90 green, > -105 amber, else red */
@@ -41,22 +48,24 @@ function render() {
   show("simBanner", !!S.simulation);
   const dm = S.demo || {};
   $("simBanner").classList.toggle("demo", !!dm.active);
-  $("simBanner").textContent = dm.active
+  txt("simText", dm.active
     ? `DEMO (SIMULATION): not the real kart - hold KART 3 s to exit - ${Math.floor(dm.left_s / 60)}:${String(Math.floor(dm.left_s % 60)).padStart(2, "0")} left`
-    : "SIMULATION: not a real kart";
-  const cb = $("connBanner");
-  if (!link.connected) { cb.textContent = "NO CONNECTION TO KART COMPUTER (Heltec USB) - values below are old"; show("connBanner", true); }
-  else if (!fresh) { cb.textContent = me.age_s === null ? "Waiting for the kart computer..." : `KART COMPUTER SILENT ${ageText(me.age_s)} - values below are old`; show("connBanner", true); }
+    : "SIMULATION: not a real kart");
+  if (!link.connected) {
+    txt("connBanner", link.state === "connecting" ? "KART COMPUTER (Heltec USB) NOT FOUND YET - check the USB cable"
+      : `KART COMPUTER (Heltec USB) LOST ${nul(link.down_s) ? "" : ageText(link.down_s) + " "}- reconnecting... values below are old`);
+    show("connBanner", true);
+  } else if (!fresh) { txt("connBanner", me.age_s === null ? "Waiting for the kart computer..." : `KART COMPUTER SILENT ${ageText(me.age_s)} - values below are old`); show("connBanner", true); }
   else show("connBanner", false);
 
   // STOPPED (authoritative telemetry flag) and SLOW (inferred from command echoes)
   show("stopBanner", st.stopped === true);
   if (st.stopped === true && fresh && wasStopped === false) Snd.play("stop");   // pit STOP: firm low double tone
   wasStopped = fresh ? st.stopped === true : wasStopped;
-  $("stopBanner").textContent = fresh ? "STOPPED" : "STOPPED (last known)";
+  txt("stopBanner", fresh ? "STOPPED" : "STOPPED (last known)");
   const slow = S.slow || {};
   show("slowBanner", slow.active === true);
-  $("slowBanner").textContent = slow.active ? `SLOW ${slow.mph} MPH` : "SLOW";
+  txt("slowBanner", slow.active ? `SLOW ${slow.mph} MPH` : "SLOW");
   // GRID hold (race start): where STOPPED goes; it is not STOPPED (stopped stays false)
   const race = (S.game && S.game.race) || {};
   show("gridBanner", race.hold === true && st.stopped !== true);
@@ -65,6 +74,9 @@ function render() {
   // chips
   const id = me.heltec_id !== null ? me.heltec_id : me.configured_id;
   setChip("kartChip", `KART ${nul(id) ? "?" : id}${me.id_mismatch ? "?" : ""}`, "id" + (me.id_mismatch ? " bad" : ""));
+  // Heltec USB link down: one chip says so instead of three "?" chips
+  const linkUp = link.connected;
+  if (!linkUp) setChip("linkChip", link.state === "connecting" ? "USB: CONNECTING" : `USB: RECONNECTING${link.attempts ? " #" + link.attempts : ""}`, "link warn");
   const pl = S.pit_link || {};
   if (pl.state === "ok") setChip("pitChip", `PIT ${pl.rssi}`, pitSignalClass(pl.rssi));
   else if (pl.state === "lost") setChip("pitChip", "NO PIT", "warn");
@@ -77,18 +89,19 @@ function render() {
   else if (g.fix_fresh && gpsWeak()) setChip("gpsChip", `GPS WEAK${nul(g.hdop_now) || g.hdop_now >= 99 ? "" : " " + Number(g.hdop_now).toFixed(1)}`, "warn");
   else if (g.fix_fresh) setChip("gpsChip", `GPS ${nul(g.sats_now) ? "" : g.sats_now}${g.gps_hz === 5 ? " 5Hz" : ""}`, "ok");
   else setChip("gpsChip", "NO FIX", "warn");
+  show("linkChip", !linkUp); show("pitChip", linkUp); show("vescChip", linkUp); show("gpsChip", linkUp);
 
   // speed: GPS ground speed from a fresh fix only; the arc falls back to wheel mph when there is no fix
   const d = me.derived || {};
   const mphEl = $("mph");
   const wheel = fresh && me.vesc_fresh && !nul(d.wheel_mph) ? Math.abs(d.wheel_mph) : null;
   let arcMph = null;
-  if (fresh && !nul(d.gps_mph)) { mphEl.textContent = Math.round(d.gps_mph); mphEl.setAttribute("class", "mphnum"); $("mphSrc").textContent = "GPS"; arcMph = d.gps_mph; }
-  else if (wheel !== null) { mphEl.textContent = Math.round(wheel); mphEl.setAttribute("class", "mphnum"); $("mphSrc").textContent = "WHEEL"; arcMph = wheel; }
-  else { mphEl.textContent = !fresh ? "NO DATA" : "NO FIX"; mphEl.setAttribute("class", "mphnum na"); $("mphSrc").textContent = "GPS"; }
-  $("mphNote").textContent = fresh && !g.fix_fresh
+  if (fresh && !nul(d.gps_mph)) { txt("mph", Math.round(d.gps_mph)); svgCls(mphEl, "mphnum"); txt("mphSrc", "GPS"); arcMph = d.gps_mph; }
+  else if (wheel !== null) { txt("mph", Math.round(wheel)); svgCls(mphEl, "mphnum"); txt("mphSrc", "WHEEL"); arcMph = wheel; }
+  else { txt("mph", !fresh ? "NO DATA" : "NO FIX"); svgCls(mphEl, "mphnum na"); txt("mphSrc", "GPS"); }
+  txt("mphNote", fresh && !g.fix_fresh
     ? (wheel !== null ? "NO GPS FIX: wheel speed (uncalibrated)" : !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "")
-    : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph (uncalibrated)` : "");
+    : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph (uncalibrated)` : ""));
   const game = S.game || {}, meter = (game.meter || {});
   drawSpeedo(arcMph, fresh ? meter.kind : "unknown");
 
@@ -96,25 +109,25 @@ function render() {
   const v = me.vesc || {};
   const battFresh = me.vesc_fresh && fresh;
   document.querySelector(".batt").classList.toggle("stale", !battFresh);
-  $("battPct").textContent = nul(d.battery_pct) ? "--" : Math.round(d.battery_pct) + "%";
-  $("battV").textContent = nul(v.volts) ? "-- V" : Number(v.volts).toFixed(1) + " V";
+  txt("battPct", nul(d.battery_pct) ? "--" : Math.round(d.battery_pct) + "%");
+  txt("battV", nul(v.volts) ? "-- V" : Number(v.volts).toFixed(1) + " V");
   const bar = $("battBar");
-  bar.style.width = nul(d.battery_pct) ? "0" : d.battery_pct + "%";
-  bar.style.background = !battFresh ? "var(--stale)" : d.battery_pct < 20 ? "var(--bad)" : d.battery_pct < 40 ? "var(--warn)" : "var(--ok)";
-  $("battNote").textContent = nul(v.volts) ? "no VESC data yet" : !battFresh ? `VESC data ${ageText(me.vesc_age_s)} old` : (d.under_load ? "under load: % reads low" : "20S pack, 60-84 V");
+  sty(bar, "width", nul(d.battery_pct) ? "0" : d.battery_pct + "%");
+  sty(bar, "background", !battFresh ? "var(--stale)" : d.battery_pct < 20 ? "var(--bad)" : d.battery_pct < 40 ? "var(--warn)" : "var(--ok)");
+  txt("battNote", nul(v.volts) ? "no VESC data yet" : !battFresh ? `VESC data ${ageText(me.vesc_age_s)} old` : (d.under_load ? "under load: % reads low" : "20S pack, 60-84 V"));
 
   // mode requested -> actual, shown as the gear badge
   const mr = st.mode_req, ma = st.mode_actual;
   const gear = $("gear");
-  gear.className = "gear" + (!fresh ? " stale" : "") + (fresh && !nul(mr) && mr !== ma ? " req" : "") + (fresh && ma === 2 ? " g2" : "");
-  $("gearLetter").textContent = nul(ma) ? "?" : MODES[ma][0];
-  $("modeNow").textContent = nul(ma) ? "unknown" : MODES[ma] + (st.mode_confirmed ? " ✓" : "");
+  cls(gear, "gear" + (!fresh ? " stale" : "") + (fresh && !nul(mr) && mr !== ma ? " req" : "") + (fresh && ma === 2 ? " g2" : ""));
+  txt("gearLetter", nul(ma) ? "?" : MODES[ma][0]);
+  txt("modeNow", nul(ma) ? "unknown" : MODES[ma] + (st.mode_confirmed ? " ✓" : ""));
   let mn = "";
   if (!nul(mr) && mr !== ma) mn = `requested ${MODES[mr]}: not applied yet`;
   else if (!nul(ma) && !st.mode_confirmed) mn = st.stopped ? "held by STOP" : "not confirmed by VESC read-back";
   else if (!nul(ma)) mn = "confirmed by VESC read-back";
   else mn = "VESC has not reported a mode";
-  $("modeNote").textContent = fresh ? mn : `last known (${ageText(me.age_s)} ago)`;
+  txt("modeNote", fresh ? mn : nul(me.age_s) ? "no data from the kart computer yet" : `last known (${ageText(me.age_s)} ago)`);
   document.querySelectorAll(".mbtn").forEach((b) => {
     const m = Number(b.dataset.mode);
     b.classList.toggle("actual", m === ma && fresh);
@@ -126,7 +139,7 @@ function render() {
   const fault = v.fault;
   const showFault = !cfg("beginner_mode", false) && battFresh && !nul(fault) && fault !== 0;
   show("faultBox", showFault);
-  if (showFault) $("faultBox").textContent = `VESC FAULT ${fault} ${me.fault_name || ""}`;
+  if (showFault) txt("faultBox", `VESC FAULT ${fault} ${me.fault_name || ""}`);
 
   // last command we sent + last pit command seen
   const c = (S.commands || [])[0];
@@ -142,14 +155,19 @@ function render() {
   const pit = (S.cmds_seen || []).filter((x) => x.src === 0).slice(-1)[0];
   if (!cn && pit && pit.age_s < 60) cn = `pit ${CMD_TEXT[pit.cmd_name] || pit.cmd_name}: ${RESULT_TEXT[pit.result_name] || pit.result_name}`;
   if (!cn && me.id_mismatch) cn = `Heltec says kart ${me.heltec_id}; display config says ${me.configured_id}`;
-  $("cmdNote").textContent = cn;
+  txt("cmdNote", cn);
 
   renderGame(game, fresh, st);
   renderRace((game && game.race) || {});
   sndConfig(); sndUi(); soundTest(S.sound_test);
   show("sndTest", !!dm.active);
-  drawMap();
+  // pulses (BOOST label, USB link chip) flip with each render (5 Hz) instead of a 60 fps CSS animation:
+  // on a Pi 3 B every animated frame is a full GPU composite
+  const pulsing = $("boostMeter").classList.contains("boost") || !link.connected;
+  pulse = pulsing && !pulse;
+  document.body.classList.toggle("pulse", pulse);     // no-op (no style recalc) while nothing pulses
 }
+let pulse = false;
 
 /* ------------------------------------------------------- game: speedo */
 const SPEEDO = { cx: 180, cy: 150, r: 128, a0: 160, a1: 380, max: 30 };
@@ -169,10 +187,12 @@ function arcPath(a0, a1, r) {
   }
   $("ticks").innerHTML = svg;
 })();
+let arcD = null;
 function drawSpeedo(mph, kind) {
   const f = nul(mph) ? 0 : Math.max(0, Math.min(1, mph / SPEEDO.max));
-  $("arcFg").setAttribute("d", f > 0.004 ? arcPath(SPEEDO.a0, SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * f, SPEEDO.r) : "");
-  $("speedo").className = "speedo" + (kind === "boost" || kind === "mud" || kind === "stopped" ? " " + kind : "");
+  const dd = f > 0.004 ? arcPath(SPEEDO.a0, SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * f, SPEEDO.r) : "";
+  if (dd !== arcD) { arcD = dd; $("arcFg").setAttribute("d", dd); }
+  cls($("speedo"), "speedo" + (kind === "boost" || kind === "mud" || kind === "stopped" ? " " + kind : ""));
 }
 
 /* ------------------------------------------- game: meter, laps, events */
@@ -185,37 +205,38 @@ function renderGame(game, fresh, st) {
   // boost meter: live scale vs the requested mode's scale
   const m = game.meter || {}, kind = fresh ? (m.kind || "unknown") : "unknown";
   const bm = $("boostMeter");
-  bm.className = "meter " + kind;
+  cls(bm, "meter " + kind);
   const sc = fresh && !nul(m.scale) ? Math.max(0, Math.min(1, m.scale)) : null, ms = nul(m.mode_scale) ? null : m.mode_scale;
-  $("bMark").style.left = ms === null ? "100%" : ms * 100 + "%";
-  $("bMark").style.display = ms === null ? "none" : "";
+  const pc = (x) => (x * 100).toFixed(1) + "%";
+  sty($("bMark"), "left", ms === null ? "100%" : pc(ms));
+  sty($("bMark"), "display", ms === null ? "none" : "");
   const base = sc === null ? 0 : ms === null ? sc : Math.min(sc, ms);
-  $("bBase").style.width = base * 100 + "%";
+  sty($("bBase"), "width", pc(base));
   const fill = $("bFill");
-  if (sc !== null && ms !== null && kind === "boost") { fill.style.left = ms * 100 + "%"; fill.style.width = Math.max(0.03, sc - ms) * 100 + "%"; }
-  else if (sc !== null && ms !== null && kind === "mud") { fill.style.left = sc * 100 + "%"; fill.style.width = (ms - sc) * 100 + "%"; }
-  else fill.style.width = "0";
+  if (sc !== null && ms !== null && kind === "boost") { sty(fill, "left", pc(ms)); sty(fill, "width", pc(Math.max(0.03, sc - ms))); }
+  else if (sc !== null && ms !== null && kind === "mud") { sty(fill, "left", pc(sc)); sty(fill, "width", pc(ms - sc)); }
+  else sty(fill, "width", "0");
   const ov = m.override;
   const left = ov && ov.left_s > 0 ? ` ${Math.ceil(ov.left_s)}s` : "";
-  $("boostLabel").textContent = kind === "boost" ? "BOOST!" + left : kind === "mud" ? "MUD" + left
-    : kind === "stopped" ? "STOP" : kind === "grid" ? "GRID" : kind === "normal" ? `POWER ${Math.round(sc * 100)}%` : "POWER --";
+  txt("boostLabel", kind === "boost" ? "BOOST!" + left : kind === "mud" ? "MUD" + left
+    : kind === "stopped" ? "STOP" : kind === "grid" ? "GRID" : kind === "normal" ? `POWER ${Math.round(sc * 100)}%` : "POWER --");
 
   // lap panel or the GAME OFF chip
   const on = game.on === true;
   show("lapPanel", on);
   show("gameChip", !on);
   show("lapStrip", on);
-  if (!on) $("gameChip").textContent = "GAME OFF";
+  if (!on) txt("gameChip", "GAME OFF");
   else {
     const lap = game.lap || {};
     const finished = !!(game.race && game.race.finished);
     $("lapPanel").classList.toggle("idle", !lap.running);
-    $("lapNum").textContent = lap.running ? String(lap.count + 1) : finished ? String(lap.count) : "-";
-    $("lapCur").textContent = lap.running ? lapTime(lap.current_s) : finished ? "FINISHED" : "CROSS THE LINE";
-    $("lapLast").textContent = lapTime(lap.last_s);
-    $("lapBest").textContent = lapTime(lap.best_s);
-    $("lsLast").textContent = lapTime(lap.last_s);
-    $("lsBest").textContent = lapTime(lap.best_s);
+    txt("lapNum", lap.running ? String(lap.count + 1) : finished ? String(lap.count) : "-");
+    txt("lapCur", lap.running ? lapTime(lap.current_s) : finished ? "FINISHED" : "CROSS THE LINE");
+    txt("lapLast", lapTime(lap.last_s));
+    txt("lapBest", lapTime(lap.best_s));
+    txt("lsLast", lapTime(lap.last_s));
+    txt("lsBest", lapTime(lap.best_s));
     $("lsBest").classList.toggle("best", !nul(lap.best_s));
   }
   renderPosition((game && game.race) || {});
@@ -252,18 +273,15 @@ function posSound(d) {
   } catch (e) { /* sound is a nicety */ }
 }
 function renderPosition(race) {
-  const badge = $("posBadge"), pos = Number(race.pos) || 0;
+  // after the flag the finishing place (firmware finish / beacon state 3) wins over the live beacon position
+  const badge = $("posBadge"), pos = (race.finished && race.position > 0 ? race.position : Number(race.pos)) || 0;
   if (!pos) { show("posBadge", false); posUi.shown = 0; return; }
   const color = (S.self && S.self.color) || "#3cb44b";
-  badge.style.setProperty("--kc", color);
-  badge.style.setProperty("--kfg", textOn(color));
-  const lp = $("lapPanel"), gc = $("gameChip");
-  const anchor = !lp.classList.contains("hidden") ? lp : !gc.classList.contains("hidden") ? gc : null;
-  badge.style.left = (anchor ? anchor.offsetLeft + anchor.offsetWidth + 10 : 8) + "px";
-  show("posBadge", true);
+  if (posUi.color !== color) { posUi.color = color; badge.style.setProperty("--kc", color); badge.style.setProperty("--kfg", textOn(color)); }
+  show("posBadge", true);                     // sits right of the lap panel / GAME OFF chip (flex row .tl)
   if (posUi.shown !== pos) {
     const d = posChange(posUi.shown, pos);
-    $("posNum").textContent = String(pos);
+    txt("posNum", String(pos));
     if (posUi.shown !== null && posUi.shown !== 0 && (d === "up" || d === "down")) {   // not on page load
       badge.classList.remove("pop", "up", "down"); void badge.offsetWidth;
       badge.classList.add("pop", d);
@@ -316,7 +334,7 @@ function itemRoulette(result) {
   clearInterval(itemTimer); clearTimeout(itemTimer);
   let i = 0;
   const t0 = performance.now();
-  box.className = "itembox"; $("itemName").textContent = "";
+  box.className = "itembox"; txt("itemName", "");
   Snd.play("roulette");                        // accelerating ticks for the whole spin
   itemTimer = setInterval(() => {
     if (performance.now() - t0 < 1200) {
@@ -327,7 +345,7 @@ function itemRoulette(result) {
     clearInterval(itemTimer);
     box.className = "itembox done r-" + result;
     itemGlyph(result, { mud: "#e2b07a", empty: "#bbb", super: "#ff2a1a", boost: "#fff" }[result] || "#fff");
-    $("itemName").textContent = ITEM_NAME[result] || result;
+    txt("itemName", ITEM_NAME[result] || result);
     if (result === "empty") Snd.play("empty");
     else {
       Snd.play("item");                        // bright two-note chime, then the item's own sound
@@ -374,13 +392,13 @@ function finishText(race) {
 }
 function renderFinish(race) {
   const fin = race.finished === true;
-  show("finChip", fin && !race.hold);
-  if (fin) $("finChip").textContent = race.position > 0 ? `FINISHED P${race.position}` : "FINISHED";
+  show("finChip", fin && !race.hold && !(S.game && S.game.on));     // with the game on the lap panel says it
+  if (fin) txt("finChip", race.position > 0 ? `FINISHED P${race.position}` : "FINISHED");
   if (!fin) { finUi.shown = false; if (!$("finishOv").classList.contains("hidden")) $("finishOv").className = "finishov hidden"; return; }
   if (finUi.shown || nul(race.finish_age_s) || race.finish_age_s * 1000 > FINISH_SHOW_MS) return;
   finUi.shown = true;                               // once per finish (a reload within 6 s shows the rest)
   const ov = $("finishOv"), t = finishText(race);
-  $("finPos").textContent = t.pos;
+  txt("finPos", t.pos);
   $("finStats").innerHTML = t.stats;
   ov.className = "finishov" + (t.pos ? "" : " nopos");
   if (race.finish_age_s < 1) Snd.play("finish");
@@ -407,10 +425,10 @@ function raceTick() {
     raceUi.lit = lit; raceUi.sec = Math.ceil(rem);
     ov.querySelectorAll(".lights i").forEach((el, i) => el.classList.toggle("on", i < lit));
     ov.classList.remove("go", "fade"); show("raceGo", false);
-    $("raceMsg").textContent = `GO in ${Math.ceil(rem)}`;
+    txt("raceMsg", `GO in ${Math.ceil(rem)}`);
   } else {
     if (raceUi.goShownAt === null) { raceUi.goShownAt = now; Snd.play("go"); show("raceGo", true); }
-    ov.classList.add("go"); $("raceMsg").textContent = "";
+    ov.classList.add("go"); txt("raceMsg", "");
     if (now - raceUi.goShownAt > RACE_GO_HOLD_MS) ov.classList.add("fade");
     if (now - raceUi.goShownAt > RACE_GO_HOLD_MS + RACE_FADE_MS) { raceEnd(); return; }
   }
@@ -421,7 +439,7 @@ let flashTimer = null;
 function flash(text, cls, extra) {
   const f = $("flash");
   f.className = "flash hidden"; void f.offsetWidth;     // restart the animation
-  $("flashText").textContent = text;
+  txt("flashText", text);
   f.className = "flash f" + cls + (extra ? " " + extra : "");
   clearTimeout(flashTimer);
   flashTimer = setTimeout(() => { f.className = "flash hidden"; }, cls === "lap" || cls === "star" ? 1300 : 850);
@@ -471,12 +489,14 @@ function soundTest(st) {
   if (was) Snd.setMuted(false);
   ["light", "light", "light", "go"].forEach((k, i) => setTimeout(() => Snd.play(k), i * 600));
   setTimeout(() => { Snd.play("boost"); if (was) setTimeout(() => Snd.setMuted(true), 1200); }, 3200);
-  $("cmdNote").textContent = Snd.unlocked() ? "sound test: playing" : "sound test: audio is locked (tap the screen once)";
+  txt("cmdNote", Snd.unlocked() ? "sound test: playing" : "sound test: audio is locked (tap the screen once)");
 }
 $("sndTest").addEventListener("click", () => fetch("/api/sound-test").catch(() => {}));
 
 /* ---------------------------------------------- game: zones on the map */
-function drawZones(ctx, en, px) {
+/* zone shapes (true scale) go into the cached map layer; their markers (chevrons, mud dots, "?" box)
+   are collected into `marks` and drawn upright on every frame by drawZoneMarks() */
+function drawZones(ctx, en, px, marks) {
   const doc = S.map && S.map.zones;
   if (!doc || !Array.isArray(doc.zones)) return;
   const on = !!(S.game && S.game.on), inside = new Set((S.game && S.game.inside) || []);
@@ -487,16 +507,17 @@ function drawZones(ctx, en, px) {
       if (z.type === "lapline" && z.a && z.b) return lapLine(ctx, px(en(z.a[0], z.a[1])), px(en(z.b[0], z.b[1])), on);
       if (z.type !== "boost" && z.type !== "mud" && z.type !== "item") return;
       const boost = z.type === "boost", item = z.type === "item";
-      let c, rad;
+      let c, cw, rad;
       ctx.beginPath();
       if (z.shape === "circle" && !nul(z.lat)) {
-        c = px(en(z.lat, z.lon)); rad = Math.max(4, z.r_m * view.scale);
+        cw = en(z.lat, z.lon); c = px(cw); rad = Math.max(4, z.r_m * view.scale);
         ctx.arc(c[0], c[1], rad, 0, 2 * Math.PI);
       } else if (z.shape === "polygon" && Array.isArray(z.points) && z.points.length >= 3) {
-        const pts = z.points.map((p) => px(en(p[0], p[1])));
+        const ws = z.points.map((p) => en(p[0], p[1])), pts = ws.map(px);
         pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
         ctx.closePath();
-        c = [pts.reduce((a, q) => a + q[0], 0) / pts.length, pts.reduce((a, q) => a + q[1], 0) / pts.length];
+        cw = [ws.reduce((a, q) => a + q[0], 0) / ws.length, ws.reduce((a, q) => a + q[1], 0) / ws.length];
+        c = px(cw);
         rad = Math.min(...pts.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1])));
       } else return;
       // true-scale ring/shape, then a marker at least MIN_MARK px across (small 3-5 m pads stay visible)
@@ -505,20 +526,28 @@ function drawZones(ctx, en, px) {
       ctx.lineWidth = inside.has(z.id) ? 6 : 3;
       ctx.strokeStyle = !on ? "#666" : item ? "#1e5bd8" : boost ? "#e08a00" : "#4a2e12";
       ctx.stroke();
-      const mr = Math.max(MIN_MARK / 2, rad);
-      if (item) itemMark(ctx, c, mr, on);
-      else {
-        if (rad < MIN_MARK / 2) {
-          ctx.beginPath(); ctx.arc(c[0], c[1], mr, 0, 2 * Math.PI);
-          ctx.fillStyle = !on ? "#999" : boost ? "#ffb000" : "#6e461e"; ctx.fill();
-          ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
-        }
-        if (boost) chevrons(ctx, c, mr, on);
-        else mudDots(ctx, c, mr, on);
-      }
+      marks.push({ cw, rad, boost, item, on });
     } catch (e) { /* a malformed zone never breaks the map */ }
   });
   ctx.restore();
+}
+function drawZoneMarks(ctx, marks, px) {
+  marks.forEach(({ cw, rad, boost, item, on }) => {
+    const c = px(cw), mr = Math.max(MIN_MARK / 2, rad);
+    ctx.save();
+    if (!on) ctx.globalAlpha = 0.35;
+    if (item) itemMark(ctx, c, mr, on);
+    else {
+      if (rad < MIN_MARK / 2) {
+        ctx.beginPath(); ctx.arc(c[0], c[1], mr, 0, 2 * Math.PI);
+        ctx.fillStyle = !on ? "#999" : boost ? "#ffb000" : "#6e461e"; ctx.fill();
+        ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
+      }
+      if (boost) chevrons(ctx, c, mr, on);
+      else mudDots(ctx, c, mr, on);
+    }
+    ctx.restore();
+  });
 }
 const MIN_MARK = 24;          // px: smallest on-screen marker for a zone (owner: pads are ~5 m)
 function itemMark(ctx, c, r, on) {
@@ -549,33 +578,44 @@ function trackChevrons(pts, closed, en, spacing) {      // mirrors kartcore.trac
   }
   return out;
 }
-function drawTrack(ctx, en, px, mePos, headingUp) {
+function trackWidthPx(t) { return Math.max(6, t.width_m * view.scale); }
+function drawTrack(ctx, en, px, dim) {          // cached layer: band, edge, direction chevrons
   const t = S.game && S.game.track;
   if (!t || !t.points || t.points.length < 2) return;
   const P = t.points.map((p) => en(p[0], p[1]));
-  const w = Math.max(6, t.width_m * view.scale);
-  const pathOf = (pts, close) => { ctx.beginPath(); pts.forEach((p, i) => { const q = px(p); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); if (close) ctx.closePath(); };
+  const w = trackWidthPx(t);
   ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
-  const dim = headingUp && mePos;
-  pathOf(P, t.closed); ctx.strokeStyle = "rgba(0,70,90,.55)"; ctx.lineWidth = w + 5; ctx.stroke();
-  pathOf(P, t.closed); ctx.strokeStyle = dim ? "rgba(0,229,255,.28)" : "rgba(0,229,255,.5)"; ctx.lineWidth = w; ctx.stroke();
-  if (dim) {                                       // brighter ~80 m ahead of the nearest point, in point order
-    const seq = t.closed ? P.concat(P) : P.slice();
-    let k = 0, best = Infinity;
-    P.forEach((p, i) => { const d = Math.hypot(p[0] - mePos[0], p[1] - mePos[1]); if (d < best) { best = d; k = i; } });
-    const ahead = [mePos]; let acc = 0;
-    for (let i = k + 1; i < seq.length && acc < 80; i++) { acc += Math.hypot(seq[i][0] - seq[i - 1][0], seq[i][1] - seq[i - 1][1]); ahead.push(seq[i]); }
-    if (ahead.length > 1) { pathOf(ahead, false); ctx.strokeStyle = "rgba(0,240,255,.75)"; ctx.lineWidth = w; ctx.stroke(); }
-  }
+  trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "rgba(0,70,90,.55)"; ctx.lineWidth = w + 5; ctx.stroke();
+  trackPath(ctx, P, t.closed, px); ctx.strokeStyle = dim ? "rgba(0,229,255,.28)" : "rgba(0,229,255,.5)"; ctx.lineWidth = w; ctx.stroke();
   const cs = Math.max(5, Math.min(15, w * 0.42));     // direction chevrons, a little larger than the band edge
   trackChevrons(t.points, t.closed, en, 15).forEach(([e, n, hd]) => {
     const q = px([e, n]);
-    ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd - view.rot);
+    ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd);      // world-aligned: the layer turns with the map
     ctx.beginPath(); ctx.moveTo(-cs, cs * 0.6); ctx.lineTo(0, -cs * 0.5); ctx.lineTo(cs, cs * 0.6);
     ctx.strokeStyle = "rgba(0,40,60,.9)"; ctx.lineWidth = 6; ctx.stroke();
     ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
     ctx.restore();
   });
+  ctx.restore();
+}
+function trackPath(ctx, pts, close, px) {
+  ctx.beginPath();
+  pts.forEach((p, i) => { const q = px(p); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+  if (close) ctx.closePath();
+}
+/* heading-up: the ~80 m of route ahead of the kart (nearest point onwards, in point order) brighter */
+function drawTrackAhead(ctx, en, px, mePos) {
+  const t = S.game && S.game.track;
+  if (!t || !t.points || t.points.length < 2 || !mePos) return;
+  const P = t.points.map((p) => en(p[0], p[1]));
+  const seq = t.closed ? P.concat(P) : P.slice();
+  let k = 0, best = Infinity;
+  P.forEach((p, i) => { const d = Math.hypot(p[0] - mePos[0], p[1] - mePos[1]); if (d < best) { best = d; k = i; } });
+  const ahead = [mePos]; let acc = 0;
+  for (let i = k + 1; i < seq.length && acc < 80; i++) { acc += Math.hypot(seq[i][0] - seq[i - 1][0], seq[i][1] - seq[i - 1][1]); ahead.push(seq[i]); }
+  if (ahead.length < 2) return;
+  ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
+  trackPath(ctx, ahead, false, px); ctx.strokeStyle = "rgba(0,240,255,.75)"; ctx.lineWidth = trackWidthPx(t); ctx.stroke();
   ctx.restore();
 }
 
@@ -621,8 +661,8 @@ function post(url, body) {
     .catch((e) => ({ ok: false, error: String(e) }));
 }
 function requestMode(m) {
-  $("cmdNote").textContent = `${MODES[m]}: sending...`;
-  post("/cmd", { cmd: "mode", arg: m }).then((j) => { if (!j.ok) $("cmdNote").textContent = `${MODES[m]}: ${j.error}`; });
+  txt("cmdNote", `${MODES[m]}: sending...`);
+  post("/cmd", { cmd: "mode", arg: m }).then((j) => { if (!j.ok) txt("cmdNote", `${MODES[m]}: ${j.error}`); });
 }
 document.querySelectorAll(".mbtn").forEach((btn) => {
   let timer = null, t0 = 0;
@@ -655,7 +695,7 @@ document.querySelectorAll(".mbtn").forEach((btn) => {
     const tick = () => {
       const p = Math.min(1, (performance.now() - t0) / 3000);
       chip.style.setProperty("--hp", p);
-      if (p >= 1) { reset(); post("/api/demo", { toggle: true }).then((j) => { if (!j.ok) $("cmdNote").textContent = `demo: ${j.error}`; }); }
+      if (p >= 1) { reset(); post("/api/demo", { toggle: true }).then((j) => { if (!j.ok) txt("cmdNote", `demo: ${j.error}`); }); }
       else raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -667,7 +707,7 @@ document.querySelectorAll(".mbtn").forEach((btn) => {
 const R_EARTH = 6371000;
 const view = { follow: true, pausedUntil: 0, all: false, scale: null, cx: 0, cy: 0, rot: 0 };
 let userFollow = true;               // the FOLLOW button; touching the map pauses it
-let mapImg = null, mapImgSrc = null;
+let mapImg = null, mapImgSrc = null, mapImgReady = null;
 const DR_MAX_S = 1.2;
 const dr = new Map();
 
@@ -715,16 +755,16 @@ function niceStep(m) { const s = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2
 function drawMap() {
   const cv = $("map");
   const dpr = window.devicePixelRatio || 1;
-  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!mapSize.w) mapSize.w = cv.clientWidth, mapSize.h = cv.clientHeight;   // then kept by a ResizeObserver
+  const W = mapSize.w, H = mapSize.h;
   if (!W || !H) return;
   if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = "#33363a"; ctx.fillRect(0, 0, W, H);
-  const msg = $("mapMsg");
   const en = projection();
   const pkg = (S.map && S.map.package) || null;
-  if (!en) { msg.textContent = "No map yet and no GPS fix"; show("mapMsg", true); $("mapNote").textContent = mapNoteText(); return; }
+  if (!en) { txt("mapMsg", "No map yet and no GPS fix"); show("mapMsg", true); txt("mapNote", mapNoteText()); return; }
 
   const now = performance.now();
   const me = S.self, mf = selfFix(me);
@@ -736,7 +776,7 @@ function drawMap() {
   if (userFollow && !view.follow && Date.now() >= view.pausedUntil) { view.follow = true; view.all = false; view.scale = null; }
   const resumeIn = userFollow && !view.follow ? Math.ceil((view.pausedUntil - Date.now()) / 1000) : 0;
   show("resumeNote", resumeIn > 0);
-  if (resumeIn > 0) $("resumeNote").textContent = `follow in ${resumeIn} s`;
+  if (resumeIn > 0) txt("resumeNote", `follow in ${resumeIn} s`);
   $("followBtn").classList.toggle("sel", userFollow);
 
   if (view.scale === null || view.all || (view.follow && !mePos)) fitAll(en, pkg, W, H);
@@ -764,18 +804,26 @@ function drawMap() {
     return [W / 2 + dx * cr - dy * sr, cyS - (dx * sr + dy * cr)];
   };
 
-  // imagery (north-up WGS84, placed by its bounds like the pit)
-  if (pkg && pkg.image && pkg.bounds) {
-    if (mapImgSrc !== pkg.image) { mapImgSrc = pkg.image; mapImg = new Image(); mapImg.onload = () => { if (S) drawMap(); }; mapImg.src = pkg.image; }
-    if (mapImg && mapImg.complete && mapImg.naturalWidth) drawImagery(ctx, en, pkg.bounds, W, H, px);
+  // imagery, course, track band, zone shapes, lap line: one cached north-up layer, turned with the map
+  if (pkg && pkg.image && pkg.bounds && mapImgSrc !== pkg.image) {
+    mapImgSrc = pkg.image; mapImgReady = null;
+    const img = new Image();
+    // into the layer only once decoded (a 3000 x 3044 JPEG takes a while on a Pi 3 B)
+    img.onload = () => { (img.decode ? img.decode() : Promise.resolve()).catch(() => {}).then(() => {
+      if (mapImg === img) { mapImgReady = img.src; requestDraw(); } }); };
+    mapImg = img; img.src = pkg.image;
   }
-  if (pkg && pkg.course && pkg.course.length > 1) {
-    ctx.strokeStyle = "#000"; ctx.lineWidth = 4; ctx.setLineDash([10, 8]); ctx.beginPath();
-    pkg.course.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
-    ctx.stroke(); ctx.setLineDash([]);
+  const L = ensureLayer(en, pkg, W, H, cyS, dpr, headingUp);
+  if (L.cv) {
+    const k = view.scale / L.s;                 // != 1 only for a moment while zooming (rebuild pending)
+    ctx.save();
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "low";
+    ctx.translate(W / 2, cyS); ctx.rotate(-view.rot);
+    ctx.drawImage(L.cv, (L.cx - view.cx) * view.scale - L.half * k, -(L.cy - view.cy) * view.scale - L.half * k, 2 * L.half * k, 2 * L.half * k);
+    ctx.restore();
   }
-  drawTrack(ctx, en, px, mePos, headingUp);
-  drawZones(ctx, en, px);
+  if (headingUp && mePos) { drawTrackAhead(ctx, en, px, mePos); drawChevronsNear(ctx, L, px, mePos); }
+  drawZoneMarks(ctx, L.marks, px);
   if (pkg && pkg.pit && !nul(pkg.pit.lat)) {
     const b = px(en(pkg.pit.lat, pkg.pit.lon));
     ctx.fillStyle = "#000"; ctx.fillRect(b[0] - 9, b[1] - 9, 18, 18);
@@ -818,8 +866,8 @@ function drawMap() {
     if (!meFresh) label(ctx, `last fix ${ageText(me.gps.fix_age_s)}`, p[0] + 24, p[1] - 14);
     else if (!meGood) label(ctx, mf.quality === "outlier" ? "GPS jump ignored" : "weak GPS: zones paused", p[0] + 24, p[1] - 14);
   }
-  if (!mf) { msg.textContent = me.link === "online" ? "NO GPS FIX YET" : "NO POSITION"; show("mapMsg", true); }
-  else if (!meFresh) { msg.textContent = me.link === "online" ? "NO GPS FIX" : "POSITION FROZEN"; show("mapMsg", true); }
+  if (!mf) { txt("mapMsg", me.link === "online" ? "NO GPS FIX YET" : "NO POSITION"); show("mapMsg", true); }
+  else if (!meFresh) { txt("mapMsg", me.link === "online" ? "NO GPS FIX" : "POSITION FROZEN"); show("mapMsg", true); }
   else show("mapMsg", false);
 
   // scale bar + north arrow
@@ -828,8 +876,7 @@ function drawMap() {
   ctx.strokeStyle = "#e6e6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(12, H - 28); ctx.lineTo(12 + len, H - 28); ctx.stroke();
   ctx.fillStyle = "#e6e6e6"; ctx.font = "bold 14px sans-serif"; ctx.fillText(`${step} m`, 18 + len, H - 24);
   // north compass: top-right, under the map buttons, 1.5x the old size (r 30)
-  const ctl = document.querySelector(".mapctl");
-  const ccx = ctl ? ctl.offsetLeft + ctl.offsetWidth / 2 : W - 41, ccy = ctl ? ctl.offsetTop + ctl.offsetHeight + 40 : 240;
+  const [ccx, ccy] = compassPos(W);
   ctx.save(); ctx.translate(ccx, ccy); ctx.rotate(-view.rot);
   ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(0, 0, 30, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
@@ -837,26 +884,90 @@ function drawMap() {
   ctx.fillStyle = "#e6e6e6"; ctx.beginPath(); ctx.moveTo(0, 13); ctx.lineTo(7, 2); ctx.lineTo(-7, 2); ctx.closePath(); ctx.fill();
   ctx.font = "900 15px sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.fillText("N", 0, 27); ctx.textAlign = "left";
   ctx.restore();
-  $("mapNote").textContent = mapNoteText();
+  txt("mapNote", mapNoteText());
 }
 
-function drawImagery(ctx, en, b, W, H, px) {
-  const a = en(b.north, b.west), c = en(b.south, b.east);
-  if (view.rot === 0) {
-    // north-up: draw only the visible part of the (large) image; cheaper on a Pi 3 B
-    const p0 = px(a), p1 = px(c);
-    const iw = mapImg.naturalWidth, ih = mapImg.naturalHeight, dw = p1[0] - p0[0], dh = p1[1] - p0[1];
-    const x0 = Math.max(0, p0[0]), y0 = Math.max(0, p0[1]), x1 = Math.min(W, p1[0]), y1 = Math.min(H, p1[1]);
-    if (x1 <= x0 || y1 <= y0) return;
-    const sx = (x0 - p0[0]) / dw * iw, sy = (y0 - p0[1]) / dh * ih, sw = (x1 - x0) / dw * iw, sh = (y1 - y0) / dh * ih;
-    ctx.drawImage(mapImg, sx, sy, sw, sh, x0, y0, x1 - x0, y1 - y0);
-    return;
+/* The static map content is drawn once into an offscreen canvas ("layer"): north-up, at the current
+   zoom, centred on the view, big enough (<= 2048 px, the Pi 3 B GPU texture limit) to cover the
+   screen at any rotation plus a margin. Each frame only blits it (rotated in heading-up). It is
+   rebuilt when its content changes (map image, zones, track, game on/off, zone highlight), when the
+   zoom settles on a new level, or when the view centre drifts past the margin (~40 m at the follow
+   zoom). Drawing the 3000 x 3044 photo every frame was the Pi's biggest cost. */
+const layer = { key: "", cv: null, s: 0, cx: 0, cy: 0, half: 0, marks: [], chev: [], zoomAt: 0 };
+let mapGen = 0, lastMapJson = "";                                 // bumped when S.map arrives (zones / package changed)
+function layerKey(pkg, headingUp, dpr) {
+  const g = S.game || {}, t = g.track;
+  return [mapGen, mapImgSrc, mapImgReady, !!g.on, (g.inside || []).join("|"),
+    t ? t.points.length + ":" + t.width_m + ":" + t.closed + ":" + t.points[0] + ":" + t.points[t.points.length - 1] : "",
+    headingUp, dpr, pkg && pkg.origin ? pkg.origin.lat + "," + pkg.origin.lon : ""].join(";");
+}
+function ensureLayer(en, pkg, W, H, cyS, dpr, headingUp) {
+  const reach = Math.hypot(W / 2, Math.max(cyS, H - cyS));        // view centre -> farthest screen corner
+  const half = Math.max(reach + 64, Math.min(1024 / dpr, reach + 420));
+  const key = layerKey(pkg, headingUp, dpr), now = performance.now();
+  const drift = Math.hypot(view.cx - layer.cx, view.cy - layer.cy) * view.scale;
+  const zoomed = Math.abs(view.scale / (layer.s || 1) - 1) > 0.001;
+  if (view.scale !== layer.zoomScale) { layer.zoomScale = view.scale; layer.zoomAt = now; }
+  if (zoomed && layer.cv && key === layer.key && now - layer.zoomAt < 150) {
+    requestDraw();                              // zooming: the old layer, scaled, until the zoom is still 150 ms
+    return layer;
   }
-  ctx.save();
-  ctx.translate(W / 2, view.cyS || H / 2); ctx.rotate(-view.rot);
-  const s = view.scale;
-  ctx.drawImage(mapImg, (a[0] - view.cx) * s, -(a[1] - view.cy) * s, (c[0] - a[0]) * s, -(c[1] - a[1]) * s);
-  ctx.restore();
+  if (layer.cv && key === layer.key && !zoomed && drift <= half - reach && layer.half === half) return layer;
+  perf.layers++;
+  const size = Math.ceil(2 * half * dpr);
+  const cv = layer.cv || document.createElement("canvas");
+  if (cv.width !== size || cv.height !== size) { cv.width = size; cv.height = size; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, 2 * half, 2 * half);
+  Object.assign(layer, { cv, key, s: view.scale, cx: view.cx, cy: view.cy, half, marks: [], chev: [] });
+  const lpx = (p) => [half + (p[0] - layer.cx) * layer.s, half - (p[1] - layer.cy) * layer.s];
+  if (pkg && pkg.image && pkg.bounds && mapImgReady && mapImg && mapImg.naturalWidth) {
+    const b = pkg.bounds, p0 = lpx(en(b.north, b.west)), p1 = lpx(en(b.south, b.east));
+    const iw = mapImg.naturalWidth, ih = mapImg.naturalHeight, dw = p1[0] - p0[0], dh = p1[1] - p0[1];
+    const x0 = Math.max(0, p0[0]), y0 = Math.max(0, p0[1]), x1 = Math.min(2 * half, p1[0]), y1 = Math.min(2 * half, p1[1]);
+    if (x1 > x0 && y1 > y0 && dw > 0 && dh > 0) {            // only the part of the photo inside the layer
+      ctx.imageSmoothingQuality = "medium";
+      ctx.drawImage(mapImg, (x0 - p0[0]) / dw * iw, (y0 - p0[1]) / dh * ih, (x1 - x0) / dw * iw, (y1 - y0) / dh * ih, x0, y0, x1 - x0, y1 - y0);
+    }
+  }
+  if (pkg && pkg.course && pkg.course.length > 1) {
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 4; ctx.setLineDash([10, 8]); ctx.beginPath();
+    pkg.course.forEach((p, i) => { const q = lpx(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  drawTrack(ctx, en, lpx, headingUp);
+  const t = S.game && S.game.track;
+  if (t && t.points && t.points.length >= 2) layer.chev = trackChevrons(t.points, t.closed, en, 15);
+  drawZones(ctx, en, lpx, layer.marks);
+  return layer;
+}
+/* heading-up: the chevrons under the bright "ahead" band are drawn again on top of it */
+function drawChevronsNear(ctx, L, px, mePos) {
+  const t = S.game && S.game.track;
+  if (!t || !L.chev.length) return;
+  const cs = Math.max(5, Math.min(15, trackWidthPx(t) * 0.42));
+  L.chev.forEach(([e, n, hd]) => {
+    if (Math.hypot(e - mePos[0], n - mePos[1]) > 90) return;
+    const q = px([e, n]);
+    ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd - view.rot);
+    ctx.beginPath(); ctx.moveTo(-cs, cs * 0.6); ctx.lineTo(0, -cs * 0.5); ctx.lineTo(cs, cs * 0.6);
+    ctx.strokeStyle = "rgba(0,40,60,.9)"; ctx.lineWidth = 6; ctx.stroke();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.restore();
+  });
+}
+const mapSize = { w: 0, h: 0 };
+try {
+  new ResizeObserver((es) => { const r = es[0].contentRect; mapSize.w = r.width; mapSize.h = r.height; ctlPos = null; requestDraw(); }).observe($("map"));
+} catch (e) { window.addEventListener("resize", () => { mapSize.w = 0; ctlPos = null; requestDraw(); }); }
+let ctlPos = null;                               // compass centre under the map buttons (layout read once)
+function compassPos(W) {
+  if (!ctlPos) {
+    const ctl = document.querySelector(".mapctl");
+    ctlPos = ctl ? [ctl.offsetLeft + ctl.offsetWidth / 2, ctl.offsetTop + ctl.offsetHeight + 40] : [W - 41, 240];
+  }
+  return ctlPos;
 }
 function trail(ctx, pts, en, px, color, w, alpha) {
   ctx.strokeStyle = color; ctx.globalAlpha = alpha; ctx.lineWidth = w; ctx.beginPath();
@@ -987,33 +1098,67 @@ document.querySelector(".mapctl").addEventListener("click", (e) => {
 try { if (localStorage.getItem("gk_follow") === "0") { userFollow = false; view.follow = false; } } catch (err) { /* ignore */ }
 
 /* -------------------------------------------------------------- wiring */
-let drawQueued = false;
-function requestDraw() { if (drawQueued || !S) return; drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawMap(); }); }
+/* One draw scheduler: SSE frames, touches and dead reckoning only mark the map dirty; it is drawn at
+   most map_fps times a second (30 while a finger is on it). Draws run in requestAnimationFrame, which
+   the browser pauses by itself while the page is really hidden (no explicit document.hidden check:
+   a kiosk that wrongly reported "hidden" would freeze the HUD). */
+let drawDirty = false, drawTimer = null, lastDraw = 0, fingers = 0, renderDirty = false;
+function requestDraw() { drawDirty = true; kickDraw(); }
+function kickDraw() {
+  if (drawTimer !== null || !S) return;
+  const fps = fingers ? 30 : Math.max(1, Math.min(30, cfg("map_fps", 10)));
+  const wait = Math.max(0, 1000 / fps - (performance.now() - lastDraw));
+  drawTimer = setTimeout(() => { drawTimer = null; requestAnimationFrame(drawFrame); }, wait);
+}
+function animating() {
+  const moving = (k) => k.link === "online" && k.gps && k.gps.fix_fresh && k.gps.last_fix && (k.gps.last_fix.gps_kph || 0) > 2;
+  return moving(S.self) || S.fleet.some(moving) || (userFollow && !view.follow) || view.slewing;
+}
+function drawFrame() {
+  if (!S || !drawDirty) return;
+  drawDirty = false;
+  lastDraw = performance.now();
+  if (renderDirty) { renderDirty = false; const t0 = performance.now(); render(); perf.renders++; perf.renderMs += performance.now() - t0; }
+  const t1 = performance.now();
+  drawMap();                                      // DOM + map in one frame, not two
+  const dt = performance.now() - t1;
+  perf.draws++; perf.drawMs += dt; perf.drawMax = Math.max(perf.drawMax, dt);
+  if (animating()) requestDraw();                 // dead reckoning / heading slew / resume countdown
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) requestDraw(); });
+/* heartbeat to the server every 5 s with frame stats (/api/state "kiosk"); the kiosk watchdog
+   (kiosk/start-chromium.sh) restarts Chromium when the page stops sending it */
+const perf = { t0: performance.now(), draws: 0, drawMs: 0, drawMax: 0, renders: 0, renderMs: 0, layers: 0 };
+setInterval(() => {
+  const secs = (performance.now() - perf.t0) / 1000, r = (x) => Math.round(x * 100) / 100;
+  post("/api/heartbeat", { secs: r(secs), draws: perf.draws, draw_ms_avg: perf.draws ? r(perf.drawMs / perf.draws) : 0,
+    draw_ms_max: r(perf.drawMax), renders: perf.renders, render_ms_avg: perf.renders ? r(perf.renderMs / perf.renders) : 0,
+    layer_builds: perf.layers, hidden: document.hidden });
+  Object.assign(perf, { t0: performance.now(), draws: 0, drawMs: 0, drawMax: 0, renders: 0, renderMs: 0, layers: 0 });
+}, 5000);
+$("map").addEventListener("pointerdown", () => { fingers++; });
+["pointerup", "pointercancel"].forEach((ev) => $("map").addEventListener(ev, () => { fingers = Math.max(0, fingers - 1); }));
 
 function connect() {
   const es = new EventSource("/events");
   es.onmessage = (ev) => {
     lastMsg = Date.now();
-    try { S = JSON.parse(ev.data); } catch (e) { return; }
-    render();
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+    // the server sends the full state first, then only the top-level keys that changed ("_d": 1)
+    if (m._d) { if (!S) return; delete m._d; S = Object.assign({}, S, m); } else S = m;
+    renderDirty = true;
+    requestDraw();
+    if ("map" in m) { const mj = JSON.stringify(m.map.zones) + JSON.stringify(m.map.package); if (mj !== lastMapJson) { lastMapJson = mj; mapGen++; } }
   };
 }
 setInterval(() => {
   if (Date.now() - lastMsg > 3000) {
     const cb = $("connBanner");
     cb.textContent = lastMsg ? "DISPLAY SERVER NOT RESPONDING - screen is frozen" : "Starting display...";
+    domCache.delete("t:connBanner");
     cb.classList.remove("hidden");
   }
 }, 1000);
-// Between SSE frames, redraw the map only while something moves (dead reckoning), at most map_fps.
-let lastAnim = 0;
-(function anim(t) {
-  requestAnimationFrame(anim);
-  if (!S || t - lastAnim < 1000 / cfg("map_fps", 10)) return;
-  lastAnim = t;
-  const moving = (k) => k.link === "online" && k.gps && k.gps.fix_fresh && k.gps.last_fix && (k.gps.last_fix.gps_kph || 0) > 2;
-  if (moving(S.self) || S.fleet.some(moving) || (userFollow && !view.follow) || view.slewing) drawMap();
-})(0);
-window.addEventListener("resize", requestDraw);
 sndConfig(); Snd.ensure(); sndUi();
 connect();

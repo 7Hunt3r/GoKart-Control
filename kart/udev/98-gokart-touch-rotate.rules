@@ -1,0 +1,5 @@
+# Installed by kart/install.sh ONLY when config.json has "rotate": 180 (ports-down dash mount).
+# The picture is turned by the kernel (cmdline video=HDMI-A-1:1024x600M@60,rotate=180); the touch
+# panel (kart 2: 1a86:e5e3 "TeNizo R7Series TC", USB HID) is not, so libinput maps every touch
+# through this 180 deg calibration matrix (x' = 1 - x, y' = 1 - y). Any touchscreen matches.
+ACTION=="add|change", KERNEL=="event*", ENV{ID_INPUT_TOUCHSCREEN}=="1", ENV{LIBINPUT_CALIBRATION_MATRIX}="-1 0 1 0 -1 1"

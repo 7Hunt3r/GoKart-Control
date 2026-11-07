@@ -6,7 +6,7 @@
 # Excludes start with "/" so they are anchored to the top of kart/ (the source
 # dir) and cannot accidentally match a file of the same name deeper down;
 # pit/deploy.sh needed a fix for exactly this on 2026-11-05.
-# SSH uses the key baked in by the SD card kit (no password). UNTESTED against a kart Pi.
+# SSH uses the key baked in by the SD card kit (no password). Used against kart 2 on 2026-11-06.
 set -euo pipefail
 cd "$(dirname "$0")"
 HOST="${1:-gokart-kart-2.local}"

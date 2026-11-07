@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="banners">
-  <div id="simBanner" class="banner sim hidden">SIMULATION: not a real kart</div>
+  <div id="simBanner" class="banner sim hidden"><span id="simText">SIMULATION: not a real kart</span></div>
   <div id="connBanner" class="banner bad hidden"></div>
   <div class="alerts">
     <div id="stopBanner" class="banner stop hidden">STOPPED</div>
@@ -21,6 +21,7 @@
   <section class="dash">
     <div class="chips">
       <span id="kartChip" class="chip id">KART ?</span>
+      <span id="linkChip" class="chip bad hidden">USB</span>
       <span id="pitChip" class="chip">PIT ?</span>
       <span id="vescChip" class="chip">VESC ?</span>
       <span id="gpsChip" class="chip">GPS ?</span>
@@ -58,16 +59,18 @@
   <section class="mapwrap">
     <canvas id="map"></canvas>
     <div id="mapMsg" class="mapmsg hidden"></div>
-    <div id="lapPanel" class="lappanel hidden">
-      <div class="lapflag"></div>
-      <div class="lapn">LAP <b id="lapNum">-</b></div>
-      <div id="lapCur" class="lapcur">--:--.-</div>
-      <div class="laprow"><span>LAST</span><b id="lapLast">--</b></div>
-      <div class="laprow"><span>BEST</span><b id="lapBest">--</b></div>
+    <div class="tl">
+      <div id="lapPanel" class="lappanel hidden">
+        <div class="lapflag"></div>
+        <div class="lapn">LAP <b id="lapNum">-</b></div>
+        <div id="lapCur" class="lapcur">--:--.-</div>
+        <div class="laprow"><span>LAST</span><b id="lapLast">--</b></div>
+        <div class="laprow"><span>BEST</span><b id="lapBest">--</b></div>
+      </div>
+      <span id="gameChip" class="chip gamechip hidden">GAME OFF</span>
+      <div id="posBadge" class="posbadge hidden"><small>P</small><b id="posNum">-</b></div>
+      <span id="finChip" class="chip finchip hidden">FINISHED</span>
     </div>
-    <span id="gameChip" class="chip gamechip hidden">GAME OFF</span>
-    <div id="posBadge" class="posbadge hidden"><small>P</small><b id="posNum">-</b></div>
-    <span id="finChip" class="chip finchip hidden">FINISHED</span>
     <div id="itemBox" class="itembox hidden"><div id="itemGlyph" class="iglyph">?</div><small id="itemName"></small></div>
     <div class="mapctl">
       <button id="followBtn" class="sel">FOLLOW</button>

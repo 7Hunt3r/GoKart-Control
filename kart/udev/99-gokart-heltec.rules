@@ -3,5 +3,5 @@
 # "USB JTAG/serial debug unit" (303a:1001), the same as the pit's T-Beam S3
 # (pit/udev/99-gokart-tbeam.rules, read from a real board 2026-11-05).
 # Only one ESP32-S3 is plugged into a kart Pi, so match VID/PID alone.
-# UNTESTED on a kart Pi.
+# Working on kart 2 (/dev/heltec -> ttyACM0) since 2026-11-06.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="heltec", GROUP="dialout", MODE="0660"

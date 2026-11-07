@@ -1,5 +1,32 @@
 {
-  "_comment": "Copy to config.json (gitignored; install.sh and the SD card kit create it). kart_id is a display label only: the Heltec's own id (from its self lines) wins and a mismatch is flagged. pit_urls are tried in order for the map package. beginner_mode hides driver-facing fault alerts only. map_orientation: heading_up (default; map turns with the kart at <= 120 deg/s, kart ~60 % down the map, held below 1.5 m/s) or north_up; applies only while following the own kart. follow_span_m: metres shown across the map height while following (70). remote_cmd lets other machines POST /cmd (debug only). game: false makes this kart ignore the pit's game zones (no boost/mud commands, no laps). sound: game sounds on the driver page. gps_correction (default false): shift game positions by (pit surveyed position - pit radio live fix), 30 s mean, only if under 25 m. demo: allow demo mode (hold the KART badge 3 s; a simulated kart drives the zones, the real Heltec is never written to). demo_max_s: demo ends by itself after this.",
+  "_doc": {
+    "_": "Copy to config.json (gitignored; install.sh and the SD card kit create it). Keys starting with _ are ignored. Every key is optional (defaults below); a bad value is replaced by the default and reported in the journal and /api/state server.config_warnings. Restart gokart-kart after a change; rotate needs sudo bash install.sh + a reboot.",
+    "kart_id": "1-8. Display label only: the Heltec's own id (from its self lines) wins; a mismatch shows KART N? in red and is logged once.",
+    "pit_urls": "Tried in order every map_poll_s for the map package + game zones (mDNS name, then the pit's IP).",
+    "map_poll_s": "Seconds between pit map polls (5-3600).",
+    "beginner_mode": "true hides driver-facing VESC fault alerts (the pit and the logs keep them).",
+    "map_orientation": "heading_up (map turns with the kart, <= 120 deg/s, kart ~60 % down) or north_up; only while following.",
+    "follow_span_m": "Metres shown across the map height while following (10-2000).",
+    "follow_resume_s": "Following resumes this long after the last touch on the map (1-600).",
+    "mode_hold_ms": "ECO/NORMAL/SPORT press-and-hold time in ms; 0 = plain tap (0-5000).",
+    "map_fps": "Max map redraws per second while something moves (1-30); 30 while a finger is on the map.",
+    "bind": "HTTP listen address (0.0.0.0: other machines can watch the page; commands stay localhost-only).",
+    "http_port": "HTTP port of the driver page / API.",
+    "remote_cmd": "true lets other machines POST /cmd, /api/demo and GET /api/sound-test (debug only).",
+    "serial_port": "Heltec serial device; null = auto (/dev/heltec, 303a:1001, /dev/ttyACM*).",
+    "tcp": "host:port of the simulator's TCP server instead of serial (null on a kart).",
+    "status_poll_s": "Send the read-only `status` request to the Heltec this often (also 1 s after connect / Heltec reboot).",
+    "log_dir": "Session logs (null = <kart>/logs).",
+    "cache_dir": "Map package cache (null = <kart>/cache/map); game-state.json lives next to it.",
+    "max_log_mb": "All session logs together are kept under this (oldest deleted at start, at each 64 MB rotation and every 5 min).",
+    "game": "false = this kart ignores the pit's game zones (no boost/mud commands, no laps).",
+    "gps_correction": "true = game positions += (pit surveyed - pit radio live fix), 30 s mean, only if under 25 m.",
+    "demo": "Allow demo mode (hold the KART badge 3 s): a simulated kart drives the zones; the real Heltec is never written to.",
+    "demo_max_s": "Demo ends by itself after this many seconds.",
+    "sound": "Game sounds on the driver page (WebAudio through the HDMI panel speakers).",
+    "sound_volume": "Master volume of those sounds, 0-1.",
+    "rotate": "0 or 180. Read by install.sh only: 180 = panel mounted ports-down (kernel video= rotate + touch calibration udev rule; reboot). Kart 2 runs 0."
+  },
   "kart_id": 2,
   "pit_urls": [
     "http://gokart-pit.local:8080",
@@ -22,8 +49,10 @@
   "cache_dir": null,
   "max_log_mb": 800,
   "game": true,
-  "sound": true,
   "gps_correction": false,
   "demo": true,
-  "demo_max_s": 180
+  "demo_max_s": 180,
+  "sound": true,
+  "sound_volume": 0.8,
+  "rotate": 0
 }

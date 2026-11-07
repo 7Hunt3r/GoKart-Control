@@ -410,11 +410,14 @@ class Game(unittest.TestCase):
         self.assertEqual(len(evs(r, "lap_start")), 1)
         lap = g.snapshot(1.0)["lap"]
         self.assertEqual((lap["count"], lap["running"], lap["current_s"]), (0, True, 0.5))
+        g.on_self(fix(12, 0), 5.0)                                       # away from the line: re-armed
         r = g.on_self(fix(2, 0), 9.5) + g.on_self(fix(-2, 0), 10.0)      # back across at 9.75: too soon
         self.assertEqual(evs(r, "lap_ignored")[0]["since_s"], 9.25)
         self.assertEqual(g.snapshot(10.0)["lap"]["count"], 0)
+        g.on_self(fix(-12, 1), 20.0)
         r = g.on_self(fix(-2, 1), 29.5) + g.on_self(fix(2, 1), 30.0)     # eastbound, t = 29.75
         self.assertEqual(evs(r, "lap")[0]["lap_s"], 29.25)
+        g.on_self(fix(12, 1), 40.0)
         r = g.on_self(fix(2, 1), 54.5) + g.on_self(fix(-2, 1), 55.0)     # westbound counts too, t = 54.75
         lp = evs(r, "lap")
         self.assertEqual(lp[0]["lap_s"], 25.0)
@@ -425,6 +428,65 @@ class Game(unittest.TestCase):
         r = g.on_self(fix(-2, 1), 61.0)                    # crossed, but > 5 s since the last fix: not joined
         self.assertEqual(evs(r, "lap") + evs(r, "lap_ignored"), [])
         self.assertEqual(lines(r), [])                     # a lap line never sends anything
+
+    def test_lap_jitter_on_the_line_never_counts(self):
+        """A kart parked on the line (GPS jitter across it for minutes) never completes a lap; the
+        last crossing before it drives off is the lap start; a fix exactly on the line counts once."""
+        g, _ = self.engine(lap_zone(min_lap_s=20))
+        t, r = 0.0, []
+        for i in range(120):                                             # 60 s of +-1.5 m jitter
+            r += g.on_self(fix(1.5 if i % 2 else -1.5, 0), t)
+            t += 0.5
+        self.assertEqual(g.snapshot(t)["lap"]["count"], 0)
+        self.assertEqual(len(evs(r, "lap")), 0)
+        start = g.lap["start"]
+        self.assertGreater(start, 50.0)                                  # the latest crossing, not the first
+        g.on_self(fix(20, 0), t + 2)                                     # drives off
+        g.on_self(fix(-20, 0), t + 25)
+        r = g.on_self(fix(-0.0, 0), t + 26) + g.on_self(fix(10, 0), t + 27)   # fix exactly on the line
+        self.assertEqual(len(evs(r, "lap")), 1)
+        self.assertEqual(len(evs(r, "lap_ignored")), 0)
+
+    def test_fast_kart_cannot_skip_a_small_pad(self):
+        """2 Hz self-line fallback at 54 km/h: 7.5 m between fixes jumps over a 3 m pad."""
+        g, _ = self.engine(boost_zone(e=0, r=3))
+        r = g.on_self(fix(-4, 0), 0.0) + g.on_self(fix(3.5, 0, gps_kph=54.0), 0.5)
+        self.assertEqual(lines(r), ["boost 5 1.00"])
+        self.assertTrue(evs(r, "zone_enter")[0]["swept"])
+
+    def test_item_overlapping_boost_sends_one_command(self):
+        g, _ = self.engine(boost_zone(e=0, r=6), {"id": "i1", "type": "item", "name": "Item", "shape": "circle",
+                                                  "lat": ll(0, 0)[0], "lon": ll(0, 0)[1], "r_m": 6})
+        g.rng = __import__("random").Random(1)
+        r = g.on_self(fix(-10, 0), 0.0) + g.on_self(fix(0, 0), 0.5)
+        self.assertEqual(len(lines(r)), 1)
+        self.assertEqual(len(evs(r, "item")), 1)
+        self.assertEqual(evs(r, "suppressed")[0]["why"].split()[0], "overlaps")
+
+    def test_go_line_without_countdown_starts_the_race(self):
+        g = kc.GameEngine()
+        g.on_race({"t": "race", "event": "finish", "position": 2}, 1.0)
+        r = g.on_race({"t": "race", "event": "go"}, 50.0)                 # restarted display: no countdown seen
+        self.assertEqual([x["ev"] for x in r], ["race_go", "race_go_line"])
+        rs = g.snapshot(50.0)["race"]
+        self.assertEqual((rs["finished"], rs["go_age_s"]), (False, 0.0))
+        self.assertEqual([x["ev"] for x in g.on_race({"t": "race", "event": "go"}, 51.0)], ["race_go_line"])
+
+    def test_timing_survives_a_restart_same_lap_line(self):
+        g, _ = self.engine(lap_zone(min_lap_s=2))
+        g.on_self(fix(-10, 0), 0.0); g.on_self(fix(10, 0), 1.0)          # lap start at 0.5
+        g.on_self(fix(-10, 0), 5.0)                                       # lap 1 crossing at 3.0 (westbound)
+        doc = json.loads(json.dumps(g.export_state(6.0)))
+        g2, _ = self.engine(lap_zone(min_lap_s=2))
+        r = g2.import_state(doc, 8.0)
+        self.assertEqual([x["ev"] for x in r], ["zones_lap_restored"])
+        lap = g2.snapshot(8.0)["lap"]
+        self.assertEqual((lap["count"], lap["running"], lap["last_s"], lap["current_s"]), (1, True, 2.5, 5.0))
+        g3, _ = self.engine(lap_zone(min_lap_s=7))                       # different lap line: fresh
+        self.assertEqual(g3.import_state(doc, 8.0), [])
+        g4, _ = self.engine(lap_zone(min_lap_s=2))
+        self.assertEqual(g4.import_state(doc, 6.0 + kc.GAME_STATE_MAX_AGE_S + 1), [])    # too old
+        self.assertEqual(g4.import_state(dict(doc, boot_id="other"), 8.0), [])         # rebooted
 
     def test_lap_line_misses_past_its_end(self):
         g, _ = self.engine(lap_zone())
@@ -970,7 +1032,9 @@ class RacePosition(unittest.TestCase):
         g = kc.GameEngine()
         self.assertEqual(g.on_self(fix(0, 0, race_pos=0, race_state=0), 1.0, "w1"), [])     # nothing yet
         r = g.on_self(fix(0, 0, race_pos=3, race_state=2), 2.0, "w2")
-        self.assertEqual([(x["ev"], x["pos"], x["prev"], x["dir"]) for x in r], [("race_position", 3, 0, "new")])
+        self.assertEqual([(x["ev"], x["state"]) for x in evs(r, "race_state")], [("race_state", 2)])
+        self.assertEqual([(x["ev"], x["pos"], x["prev"], x["dir"]) for x in evs(r, "race_position")],
+                         [("race_position", 3, 0, "new")])
         self.assertEqual(g.on_self(fix(0, 0, race_pos=3, race_state=2), 2.5, "w3"), [])     # unchanged: no event
         r = g.on_self(fix(0, 0, race_pos=2, race_state=2), 3.0, "w4")
         self.assertEqual(r[0]["dir"], "up")
@@ -981,7 +1045,7 @@ class RacePosition(unittest.TestCase):
                          (4, 2, "running", 2, "w5"))
         self.assertEqual(rs["pos_changed_age_s"], 1.0)
         r = g.on_self(fix(0, 0, race_pos=0, race_state=0), 6.0, "w6")
-        self.assertEqual(r[0]["dir"], "gone")
+        self.assertEqual(evs(r, "race_position")[0]["dir"], "gone")
         self.assertEqual(g.snapshot(6.0)["race"]["state_name"], "idle")
 
     def test_bad_values_ignored(self):
@@ -1005,10 +1069,44 @@ class RacePosition(unittest.TestCase):
         g2.on_self(fix(0, 0, race_pos=0, race_state=3), 1.5)      # beacon may drop the position at the flag
         g2.on_race({"t": "race", "event": "finish", "position": 0}, 2.0)
         rs = g2.snapshot(2.0)["race"]
-        self.assertEqual((rs["position"], rs["position_source"]), (3, "beacon"))
+        # beacon state 3 already finished it with the last beacon position; the late finish keeps it
+        self.assertEqual((rs["position"], rs["position_source"], rs["finish_age_s"]), (3, "beacon_state", 0.5))
         g3 = kc.GameEngine()
         g3.on_race({"t": "race", "event": "finish", "position": 0}, 2.0)
         self.assertEqual(g3.snapshot(2.0)["race"]["position"], 0)
+
+    def test_beacon_state_3_finishes_within_one_self_line(self):
+        """Pit STOP RACE: beacon state 3 (+ final position) must show FINISH at the next self line even
+        when the kart's position did not change and no firmware finish command has arrived."""
+        g = kc.GameEngine()
+        g.on_race({"t": "race", "event": "countdown", "go_in_ms": 1000, "secs": 1}, 0.0)
+        g.tick(1.0)
+        g.on_self(fix(0, 0, race_pos=2, race_state=2), 2.0)
+        self.assertEqual(g.snapshot(2.0)["race"]["state_name"], "running")
+        r = g.on_self(fix(0, 0, race_pos=2, race_state=3), 2.5)       # same position, state 3
+        self.assertEqual([x["ev"] for x in r], ["race_state", "race_finish"])
+        rs = g.snapshot(2.5)["race"]
+        self.assertEqual((rs["state"], rs["state_name"], rs["finished"], rs["position"], rs["position_source"],
+                          rs["finish_age_s"]), (3, "finished", True, 2, "beacon_state", 0.0))
+        g.on_self(fix(0, 0, race_pos=2, race_state=3), 3.0)            # repeats: no second finish
+        r = g.on_race({"t": "race", "event": "finish", "position": 1}, 4.0)   # firmware finish later
+        self.assertEqual([x["ev"] for x in r], ["race_finish_cmd"])
+        rs = g.snapshot(4.0)["race"]
+        self.assertEqual((rs["position"], rs["position_source"], rs["finish_age_s"]), (1, "finish", 1.5))
+        g.on_self(fix(0, 0, race_pos=0, race_state=0), 6.0)            # NEW RACE: idle, chip stays
+        rs = g.snapshot(6.0)["race"]
+        self.assertEqual((rs["state_name"], rs["finished"]), ("idle", True))
+        g.on_self(fix(0, 0, race_pos=0, race_state=1), 7.0)            # next countdown via the beacon
+        self.assertFalse(g.snapshot(7.0)["race"]["finished"])
+
+    def test_firmware_finish_reads_finished_while_beacon_still_running(self):
+        """kart 2, 2026-11-06 01:51: firmware finish P1, beacon state still 2 for 5 s, then 0."""
+        g = kc.GameEngine()
+        g.on_self(fix(0, 0, race_pos=0, race_state=2), 1.0)
+        g.on_race({"t": "race", "event": "finish", "position": 1}, 2.0)
+        g.on_self(fix(0, 0, race_pos=0, race_state=2), 2.5)
+        rs = g.snapshot(2.5)["race"]
+        self.assertEqual((rs["state_name"], rs["beacon_state"], rs["position"]), ("finished", 2, 1))
 
     def test_js_change_direction_matches(self):
         node = find_node()

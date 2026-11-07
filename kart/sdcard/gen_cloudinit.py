@@ -182,7 +182,7 @@ def main():
     instance_id = f"gokart-kart-{kart_id}-{int(time.time())}"
     pw_hash = sha512_crypt(env["PI_PASSWORD"])
     cfg = json.loads((KART / "server" / "config.example.json").read_text())
-    cfg.pop("_comment", None)
+    cfg = {k: v for k, v in cfg.items() if not k.startswith("_")}
     cfg["kart_id"] = kart_id
     if env.get("PIT_URLS"):
         cfg["pit_urls"] = [u.strip() for u in env["PIT_URLS"].split(",") if u.strip()]

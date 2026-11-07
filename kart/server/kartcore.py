@@ -437,6 +437,14 @@ class CommandTracker:
 # sends the returned command lines and logs every returned record.
 R_EARTH = 6371000.0
 ZONE_EXIT_HYST_M = 3.0       # "outside" again only > 3 m outside the edge
+LAP_REARM_M = 6.0            # lap line: after a crossing, the next one counts only once the kart has been
+                             # this far from the line (GPS jitter on the line, a kart parked on the grid)
+SWEEP_MAX_GAP_S = 1.5        # zone entry also tests the path from the previous fix if it is this recent
+                             # (2 Hz self-line fallback at speed: a 3 m pad fits between two fixes)
+GO_LINE_STANDALONE_S = 5.0   # a go line with no countdown seen (display restarted mid-hold) starts a race
+GAME_STATE_MAX_AGE_S = 1800.0  # lap/race timing restored after a server restart if saved this recently
+GAME_TIMING_EVENTS = ("lap_start", "lap", "lap_reset", "race_countdown", "race_go", "race_finish",
+                      "race_released", "zones_lap_restored")
 NO_FIX_EXIT_S = 5.0          # no fix for this long: leave every zone, forget the previous fix
 MUD_REPEAT_S = 2.0           # mud: re-send while inside
 MUD_SECS = 3                 # each mud command lasts 3 s (so the cap ends <= 3 s after leaving)
@@ -453,6 +461,15 @@ MIN_LAP_DEFAULT_S = 20.0
 MIN_CIRCLE_R_M = 3.0         # ZONES.md: >= 3 (pads are typically 5 m)
 SCALE_MIN, SCALE_MAX = 0.10, 1.00
 SCALE_TOL = 0.015            # firmware MODE_MATCH_TOL
+
+
+def boot_id():
+    """Linux boot id (a restarted process in the same boot shares CLOCK_MONOTONIC), else "nonlinux"."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip()
+    except OSError:
+        return "nonlinux"
 
 
 def local_en(lat, lon, ref):
@@ -574,8 +591,20 @@ class Zone:
         n = len(self.poly)
         return min(dist_point_segment(p, self.poly[i], self.poly[(i + 1) % n]) for i in range(n))
 
+    def swept(self, lat1, lon1, lat2, lon2):
+        """True if the straight path between two fixes passes through the shape (entry between samples)."""
+        p, q = local_en(lat1, lon1, self.ref), local_en(lat2, lon2, self.ref)
+        if self.shape == "circle":
+            return dist_point_segment((0.0, 0.0), p, q) <= self.r
+        n = len(self.poly)
+        return point_in_polygon(p, self.poly) or any(
+            segment_crossing(p, q, self.poly[i], self.poly[(i + 1) % n]) is not None for i in range(n))
+
     def crossing(self, lat1, lon1, lat2, lon2):
         return segment_crossing(local_en(lat1, lon1, self.ref), local_en(lat2, lon2, self.ref), self.a, self.b)
+
+    def line_dist_m(self, lat, lon):
+        return dist_point_segment(local_en(lat, lon, self.ref), self.a, self.b)
 
 
 def parse_zones(doc):
@@ -991,6 +1020,7 @@ class GameEngine:
     def _reset_lap(self):
         self.lap = {"count": 0, "running": False, "start": None, "last_cross": None,
                     "last_s": None, "best_s": None, "times": []}
+        self.lap_armed = True       # False after a crossing until the kart is LAP_REARM_M from the line
 
     def active(self):
         return self.local_enabled and self.enabled and (bool(self.areas) or self.lapline is not None)
@@ -1134,18 +1164,23 @@ class GameEngine:
 
     def _evaluate(self, lat, lon, now, recs):
         entered = []
+        prev = self.prev_fix if self.prev_fix is not None and now - self.prev_fix[2] <= SWEEP_MAX_GAP_S else None
         for z in self.areas:
             d = z.outside_m(lat, lon)
             if z.id not in self.inside:
-                if d <= 0:
+                # inside now, or the path since the previous fix went through it (fast kart, 2 Hz fallback,
+                # small pad): an entry either way
+                if d <= 0 or (prev is not None and z.swept(prev[0], prev[1], lat, lon)):
                     self.inside[z.id] = now
                     entered.append(z)
-                    self._rec(recs, "zone_enter", now, zone=z.id, type=z.type, name=z.name)
+                    self._rec(recs, "zone_enter", now, zone=z.id, type=z.type, name=z.name,
+                              **({} if d <= 0 else {"swept": True}))
             elif d > ZONE_EXIT_HYST_M:
                 del self.inside[z.id]
                 self._exit_state(z.id, now)
                 self._rec(recs, "zone_exit", now, zone=z.id, type=z.type, name=z.name)
         in_mud = any(z.type == "mud" for z in self.areas if z.id in self.inside)
+        fire = []                   # (zone, kind, secs, scale): at most ONE goes to the Heltec per sample
         for z in entered:
             if z.type not in ("boost", "item"):
                 continue
@@ -1163,15 +1198,27 @@ class GameEngine:
                 name, secs, scale = roll_item(self.rng)
                 self._rec(recs, "item", now, zone=z.id, name=z.name, item=name)
                 if secs is not None:
-                    self._cmd(recs, now, z, "mud" if name == "mud" else "boost", secs, scale)
+                    fire.append((z, "mud" if name == "mud" else "boost", secs, scale))
             else:
                 st["fired"] = True
-                self._cmd(recs, now, z, "boost", z.secs, z.scale)
+                fire.append((z, "boost", z.secs, z.scale))
+        if fire:
+            # overlapping boost pad + item box entered on the same fix: both are used up (cooldowns, item
+            # roulette), but only the strongest effect is sent (highest scale, then longest), so two
+            # commands never race each other in the Heltec
+            best = max(fire, key=lambda f: (clamp_scale(f[3]), int(f[2])))
+            for f in fire:
+                if f is not best:
+                    self._rec(recs, "suppressed", now, zone=f[0].id, why=f"overlaps {best[0].id}")
+            self._cmd(recs, now, *best)
         self._mud(now, recs, entered=any(z.type == "mud" for z in entered))
-        if self.lapline is not None and self.prev_fix is not None and now - self.prev_fix[2] <= NO_FIX_EXIT_S:
-            t = self.lapline.crossing(self.prev_fix[0], self.prev_fix[1], lat, lon)
-            if t is not None:
-                self._cross(self.prev_fix[2] + t * (now - self.prev_fix[2]), now, recs)
+        if self.lapline is not None:
+            if not self.lap_armed and self.lapline.line_dist_m(lat, lon) > LAP_REARM_M:
+                self.lap_armed = True
+            if self.prev_fix is not None and now - self.prev_fix[2] <= NO_FIX_EXIT_S:
+                t = self.lapline.crossing(self.prev_fix[0], self.prev_fix[1], lat, lon)
+                if t is not None and t > 0.0:       # a fix exactly ON the line counts once (t == 1), not twice
+                    self._cross(self.prev_fix[2] + t * (now - self.prev_fix[2]), now, recs)
         self.prev_fix = (lat, lon, now)
         self.last_fix_mono = now
 
@@ -1200,6 +1247,16 @@ class GameEngine:
         if self.race["hold"] or (go is not None and t_cross < go):
             self._rec(recs, "lap_ignored", now, zone=L.id, why="before GO")
             return
+        if not self.lap_armed:
+            # still near the line since the last crossing: GPS jitter (or a kart sitting on the line).
+            # Before the first full lap the latest crossing is the real start (the kart leaves forward).
+            if lap["count"] == 0 and lap["running"]:
+                lap.update(start=t_cross, last_cross=t_cross)
+                self._rec(recs, "lap_start", now, zone=L.id, restart=True)
+            else:
+                self._rec(recs, "lap_ignored", now, zone=L.id, why="near the line (not re-armed)")
+            return
+        self.lap_armed = False
         if lap["last_cross"] is None:
             lap.update(running=True, start=t_cross, last_cross=t_cross)
             self._rec(recs, "lap_start", now, zone=L.id)
@@ -1224,20 +1281,37 @@ class GameEngine:
         A change records a "race_position" event: dir "up" (better), "down" (worse), "new", "gone"."""
         recs = [] if recs is None else recs
         r = self.race
+        prev_state = r["state"]
         if _num(state) and 0 <= int(state) <= 3:
             r["state"] = int(state)
-        if not _num(pos) or not 0 <= int(pos) <= 8:
-            return recs
-        p = int(pos)
-        if p == r["pos"]:
-            return recs
-        prev = r["pos"]
-        d = "new" if prev == 0 else "gone" if p == 0 else "up" if p < prev else "down"
-        r.update(pos=p, pos_prev=prev, pos_changed_mono=now, pos_changed_wall=wall)
-        if p:
-            r["last_pos"] = p
-        self._rec(recs, "race_position", now, pos=p, prev=prev, dir=d, state=r["state"])
+            if r["state"] != prev_state:
+                self._rec(recs, "race_state", now, state=r["state"], prev=prev_state)
+        p = int(pos) if _num(pos) and 0 <= int(pos) <= 8 else None
+        if p is not None and p != r["pos"]:
+            prev = r["pos"]
+            d = "new" if prev == 0 else "gone" if p == 0 else "up" if p < prev else "down"
+            r.update(pos=p, pos_prev=prev, pos_changed_mono=now, pos_changed_wall=wall)
+            if p:
+                r["last_pos"] = p
+            self._rec(recs, "race_position", now, pos=p, prev=prev, dir=d, state=r["state"])
+        # The pit beacon's race state is a second route to the flag (STOP RACE sends state 3 with the
+        # final positions; the per-kart `race 100+P` finish command may arrive later or be lost):
+        # state 3 = finished at once with the beacon's position; a new countdown (1) clears it.
+        if r["state"] == 3 and prev_state != 3:
+            if not r["finished"]:
+                self._finish(r["pos"] or r["last_pos"], "beacon_state", now, recs)
+            elif not r["position"] and (r["pos"] or r["last_pos"]):
+                r.update(position=r["pos"] or r["last_pos"], position_source="beacon_state")
+        elif r["state"] == 1 and prev_state != 1 and r["finished"]:
+            r.update(finished=False, position=None, finish_mono=None, finish_lap=None, position_source=None)
         return recs
+
+    def _finish(self, pos, src, now, recs):
+        r, lap = self.race, self.lap
+        r.update(hold=False, finished=True, position=pos, finish_mono=now, position_source=src if pos else None,
+                 finish_lap={"laps": lap["count"], "best_s": lap["best_s"], "last_s": lap["last_s"]})
+        lap.update(running=False)
+        self._rec(recs, "race_finish", now, position=pos, laps=lap["count"], best_s=lap["best_s"], source=src)
 
     def on_race(self, msg, now, wall=None):
         """{"t":"race","event":"countdown","go_in_ms":N,"secs":S,"go_utc":U} / {"event":"go"}.
@@ -1258,6 +1332,11 @@ class GameEngine:
         elif ev == "go":
             if r["hold"]:
                 self._go(now, now, "line", recs)
+            elif r["go_mono"] is None or now - r["go_mono"] > GO_LINE_STANDALONE_S:
+                # no countdown seen (display restarted during the hold, or the line was lost): this IS the
+                # start; a finish from the previous race is cleared like a countdown would
+                r.update(finished=False, position=None, finish_mono=None, finish_lap=None, position_source=None)
+                self._go(now, now, "line", recs)
             r["go_confirmed"] = True
             self._rec(recs, "race_go_line", now)
         elif ev == "position":
@@ -1267,15 +1346,17 @@ class GameEngine:
             # shows the FINISH takeover and the laps freeze until the next countdown
             pos = msg.get("position")
             pos = int(pos) if _num(pos) and 0 < int(pos) <= 8 else 0
+            if r["finished"] and r["position_source"] == "beacon_state":
+                # the beacon's state 3 got here first: the takeover is already showing; only refine
+                if pos and pos != r["position"]:
+                    r.update(position=pos, position_source="finish")
+                self._rec(recs, "race_finish_cmd", now, position=pos)
+                return recs
             src = "finish" if pos else None
             if not pos and r["last_pos"]:                # firmware sent no position: last beacon position
                 pos, src = r["last_pos"], "beacon"
-            lap = self.lap
-            r.update(position_source=src)
-            r.update(hold=False, finished=True, position=pos, finish_mono=now,
-                     finish_lap={"laps": lap["count"], "best_s": lap["best_s"], "last_s": lap["last_s"]})
-            lap.update(running=False)
-            self._rec(recs, "race_finish", now, position=pos, laps=lap["count"], best_s=lap["best_s"])
+            self._finish(pos, src, now, recs)
+            r["position_source"] = src
         return recs
 
     def _go(self, t_go, now, how, recs):
@@ -1285,6 +1366,45 @@ class GameEngine:
             self._rec(recs, "lap_reset", now, why="race GO")
         self._reset_lap()
         self._rec(recs, "race_go", now, how=how)
+
+    # -- survive a server restart (same boot) / a demo ------------------------------------
+    def export_state(self, now):
+        """Lap + race timing as plain JSON. Monotonic times are kept as they are: CLOCK_MONOTONIC is
+        system-wide, so they stay valid for another process in the same boot (checked by boot_id).
+        Not exported (rebuilt from live data): zone inside/cooldowns, overrides, positions, SLOW."""
+        r = self.race
+        return {"v": 1, "boot_id": boot_id(), "saved_mono": now,
+                "lapline": self.lapline.raw if self.lapline else None,
+                "lap": dict(self.lap, times=list(self.lap["times"])),
+                "race": {k: r[k] for k in ("hold", "go_at", "secs", "go_mono", "go_confirmed", "how", "finished",
+                                           "position", "finish_mono", "finish_lap", "position_source", "last_pos")}}
+
+    def import_state(self, doc, now):
+        """Restore export_state() after the zones are loaded. Only within the same boot, within
+        GAME_STATE_MAX_AGE_S, and with the very same lap line; otherwise timing starts fresh."""
+        recs = []
+        try:
+            ok = (isinstance(doc, dict) and doc.get("v") == 1 and doc.get("boot_id") == boot_id()
+                  and _num(doc.get("saved_mono")) and 0 <= now - doc["saved_mono"] <= GAME_STATE_MAX_AGE_S
+                  and self.lapline is not None and doc.get("lapline") == self.lapline.raw and self.active())
+            if not ok:
+                return recs
+            lap, race = doc["lap"], doc["race"]
+            if race.get("hold") and not (_num(race.get("go_at")) and race["go_at"] > now):
+                race["hold"] = False             # the countdown ended while we were down: GO happened
+                race["go_mono"] = race.get("go_at")
+            self.lap = {k: lap.get(k) for k in ("count", "running", "start", "last_cross", "last_s", "best_s")}
+            self.lap["count"] = int(self.lap["count"] or 0)
+            self.lap["times"] = list(lap.get("times") or [])[-10:]
+            self.lap_armed = False                # the kart may be sitting on the line right now
+            self.race.update({k: v for k, v in race.items() if k in self.race})
+            self.prev_fix = None
+            self._rec(recs, "zones_lap_restored", now, laps=self.lap["count"], best_s=self.lap["best_s"],
+                      running=self.lap["running"], finished=self.race["finished"],
+                      age_s=round(now - doc["saved_mono"], 1))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return []
+        return recs
 
     def grid_hold(self):
         return bool(self.race["hold"])
@@ -1338,8 +1458,12 @@ class GameEngine:
         out["finish_lap"] = r["finish_lap"]
         out["position_source"] = r["position_source"]
         out["pos"] = r["pos"]
-        out["state"] = r["state"]
-        out["state_name"] = RACE_STATES.get(r["state"])
+        # state: the beacon's race state, except that a finish this kart already has (firmware finish
+        # command or beacon state 3) reads "finished" until the beacon says idle or a new countdown
+        st = 3 if r["finished"] and r["state"] in (2, 3) else r["state"]
+        out["state"] = st
+        out["state_name"] = RACE_STATES.get(st)
+        out["beacon_state"] = r["state"]
         out["pos_changed_wall"] = r["pos_changed_wall"]
         out["pos_prev"] = r["pos_prev"]
         out["pos_changed_age_s"] = round(now - r["pos_changed_mono"], 2) if r["pos_changed_mono"] is not None else None

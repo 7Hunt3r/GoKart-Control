@@ -1,8 +1,10 @@
-# Installed by kart/install.sh (@KART_USER@ is substituted). Untested on a Pi 3 B.
+# Installed by kart/install.sh (@KART_USER@ is substituted). Running on kart 2 (Pi 3 B) since 2026-11-06.
 [Unit]
 Description=GoKart kart display server (Heltec USB link + driver page on :8081)
-After=network.target
+After=local-fs.target network.target systemd-udevd.service
 # No dependency on Wi-Fi: the kart display must run on track with no network.
+# Never give up restarting (the default limit stops a unit after 5 fast failures).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -14,6 +16,9 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /opt/gokart-kart/server/kart_server.py
 Restart=always
 RestartSec=2
+TimeoutStopSec=10
+# the display matters more than anything else on this Pi
+Nice=-5
 
 [Install]
 WantedBy=multi-user.target

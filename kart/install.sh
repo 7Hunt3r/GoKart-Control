@@ -6,7 +6,7 @@
 # Idempotent: safe to re-run after every update. Run from /opt/gokart-kart (first
 # boot does this) or from any copy of kart/ (rsynced into /opt/gokart-kart,
 # keeping server/config.json, logs/ and the map cache).
-# Adapted from pit/install.sh (ran on the pit Pi 4, 2026-11-05). UNTESTED ON A PI 3 B.
+# Adapted from pit/install.sh (ran on the pit Pi 4, 2026-11-05). Ran on kart 2 (Pi 3 B) 2026-11-06.
 set -uo pipefail
 [ "$(id -u)" -eq 0 ] || exec sudo bash "$0" "$@"
 
@@ -43,7 +43,7 @@ if [ ! -f "$DEST/server/config.json" ]; then
 import json, sys
 d, kid = sys.argv[1], sys.argv[2]
 cfg = json.load(open(f"{d}/config.example.json"))
-cfg.pop("_comment", None)
+cfg = {k: v for k, v in cfg.items() if not k.startswith("_")}
 if kid:
     cfg["kart_id"] = int(kid)
 json.dump(cfg, open(f"{d}/config.json", "w"), indent=2)
@@ -51,7 +51,18 @@ PY
   echo "created server/config.json (kart_id $(python3 -c "import json;print(json.load(open('$DEST/server/config.json'))['kart_id'])"))"
 fi
 chown -R "$KART_USER:$KART_USER" "$DEST"
-chmod +x "$DEST/kiosk/start-chromium.sh" "$DEST/install.sh" "$DEST/sim/sim_heltec.py" 2>/dev/null || true
+chmod 755 "$DEST/logs" "$DEST/cache" "$DEST/cache/map"
+chmod +x "$DEST/kiosk/start-chromium.sh" "$DEST/install.sh" "$DEST/deploy.sh" "$DEST/sim/sim_heltec.py" 2>/dev/null || true
+cfg_get() {   # cfg_get KEY DEFAULT -> value from server/config.json
+  python3 - "$DEST/server/config.json" "$1" "$2" <<'PY' 2>/dev/null || echo "$2"
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get(sys.argv[2])
+except (OSError, ValueError):
+    v = None
+print(sys.argv[3] if v is None else v)
+PY
+}
 
 echo "--- groups"
 for g in dialout video render input; do
@@ -91,16 +102,36 @@ udevadm control --reload-rules && udevadm trigger --subsystem-match=tty || true
 echo "--- avahi ($(hostname).local) + mDNS lookups (gokart-pit.local)"
 systemctl enable --now avahi-daemon || warn "avahi-daemon failed"
 
-echo "--- display: LESOWN L7 has no EDID; pin 1024x600 (Pi 3 B has one HDMI = HDMI-A-1)"
+echo "--- display: LESOWN L7 has no EDID; pin 1024x600 (Pi 3 B has one HDMI = HDMI-A-1); rotate from config.json"
+# "rotate": 0 (default) or 180 (panel mounted ports-down). 180 = the kernel turns the picture
+# (video=...,rotate=180) and a udev rule turns the touch input to match (libinput calibration matrix).
+ROTATE="$(cfg_get rotate 0)"
+case "$ROTATE" in 0|180) ;; *) warn "config rotate=$ROTATE not supported (0 or 180); using 0"; ROTATE=0 ;; esac
 CMDLINE=/boot/firmware/cmdline.txt
 if [ -f "$CMDLINE" ]; then
-  if ! grep -q "video=HDMI-A-1:1024x600" "$CMDLINE"; then
-    sed -i 's/[[:space:]]*$//; s/$/ video=HDMI-A-1:1024x600M@60 video=HDMI-A-2:1024x600M@60/' "$CMDLINE"
-    echo "cmdline.txt: added 1024x600 video= (takes effect after a reboot)"
-  fi
+  # rewrite our video= tokens (any previous rotation) and keep everything else; one line, idempotent
+  if python3 - "$CMDLINE" "$ROTATE" <<'PY'
+import sys
+path, rot = sys.argv[1], sys.argv[2]
+old = open(path).read()
+toks = [t for t in old.split() if not t.startswith(("video=HDMI-A-1:", "video=HDMI-A-2:"))]
+suffix = ",rotate=180" if rot == "180" else ""
+toks += [f"video=HDMI-A-1:1024x600M@60{suffix}", f"video=HDMI-A-2:1024x600M@60{suffix}"]
+new = " ".join(toks) + "\n"
+if new.split() != old.split():
+    open(path, "w").write(new)
+    print(f"cmdline.txt: video= set for rotate {rot} (takes effect after a reboot)")
+PY
+  then :; else warn "could not update $CMDLINE"; fi
 else
   warn "$CMDLINE not found; HDMI mode not pinned"
 fi
+if [ "$ROTATE" = 180 ]; then
+  install -m 644 "$DEST/udev/98-gokart-touch-rotate.rules" /etc/udev/rules.d/98-gokart-touch-rotate.rules
+else
+  rm -f /etc/udev/rules.d/98-gokart-touch-rotate.rules
+fi
+udevadm control --reload-rules && udevadm trigger --subsystem-match=input || true
 
 echo "--- systemd units"
 install -m 644 "$DEST/kiosk/pam-gokart-kart-kiosk" /etc/pam.d/gokart-kart-kiosk

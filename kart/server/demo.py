@@ -102,4 +102,4 @@ class Demo:
                     return
                 text = line.decode("utf-8", "replace").strip()
                 if text:
-                    self.on_line(text)
+                    self.on_line(text, self)     # the server checks it is still the current demo

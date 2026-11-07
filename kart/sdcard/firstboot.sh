@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-time first-boot steps, run by cloud-init runcmd as root from the unpacked payload.
 # Safe to re-run by hand: sudo bash /opt/gokart-kart/sdcard/firstboot.sh kart gokart-kart-2 McLab 2
-# Adapted from pit/sdcard/firstboot.sh. UNTESTED on a Pi 3 B.
+# Adapted from pit/sdcard/firstboot.sh. Flashed and booted kart 2 (Pi 3 B) 2026-11-06.
 set -u
 USER_NAME="${1:?user}"
 HOST_NAME="${2:-gokart-kart}"

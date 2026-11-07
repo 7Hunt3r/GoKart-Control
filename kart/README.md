@@ -19,12 +19,14 @@ recipe, same first-boot approach that ran on the pit Pi 4 on 2026-11-05).
 | Driver page | **Rendered on the Mac** in headless Chrome at 1024x600 against the simulator (driving, STOP+SLOW+fault, no fix/no VESC/no pit/no map, heading-up + beginner). Touch, pinch, press-and-hold and the follow-resume timer were **not** exercised with a finger on a real panel |
 | Parsing against real Heltec output | Real `cmd`/`log`/`ble` lines from the 2026-11-05 kart-2 console capture; `self` lines use the firmware's exact field set but **no real `self` line** has been fed through yet |
 | `gen_cloudinit.py`, `flash.sh` refusal checks | **Run on the Mac** (refuses `/dev/disk0` and a non-external disk). No kart card flashed yet |
-| Real Heltec over USB on a Pi 3 B, `/dev/heltec` udev rule, reconnect on unplug | **Untested** on a kart Pi (same 303a:1001 ESP32-S3 USB as the pit T-Beam, whose rule works) |
-| First boot, apt packages, cage + Chromium kiosk, HDMI 1024x600 pin, USB touch **on a Pi 3 B** | **Untested** (the recipe works on the pit Pi 4; Pi 3 B differences: 1 GB RAM, VC4 GPU, 2.4 GHz-only Wi-Fi, single HDMI) |
-| Map redraw cost on a Pi 3 B (3000x3044 JPEG, <=10 fps while moving) | **Untested**; north-up draws only the visible part of the image |
-| SLOW banner | From `slow_mph` in `self` lines (firmware 2026-11-06+), else **inferred** from `cmd` echoes; see "SLOW" below |
+| Real Heltec over USB on a Pi 3 B, `/dev/heltec` udev rule | **Running on kart 2** since 2026-11-06 16:26 (`/dev/heltec -> ttyACM0`, real `self`/`gps`/`ble`/`status`/`race` lines). Unplug/replug and a Heltec reboot mid-session: **tested on the Mac** only (`tests/test_e2e.py` `ServerPieces`, TCP stand-in) |
+| First boot, apt packages, cage + Chromium kiosk, HDMI 1024x600 pin, USB touch **on a Pi 3 B** | **Running on kart 2** since 2026-11-06 16:26 (Chromium 156, VC4 GPU compositing + accelerated canvas confirmed) |
+| Map redraw cost on a Pi 3 B | **Measured on kart 2** 2026-11-06 (quality pass): Chromium 83 % -> 24 % CPU idle, 192 % -> 96 % in demo (top, % of one core); see "Performance" |
+| Kiosk watchdog, `rotate: 180`, hardened units, RAM disk cache | **Written and checked locally only** (shell syntax, cmdline rewrite run on a copy); **not yet deployed** to a Pi |
+| SLOW banner | From `slow_mph` in `self` lines (firmware 2026-11-06+, what kart 2 runs); **inferred** from `cmd` echoes only for older firmware; see "SLOW" below |
 | HDMI panel sound (ALSA default = vc4-hdmi, Chromium WebAudio) | **Verified on kart 2** 2026-11-06: the HDMI PCM runs while the page plays; not listened to |
 | Polish pass UI (race takeover, finish, roulette, dark dash) | **Rendered** headless at 1024x600 locally and against kart 2 in demo mode, zero console errors |
+| Quality pass UI (2026-11-06 night: link chip, 56 px map buttons, finish chip/badge, layer cache) | **Rendered** headless at 1024x600 in 25 states against a fixture server, zero console errors; layer cache + merged frames **ran on kart 2** in demo mode |
 | Game layer (zones sync, boost/mud commands, laps, HUD) | **Tested on the Mac** (unit tests + simulator course e2e, HUD rendered headless at 1024x600). `boost` against a real VESC **not** exercised from the Pi; real pit zones were `enabled: false` at deploy |
 
 Simulated data is labelled: the simulator announces itself and the page shows a
@@ -35,8 +37,9 @@ striped SIMULATION banner.
 ```text
 kart/
   server/kart_server.py   HTTP + SSE + /cmd + session log + wiring (stdlib + pyserial)
-  server/kartcore.py      parsing, staleness, battery/mph, SLOW inference, command tracking (pure logic)
-  server/link.py          Heltec link: serial auto-find + reconnect, or TCP to the simulator (from pit/)
+  server/kartcore.py      parsing, staleness, battery/mph, SLOW, command tracking, game engine (pure logic)
+  server/link.py          Heltec link: serial auto-find + reconnect, writer thread, or TCP to the simulator
+  server/demo.py          demo mode: in-process simulator replacing the Heltec for the page
   server/mapsync.py       pit map package -> local cache (cache/map/), served at /map/<file>
   server/static/          index.html, app.js, style.css (driver page, no CDN)
   server/config.example.json   copy to config.json (gitignored)
@@ -46,9 +49,10 @@ kart/
   tests/                  test_core.py, test_mapsync.py, test_e2e.py
   install.sh              runs ON THE PI; idempotent install/update
   deploy.sh               Mac -> kart Pi rsync + restart
-  systemd/, kiosk/, udev/ units, PAM file + Chromium launcher, /dev/heltec rule
+  systemd/, kiosk/, udev/ units, PAM file + Chromium launcher (with watchdog), /dev/heltec rule,
+                          touch rotation rule (rotate 180 only)
   sdcard/                 SD card kit (flash.sh, gen_cloudinit.py, firstboot.sh, cloud-init/)
-  logs/, cache/           runtime (gitignored)
+  logs/, cache/           runtime (gitignored): session logs; cache/map (map package), cache/game-state.json
 ```
 
 ## Run it locally (Mac)
@@ -70,16 +74,36 @@ With a real Heltec on the Mac, run the server with no `--port`: it tries
 Tests (no hardware, no network):
 
 ```sh
-python3 -I kart/tests/test_core.py
-python3 -I kart/tests/test_mapsync.py
-python3 -I kart/tests/test_e2e.py
+python3 -I kart/tests/test_core.py      # parsing, derivations, commands, game engine (85 tests)
+python3 -I kart/tests/test_mapsync.py   # map package + zones sync against a fake pit
+python3 -I kart/tests/test_e2e.py       # simulator + fake pit + server processes; demo mode; link,
+                                        # session log, config, SSE deltas, restart persistence
 ```
+
+Demo mode on any machine: start the server (with or without a Heltec), then hold the KART badge
+3 s on the page, or `curl -XPOST -d '{"on":true}' http://127.0.0.1:8081/api/demo` from the same
+machine (`{"on":false}` ends it).
 
 ## Behaviour
 
-- **Input**: the Heltec's USB lines (`gkTelemetryToJson`): `self` (2 Hz, this
-  kart), `fleet` (each other kart heard; `rssi`/`snr` as heard by this kart),
-  `cmd`, `log`, `ble`, `status` (the server sends `status` on connect and every 60 s).
+- **Input** (lines consumed): the Heltec's USB lines (`gkTelemetryToJson`): `self` (2 Hz, this
+  kart), `gps` (one per fix, up to 5 Hz: game positions), `fleet` (each other kart heard;
+  `rssi`/`snr` as heard by this kart), `race` (countdown / go / position / finish), `cmd`
+  (echo of every command, any source), `log`, `ble`, `status`. Anything else that is not a JSON
+  object (boot chatter, a partial line after a reconnect, garbage) is logged and counted
+  (`rx_bad`), never shown; a line over 4 KB without a newline is dropped.
+- **Output** (lines sent, plain text, nothing else ever): `status` (read-only; 1 s after connect,
+  1 s after a detected Heltec reboot, then every `status_poll_s`), `mode N` (driver hold), `boost
+  SECS SCALE` (game layer only), and from localhost debugging only `slow [mph]`, `stop`, `start`,
+  `ping`. In demo mode all of them go to the simulator, never the Heltec.
+- **Link** (`link.py`): one reader thread per connection and a separate writer thread, so a stuck
+  USB endpoint never stalls reading (pyserial `write_timeout` 0.5 s, no `tcdrain`). A failed write
+  closes the port and the reader reconnects. A queued line older than 1 s is dropped and the queue
+  is emptied when the link drops: **nothing is replayed after a reconnect**. The state is in
+  `/api/state` `server.link` (`state`: `up` / `reconnecting` / `connecting` (never up) / `demo`,
+  `attempts`, `error`, `down_s`); the page shows one orange "USB: RECONNECTING #n" chip instead of
+  the PIT/VESC/GPS chips and a banner with how long it has been lost. A Heltec reboot (uptime drops)
+  re-polls `status`, clears an inferred SLOW and is logged (`heltec_reboot`).
 - **Freshness**: own kart is live if a `self` line arrived within 3 s; other
   karts are online <= 5 s, stale <= 15 s, else offline (pit thresholds). VESC
   values come only from samples with `vesc_link: true` and GPS only from
@@ -103,12 +127,11 @@ python3 -I kart/tests/test_e2e.py
   STOP/START are **not** on the driver page (pit controls them); `POST /cmd`
   still accepts them from localhost for debugging.
 - **STOPPED** (red, full width) comes straight from the `stopped` flag.
-- **SLOW** (orange): telemetry has no SLOW flag (all 8 flag bits are used), so
-  the display infers it from command echoes: a SLOW the firmware took
-  (accepted/applied/unknown) stays on until a START is echoed or the Heltec
-  reboots (uptime drops). After a display restart with a Heltec that has been
-  up more than 2 minutes, SLOW is "unknown" and no banner shows until the next
-  SLOW/START.
+- **SLOW** (orange): firmware from 2026-11-06 (kart 2) reports it in the `self` line as
+  `slow_mph` (0 = off), which the display uses directly. With older firmware (no `slow_mph`) it
+  is inferred from command echoes: a SLOW the firmware took (accepted/applied/unknown) stays on
+  until a START is echoed or the Heltec reboots (uptime drops); after a display restart with a
+  Heltec up more than 2 minutes it is "unknown" and no banner shows until the next SLOW/START.
 - **Fault**: `VESC FAULT n NAME` while VESC data is fresh, hidden when
   `beginner_mode` is on (driver presentation only; logs and the pit keep it).
 - **Map**: imagery from the cached package placed by its bounds, pit marker,
@@ -116,17 +139,31 @@ python3 -I kart/tests/test_e2e.py
   as a big arrow along the GPS heading, trails (own 120 s, others 30 s). FOLLOW
   keeps the own kart centred (north-up, or `heading_up` in config); a touch,
   drag, pinch or wheel pauses it and it resumes 10 s after the last touch. FOLLOW
-  off = free pan. ALL fits every kart + the course. Redraws on each SSE frame
-  (5 Hz) and at most `map_fps` (10) between frames, only while something moves.
-- **Logs**: `logs/session-YYYYmmdd-HHMMSS.jsonl`, one per server start: every
-  serial line received (`rx`) and sent (`tx`), each request (`op`), echoes,
-  link and map events. Oldest files are deleted beyond `max_log_mb` (800).
-- **HTTP** (0.0.0.0:8081): `/`, `/events`, `/api/state`, `/map/zones.json`,
-  `GET /api/sound-test[?alsa=1]` (localhost only), `POST /cmd`
-  (`{"cmd":"mode","arg":0-2}`, `slow` [mph], `stop`, `start`, `ping`, `status`;
-  localhost only unless `remote_cmd: true`), `POST /api/map/refresh`,
-  `/map/package.json`, `/map/<file>`, `/healthz`. Remote browsers can watch the
-  page but not send commands.
+  off = free pan. ALL fits every kart + the course. One scheduler draws the map at most
+  `map_fps` (10) times a second (30 while a finger is on it), in the same animation frame as the
+  DOM update of the latest SSE frame, and only while something changes or moves; nothing is
+  drawn while the page is hidden (requestAnimationFrame pauses). See "Performance".
+- **Logs**: `logs/session-YYYYmmdd-HHMMSS[-pNN].jsonl`, one per server start, a new part every
+  64 MB: every serial line received (`rx`) and sent (`tx`), each request (`op`), echoes, game
+  records, link/map/config events. `rx` lines go through a 64 KB buffer flushed every 0.25 s
+  (fewer SD writes); everything else is flushed at once. All session logs together stay under
+  `max_log_mb` (800): the oldest files go at start, at every rotation, every 5 minutes, and whenever
+  the card has under 300 MB free. A full card or an unwritable log dir never stops the display
+  (falls back to `/tmp/gokart-kart-logs`; `server.log_errors` counts failed writes). Measured on
+  kart 2: about 4.5 MB/hour standing still; driving adds the 5 Hz `gps` lines (estimate: a few
+  times that, not measured).
+- **HTTP** (0.0.0.0:8081): `GET /` (driver page), `/static/*`, `/events` (SSE, ~5 Hz: the full
+  state first, then `{"_d":1, ...}` with only the top-level keys that changed; `heltec`,
+  `rx_*`, `gps_lines`, `kiosk` are left out), `/api/state` (everything, once), `/api/kiosk`
+  (heartbeat age, for the watchdog), `/map/package.json`, `/map/zones.json` (404 = no game),
+  `/map/<image>`, `/healthz`, `GET /api/sound-test[?alsa=1]` (localhost); `POST /cmd`
+  (`{"cmd":"mode","arg":0-2}`, `slow` [mph 1-40], `stop`, `start`, `ping`, `status`; localhost
+  only unless `remote_cmd: true`), `POST /api/demo` (`{"on":bool}` / `{"toggle":true}`,
+  localhost), `POST /api/map/refresh`, `POST /api/heartbeat` (the kiosk page, localhost; frame
+  stats land in `/api/state` `kiosk`). Remote browsers can watch the page but not send commands.
+- **Kart id**: `kart_id` in config is a label; the Heltec's own id (from `self`) wins. A mismatch
+  shows the KART chip red with a "?", the note "Heltec says kart N; display config says M", and is
+  logged once (`kart_id_mismatch`, also in the journal).
 
 ## Game layer
 
@@ -176,6 +213,23 @@ with a fix, plus a 4 Hz tick):
 - **Hysteresis** 3 m for every zone; **no fix** = no evaluation, and after 5 s
   without a fix every zone is left and the previous fix forgotten (no lap
   "crossing" across a GPS gap).
+- **Entry between samples**: a zone is also entered when the straight path from the previous fix
+  (<= 1.5 s old) passes through it (`zone_enter` with `swept: true`), so a fast kart on the 2 Hz
+  `self` fallback cannot jump over a 3 m pad. Entered and left on one fix = enter + exit records.
+- **Lap line jitter**: after a counted crossing the line is re-armed only once the kart has been
+  more than 6 m from it, so GPS jitter while parked on (or gridded at) the line never counts laps;
+  before the first full lap the latest crossing of such an episode is the lap start. A fix exactly
+  on the line counts once, not twice.
+- **Overlaps**: a boost pad and an item box entered on the same fix are both used up (cooldowns,
+  roulette) but only the strongest effect (highest scale, then longest) is sent; the other is a
+  `suppressed` record (`overlaps <id>`). Mud still wins over both.
+- **Timing across restarts**: lap count/last/best/current-lap start and the race state (GO time,
+  hold, finish, position) are saved to `cache/game-state.json` on every lap/race event and restored
+  when the server restarts **in the same boot** (monotonic clock), within 30 minutes, with the very
+  same lap line. Not kept: zone inside/cooldowns, boost overrides (the Heltec reverts on its own),
+  positions/trails, SLOW inference, demo state. Entering demo mode parks the real timing and
+  leaving it restores it; nothing from the simulated kart survives the switch (late simulator lines
+  are dropped by identity under the app lock).
 - **Never**: a scale above 1.0 (clamped to 0.10-1.00, secs 1-30), STOP/START/mode/
   SLOW, or anything while the `self` line says **STOPPED** (a boost entered while
   stopped is used up, not saved for START; mud resumes after START if still
@@ -199,19 +253,27 @@ with a fix, plus a 4 Hz tick):
   `ev: "item"` with `item: boost|super|mud|empty`.
 - **Race start** (`{"t":"race","event":"countdown","go_in_ms":N,...}` /
   `{"event":"go"}` from the race firmware): GO = the countdown line's arrival +
-  `go_in_ms`; the go line only confirms it (`game.race.go_confirmed`). Grid hold
+  `go_in_ms`; the go line only confirms it (`game.race.go_confirmed`). A go line with no
+  countdown seen (display restarted during the hold) starts the race itself (laps reset, a previous
+  finish cleared). Grid hold
   lasts until GO, or until a STOP/START echo (the firmware clears the hold).
   During the hold no zone command is sent and lap-line crossings are ignored;
   laps reset at GO and count from the first crossing after it.
 - **Running position** (race firmware 2026-11-06 20:30+, from the pit beacon): the
   `self` line's `race_pos` (0 = none, 1-8) and `race_state` (0 idle, 1 countdown,
   2 running, 3 finished), and `{"t":"race","event":"position","position":P,"state":S}`
-  on every change. `/api/state` `game.race` has `pos`, `state`, `state_name`,
-  `pos_prev`, `pos_changed_wall`; each change is a `race_position` game event
+  on every change. `/api/state` `game.race` has `pos`, `state`, `state_name`, `beacon_state`,
+  `pos_prev`, `pos_changed_wall`; the beacon's state is applied from every `self` line (a
+  `race_state` event on change). **Beacon state 3** (pit STOP RACE) finishes the race at once with
+  the beacon position (`position_source: "beacon_state"`) even if the per-kart finish command has
+  not arrived; a later firmware finish only refines the position (`race_finish_cmd`). `state`
+  reads 3 "finished" while this kart has a finish and the beacon still says running; beacon state
+  1 (next countdown) clears it. On 2026-11-06 01:51 kart 2's Heltec never reported state 3 (2 -> 0
+  at NEW RACE), so that gap is upstream of the display; each change is a `race_position` game event
   (`dir`: new / up / down / gone). The FINISH takeover uses the firmware's finish
   position and falls back to the last beacon position (`position_source`).
   The page shows a 72 px "P3" badge in the kart's colour next to the lap panel
-  (hidden at 0) that pops on change, with an ascending two-note when the position
+  (hidden at 0; after the flag it shows the finishing place) that pops on change, with an ascending two-note when the position
   improves and a descending one when it drops (tones live in app.js because
   sound.js must stay identical to the pit's copy).
 - **Gates for every zone command**: game on, kart not STOPPED, not in grid hold,
@@ -234,7 +296,7 @@ coloured by how well the kart hears the pit (`base_rssi` > -90 green, > -105 amb
 and a short full-screen flash (the text pops in) + synthesized sound on boost, mud and each
 lap; the BOOST meter pulses while boosting.
 Item boxes show as a blue/white "?" box; entering one plays a ~1.2 s roulette
-(a 176 px box at the top centre of the map, each icon popping in) ending on the result, with a
+(a 176 px box at the top of the map, left of the map buttons, each icon popping in) ending on the result, with a
 spinning star for SUPER.
 Every zone keeps its true-scale ring but its marker is at least 24 px across, so
 3-5 m pads stay visible at the 70 m follow span. The track is drawn under the
@@ -249,14 +311,15 @@ meter reads GRID. STOPPED/SLOW/connection banners and a VESC fault stay above th
 Race finish (`{"t":"race","event":"finish","position":P}` from the firmware when the pit
 sends `race` 0 or 100 + P): a full-screen checkered takeover with "P3" + "FINISH" (or a
 huge "FINISH" when P is 0), the kart's laps and best lap and a fanfare, for 6 s, then a 0.5 s
-fade and a small "FINISHED P3" chip on the map until the next countdown. Laps stop counting
+fade; the lap panel then reads FINISHED and the P badge the finishing place until the next
+countdown (with the game off, a small "FINISHED P3" chip next to GAME OFF). Laps stop counting
 after the flag (`lap_ignored` why `finished`) and start again with the next countdown.
 **Map orientation**: `map_orientation` defaults to `heading_up` and
 `follow_span_m` to 70: while following, the map turns with the kart (at most
 120 deg/s; the heading is held below 1.5 m/s) and the kart sits ~60 % down the
 map so more of the track ahead is visible. Touch/pinch still pauses following
 (north-up while panning) and FOLLOW resumes it; the round "N" compass (top right, under
-the slim see-through FOLLOW / + / - / ALL buttons) shows where north is. ALL fits the karts,
+the see-through FOLLOW / + / - / ALL buttons, 66 x 56 px) shows where north is. ALL fits the karts,
 the course, the zones and the track. The own kart is an arrow with a white outline and a
 drop shadow. The safety
 banners (STOPPED, SLOW, connection, SIMULATION) sit above the flash and keep their
@@ -357,20 +420,59 @@ Hostname `gokart-kart-N` (`gokart-kart-N.local`), user `kart`, app in
 `/opt/gokart-kart`, config `/opt/gokart-kart/server/config.json`.
 
 - `gokart-kart.service`: `python3 /opt/gokart-kart/server/kart_server.py` as
-  `kart` (group dialout), `Restart=always`, no Wi-Fi dependency.
+  `kart` (group dialout), `Restart=always`, `StartLimitIntervalSec=0` (never gives up),
+  `Nice=-5`, no Wi-Fi dependency.
 - `gokart-kart-kiosk.service`: cage + Chromium (`--kiosk http://127.0.0.1:8081/`)
-  on tty1 via the PAM/logind recipe from `pit/kiosk`. Extra Chromium flags for
-  the Pi 3 B (e.g. `--disable-gpu` if the GPU path misbehaves) go in
+  on tty1 via the PAM/logind recipe from `pit/kiosk`, `Restart=always`, `StartLimitIntervalSec=0`.
+  `kiosk/start-chromium.sh` flags: one renderer, disk cache on the RAM disk (`$XDG_RUNTIME_DIR`),
+  `--disable-renderer-accessibility` (Debian's `/etc/chromium.d/default-flags` forces it on; ~5 %
+  CPU on kart 2), autoplay without a gesture, no crash/restore bubbles, no background networking
+  or component updates. GPU: Debian's defaults already enable GPU rasterization; VC4 compositing
+  and the accelerated 2D canvas work on kart 2. Extra flags (e.g. `--disable-gpu` if the GPU path
+  misbehaves, or `--remote-debugging-port=9222` for measurements) go in
   `/etc/default/gokart-kart-kiosk` as `GOKART_CHROMIUM_FLAGS="..."`.
+- **Kiosk watchdog** (in `start-chromium.sh`): every 10 s it checks that Chromium is running and
+  that the page has sent its 5 s heartbeat (`/api/kiosk` `age_s`) within 60 s while the server has
+  been up 60 s (90 s grace after start). Otherwise it stops Chromium and exits; cage exits and
+  systemd restarts the kiosk. A server restart alone never trips it.
 - udev `/etc/udev/rules.d/99-gokart-heltec.rules` makes `/dev/heltec`.
-- `install.sh` appends `video=HDMI-A-1:1024x600M@60 video=HDMI-A-2:1024x600M@60`
-  to `/boot/firmware/cmdline.txt` (the L7 has no EDID; the Pi 3 B's only port is HDMI-A-1).
+- `install.sh` writes `video=HDMI-A-1:1024x600M@60 video=HDMI-A-2:1024x600M@60`
+  into `/boot/firmware/cmdline.txt` (the L7 has no EDID; the Pi 3 B's only port is HDMI-A-1),
+  replacing any earlier `video=HDMI-A-*` tokens, so re-running it is safe.
+- **Panel mounted ports-down** (`"rotate": 180` in `config.json`, then `sudo bash install.sh`
+  and a reboot): the video= tokens get `,rotate=180` (the kernel turns the picture) and
+  `/etc/udev/rules.d/98-gokart-touch-rotate.rules` gives every touchscreen the libinput
+  calibration matrix `-1 0 1 0 -1 1` so touches land where the picture is. `"rotate": 0` removes
+  both. **Documented, not enabled on kart 2, and not yet tried on a panel**: if cage/wlroots does
+  not honour the kernel rotation, the fallback is cage's own `-r -r` in the kiosk unit (the touch
+  rule would then have to go).
 
 ```sh
 journalctl -u gokart-kart -f
 journalctl -u gokart-kart-kiosk -b
 sudo systemctl restart gokart-kart gokart-kart-kiosk
 ```
+
+### Performance (Pi 3 B, kart 2, 2026-11-06)
+
+`top` (% of one core, 400 = all four), Chromium all processes, page on the real kart (idle: no GPS
+fix, nothing moving) and in demo mode (heading-up, 15 mph, track + zones, 3000 x 3044 photo):
+
+| | idle | demo |
+| --- | --- | --- |
+| before the quality pass | 83 % | 192 % (215 % in a second run) |
+| after (layer cache, diffed DOM, one scheduler, merged frames, no 60 fps CSS pulses, a11y off) | 24 % | 96 % |
+
+Page main thread (CDP, demo): `render()` 37 ms avg / 69 ms p95 -> under 5 ms; map draws 13.5/s ->
+<= 10/s (`map_fps`); long tasks 55 -> 16 per 24 s. kart_server.py: 2 % idle, 6-8 % in demo (the
+demo simulator runs in-process). The page reports its own frame stats every 5 s in `/api/state`
+`kiosk.stats` (`draws`, `draw_ms_avg`, `draw_ms_max`, `renders`, `render_ms_avg`, `layer_builds`).
+
+How the map stays cheap: the photo, course, track band, zone shapes and lap line are drawn once
+into an offscreen canvas (north-up, current zoom, <= 2048 px for the VC4 texture limit, centred on
+the view with ~420 px margin) and only blitted, rotated, per frame. It is rebuilt when its content
+changes, when the zoom settles (150 ms; meanwhile the old one is scaled), or when the view drifts
+past the margin (~50 m at the follow zoom). The photo goes in only after `decode()`.
 
 ### Updating remotely
 
@@ -386,6 +488,49 @@ deploy.sh keeps the Pi's `server/config.json`, `logs/` and `cache/` (excludes ar
 anchored to the top of kart/, checked locally with rsync into a scratch dir).
 Change the kart id, pit URL or beginner mode by editing
 `/opt/gokart-kart/server/config.json` and restarting `gokart-kart`.
+
+### Config (`server/config.json`)
+
+Every key is optional; `config.example.json` lists them all with a `_doc` entry each (keys
+starting with `_` are ignored). A bad value (wrong type, out of range, unknown key) is replaced
+by the default and reported in the journal (`CONFIG: ...`), the session log and `/api/state`
+`server.config_warnings`; a config.json that is not valid JSON means defaults, not a crash loop.
+
+| Key | Default | |
+| --- | --- | --- |
+| `kart_id` | 2 | 1-8, label only (the Heltec's id wins) |
+| `pit_urls` | mDNS, then 192.168.151.240 | map package sources, in order |
+| `map_poll_s` | 30 | pit poll period |
+| `beginner_mode` | false | hide VESC fault alerts on the page |
+| `map_orientation` | heading_up | or north_up (while following) |
+| `follow_span_m` / `follow_resume_s` | 70 / 10 | follow zoom; resume after a touch |
+| `mode_hold_ms` | 500 | mode button hold (0 = tap) |
+| `map_fps` | 10 | max map redraws/s (1-30) |
+| `bind` / `http_port` | 0.0.0.0 / 8081 | |
+| `remote_cmd` | false | allow /cmd, /api/demo, sound test from other machines |
+| `serial_port` / `tcp` | null / null | Heltec device (null = auto) / simulator |
+| `status_poll_s` | 60 | `status` request period |
+| `log_dir` / `cache_dir` | null | default `<kart>/logs`, `<kart>/cache/map` |
+| `max_log_mb` | 800 | all session logs together |
+| `game` / `gps_correction` | true / false | game layer; pit-base position correction |
+| `demo` / `demo_max_s` | true / 180 | demo mode allowed; its length |
+| `sound` / `sound_volume` | true / 0.8 | page sounds |
+| `rotate` | 0 | install.sh only: 180 = ports-down mount |
+
+### Troubleshooting
+
+| Symptom | Look at |
+| --- | --- |
+| Black screen / no page | `systemctl status gokart-kart-kiosk`, `journalctl -u gokart-kart-kiosk -b` (watchdog restarts are logged there) |
+| "USB: RECONNECTING" chip | `ls -l /dev/heltec`, `journalctl -u gokart-kart -f` (`link unavailable: ...`), `/api/state` `server.link.error`; replug the Heltec; the display reconnects every 2 s and never resends a command |
+| "KART COMPUTER SILENT" | the Heltec is connected but quiet (rebooting, wedged): `/api/state` `rx_lines` not moving; `heltec.reboots_seen` |
+| Map but no photo | `/api/state` `map.sync` (`reachable`, `last_error`); the photo only downloads on the pit Wi-Fi |
+| "GAME OFF" | `/api/state` `game.off_reason` (no zones from the pit, off at the pit, `game: false` here) |
+| KART chip red "2?" | `kart_id` in config.json differs from the Heltec's `id` |
+| Laps not counting | `game.events` (`lap_ignored` with `why`), `game.pos.quality` (weak GPS pauses zones and laps) |
+| Slow / jerky page | `/api/state` `kiosk.stats` (draws/s, ms per draw, layer rebuilds); `top` on the Pi |
+| No sound | `GET /api/sound-test` and `?alsa=1` from the Pi (see "Panel speakers") |
+| Config ignored | `journalctl -u gokart-kart \| grep CONFIG`, `/api/state` `server.config_warnings` |
 
 ### SD card kit (`sdcard/`)
 
