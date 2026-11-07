@@ -188,10 +188,10 @@ static void serviceStat() {
     int w = snprintf(karts + n, sizeof karts - n, "%s{\"kart\":%d,\"rssi\":%.0f,\"heard\":%lu,\"relayed\":%lu}", n ? "," : "", k, kartRssi[k], (unsigned long)heardKart[k], (unsigned long)relayedKart[k]);
     if (w > 0) n = min(n + (size_t)w, sizeof karts - 1);
   }
-  Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":%s,\"heard\":%lu,\"relayed\":%lu,\"hb_tx\":%lu,\"dupes\":%lu,\"dropped\":%lu,\"late\":%lu,\"rx_bad\":%lu,\"pit_rssi\":%s,\"pit_age_s\":%s,\"batt_v\":%.2f,\"uptime_s\":%lu,\"oled\":%s,\"oled_drv\":\"%s\",\"oled_addr\":\"0x%02x\",\"id3c\":\"0x%02x\",\"i2c\":\"%s\",\"karts\":[%s]}\n",
+  Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":%s,\"heard\":%lu,\"relayed\":%lu,\"hb_tx\":%lu,\"dupes\":%lu,\"dropped\":%lu,\"late\":%lu,\"rx_bad\":%lu,\"pit_rssi\":%s,\"pit_age_s\":%s,\"batt_v\":%.2f,\"uptime_s\":%lu,\"oled\":%s,\"oled_drv\":\"%s\",\"oled_addr\":\"0x%02x\",\"id3c\":\"0x%02x\",\"i2c\":\"%s\",\"tx_dbm\":%d,\"karts\":[%s]}\n",
                 FW_VERSION, gkBool(radioOk), (unsigned long)heard, (unsigned long)relayed, (unsigned long)hbTx, (unsigned long)dupes, (unsigned long)dropped, (unsigned long)late, (unsigned long)rxBad,
                 baseHeardMs ? String((int)baseRssi).c_str() : "null", baseHeardMs ? String((unsigned long)((millis() - baseHeardMs) / 1000)).c_str() : "null",
-                (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, (unsigned long)(millis() / 1000), gkBool(oledOk), oledDrv.c_str(), oledAddr, id3c, i2cFound, karts);
+                (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, (unsigned long)(millis() / 1000), gkBool(oledOk), oledDrv.c_str(), oledAddr, id3c, i2cFound, (int)LORA_TX_POWER_DBM, karts);
 }
 
 static void serviceOled() {
@@ -228,7 +228,7 @@ void setup() {
   if (oledOk) { oled->clearBuffer(); oled->setFont(u8g2_font_7x14B_tf); oled->drawStr(0, 13, "GOKART REPEATER"); oled->setFont(u8g2_font_6x10_tf); oled->drawStr(0, 30, "starting..."); oled->sendBuffer(); }
   SPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
   radioStatus = radio.begin(GK_LORA_FREQ_MHZ, GK_LORA_BW_KHZ, GK_LORA_SF, GK_LORA_CR, GK_LORA_SYNC_WORD, LORA_TX_POWER_DBM, GK_LORA_PREAMBLE, LORA_TCXO_V, false);
-  if (radioStatus == RADIOLIB_ERR_NONE) { radio.setDio2AsRfSwitch(true); radio.setCurrentLimit(140); radio.setPacketReceivedAction(onLoraIrq); radio.startReceive(); radioOk = true; }
+  if (radioStatus == RADIOLIB_ERR_NONE) { radio.setDio2AsRfSwitch(true); radio.setCurrentLimit(140); radio.setRxBoostedGainMode(true, true); radio.setPacketReceivedAction(onLoraIrq); radio.startReceive(); radioOk = true; }   // boosted LNA: ~2 dB sensitivity for ~0.7 mA
   esp_task_wdt_config_t wdt = { .timeout_ms = WDT_TIMEOUT_S * 1000, .idle_core_mask = 0, .trigger_panic = true };
   if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) esp_task_wdt_init(&wdt);
   esp_task_wdt_add(NULL);

@@ -4,7 +4,7 @@
 // and GNSS rails before either chip answers; the rail map is from Meshtastic Power.cpp.
 #pragma once
 
-#define FW_VERSION "repeater-0.1.0"
+#define FW_VERSION "repeater-0.2.1"
 
 // LoRa (SX1262 module on the Supreme; LR1121 variants exist and are NOT handled yet)
 #define PIN_LORA_CS    10
@@ -15,7 +15,7 @@
 #define PIN_LORA_DIO1  1
 #define PIN_LORA_BUSY  4
 #define LORA_TCXO_V    1.8
-#define LORA_TX_POWER_DBM 20   // SX1262 direct to antenna, no external amplifier
+#define LORA_TX_POWER_DBM 22   // SX1262 maximum (no external amplifier here); setup() raises the PA current limit to 140 mA for it
 
 // GNSS (u-blox M10 on the Supreme)
 #define PIN_GNSS_RX    9       // ESP32 receives here

@@ -121,8 +121,9 @@ python3 -I pit/tests/test_e2e.py
   The repeater chip shows the rate (`rep -3 dBm · 1 Hz`); `/api/state` `fleet.rate`.
 - **SCALE ≠ MODE.** When a kart's live `scale` differs from its requested mode's scale (ECO 80/140,
   NORMAL 100/140, SPORT 1.0) by more than 0.05 for 10 s while online with fresh VESC data, not stopped,
-  not in a race grid hold and not boosted by the pit in the last 7 s (or at once when the kart reports
-  `revert_missed`), the card shows an amber "SCALE ≠ MODE, tap to resend" badge (kiosk: SCALE≠MODE);
+  not in a race grid hold and not boosted by the pit in the last 7 s, the card shows an amber
+  "SCALE ≠ MODE, tap to resend" badge (kiosk: SCALE≠MODE). (The kart's own `revert_missed` flag is on
+  its USB `status` line only; the telemetry packet has no spare flag bit for it.)
   tapping it sends that kart's mode again. Start and end are logged (`scale_mismatch`). A kart parked in a
   mud zone for 10 s would also trip it (the pit does not evaluate zones per kart).
 - **Race (RACE ON / OFF).** Entered karts and race mode are shared server state. RACE ON sends

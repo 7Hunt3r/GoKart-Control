@@ -421,11 +421,11 @@ static void serviceHost() {
     if (WiFi.status() == WL_CONNECTED) snprintf(wifi, sizeof wifi, "\"%s\"", WiFi.localIP().toString().c_str());
     char benchAge[12] = "null"; if (benchMs) snprintf(benchAge, sizeof benchAge, "%lu", (unsigned long)((millis() - benchMs) / 1000));
     Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s,\"beacon_tx\":%lu,\"sync\":\"%s\",\"relay_rx\":%lu,"
-                  "\"beacon_skipped\":%lu,\"cmd_q\":%d,\"cmd_dropped\":%lu,\"cmd_forced\":%lu,\"heap\":%lu}\n",
+                  "\"beacon_skipped\":%lu,\"cmd_q\":%d,\"cmd_dropped\":%lu,\"cmd_forced\":%lu,\"tx_dbm\":%d,\"heap\":%lu}\n",
                   FW_VERSION, radioOk ? "sx1262" : "none", (unsigned long)loraRx, (unsigned long)loraTx, (unsigned long)loraRxBad,
                   (unsigned long)(millis() / 1000), (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, wifi, kartsOnline(),
                   (unsigned long)benchRx, benchAge, (unsigned long)beaconTx, ppsFreshB() ? "pps" : (edgeSetMs && millis() - edgeSetMs < 5000 ? "karts" : "free"), (unsigned long)relayRx,
-                  (unsigned long)beaconSkipped, queueLen(), (unsigned long)cmdDropped, (unsigned long)cmdForced, (unsigned long)ESP.getFreeHeap());
+                  (unsigned long)beaconSkipped, queueLen(), (unsigned long)cmdDropped, (unsigned long)cmdForced, (int)LORA_TX_POWER_DBM, (unsigned long)ESP.getFreeHeap());
   }
 }
 
@@ -511,6 +511,7 @@ void setup() {
   if (radioStatus == RADIOLIB_ERR_NONE) {
     radio.setDio2AsRfSwitch(true);
     radio.setCurrentLimit(140);
+    radio.setRxBoostedGainMode(true, true);   // SX1262 "boosted" LNA: ~2 dB better sensitivity for ~0.7 mA
     radio.setPacketReceivedAction(onLoraIrq);
     radio.startReceive();
     radioOk = true;

@@ -125,7 +125,7 @@ def _age(last_mono, now):
 VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "ah", "scale")
 STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "slow_mph", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
-                 "base_rssi", "rssi", "snr", "rx_ms", "revert_missed")
+                 "base_rssi", "rssi", "snr", "rx_ms")
 TRAIL_POINTS = 30
 LATE_WINDOW_S = 3.0      # a packet up to LATE_SEQS behind the last one, within this time, is a late copy
 LATE_SEQS = 16
@@ -220,12 +220,12 @@ class KartState:
     def _mismatch(self, now):
         if self.mismatch_since is None:
             return None
-        if now - self.mismatch_since < SCALE_MISMATCH_S and self.status.get("revert_missed") is not True:
-            return None                 # (the kart's own revert_missed flag shows it at once)
+        if now - self.mismatch_since < SCALE_MISMATCH_S:
+            return None                 # (the kart's own revert_missed flag is USB-console only: the
+                                        #  47-byte telemetry has no spare flag bit for it)
         mr = self.status.get("mode_req")
         return {"since_s": round(now - self.mismatch_since, 1), "scale": self.vesc.get("scale"),
-                "want": round(MODE_SCALES[mr], 3) if mr in MODE_SCALES else None, "mode": mr,
-                "revert_missed": self.status.get("revert_missed") is True}
+                "want": round(MODE_SCALES[mr], 3) if mr in MODE_SCALES else None, "mode": mr}
 
     def scale_off(self, now, boosted, on_grid):
         """True when this kart's live scale disagrees with its requested mode right now (and nothing

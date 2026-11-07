@@ -66,6 +66,11 @@ String  wifiSsid, wifiPass, otaPass, vescMac;
 
 // ---------------------------------------------------------------- radio
 SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
+// SX1262 drive level (dBm) into the KCT8103L front end; LORA_TX_POWER_DBM unless `txpower N` stored another.
+static int8_t txPowerDbm = LORA_TX_POWER_DBM;
+// Front-end TX gain per drive level (see config.h); radiated power is drive + gain.
+static int femGainDb(int drive) { static const uint8_t g[22] = {13,13,13,13,13,13,13,13,13,13,13,13,13,13,12,12,11,11,10,9,8,7}; return (drive >= 0 && drive < 22) ? g[drive] : 7; }
+static int radiatedDbm() { return txPowerDbm + femGainDb(txPowerDbm); }
 volatile bool loraIrq = false;
 volatile uint32_t loraIrqMicros = 0;
 void IRAM_ATTR onLoraIrq() { loraIrq = true; loraIrqMicros = micros(); }
@@ -925,7 +930,7 @@ static void usbStatus() {
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
                 "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
                 "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
-                "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"heap\":%lu,\"heap_min\":%lu}\n",
+                "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"tx_dbm\":%d,\"tx_radiated_dbm\":%d,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
                 (unsigned long)loraTx, (unsigned long)loraRx, (unsigned long)loraRxBad, gkBool(gpsLocked),
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
@@ -936,7 +941,7 @@ static void usbStatus() {
                 vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
                 hdopStr, (unsigned long)gps.location.age(), gps.location.isValid() ? gps.location.lat() : 0.0, gps.location.isValid() ? gps.location.lng() : 0.0,
-                (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
+                (int)txPowerDbm, radiatedDbm(), (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
 }
 
 static void usbCommand(char* line) {
@@ -1016,8 +1021,17 @@ static void usbCommand(char* line) {
     }
   }
   else if (!strcmp(line, "gpsline") && arg) { gpsLineOn = !strcmp(arg, "on"); prefs.putBool("gpsline", gpsLineOn); logf("gps fix line %s", gpsLineOn ? "on" : "off"); }
+  else if (!strcmp(line, "txpower") && arg) {              // txpower N: SX1262 drive 0..22 dBm into the front end, stored; radiated = N + 7..13 dB (config.h table)
+    int p = atoi(arg);
+    if (p < 0 || p > 22) logf("txpower must be 0..22 (SX1262 drive dBm; radiated = drive + 7..13 dB)");
+    else {
+      radio.standby(); int st = radio.setOutputPower(p); radio.startReceive();
+      if (st == RADIOLIB_ERR_NONE) { txPowerDbm = p; prefs.putChar("txpwr", p); logf("tx power: %d dBm drive, about %d dBm radiated (stored)", p, radiatedDbm()); }
+      else logf("setOutputPower(%d) failed: %d", p, st);
+    }
+  }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -1092,6 +1106,7 @@ void setup() {
   vescMac  = prefs.getString("vescmac", "");
   vescUuid = prefs.getString("vescuuid", "");
   reportRate = prefs.getUChar("rate", 2); if (reportRate != 1) reportRate = 2;   // default 2 Hz (owner: "go faster")
+  txPowerDbm = prefs.getChar("txpwr", LORA_TX_POWER_DBM); if (txPowerDbm < 0 || txPowerDbm > 22) txPowerDbm = LORA_TX_POWER_DBM;
   if (kartId < 1 || kartId > GK_MAX_KARTS) kartId = DEFAULT_KART_ID;
 
   // OLED (Vext powers it, active low)
@@ -1105,11 +1120,12 @@ void setup() {
   pinMode(PIN_FEM_CTX, OUTPUT);   digitalWrite(PIN_FEM_CTX, LOW);
   delay(5);
   SPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
-  radioStatus = radio.begin(GK_LORA_FREQ_MHZ, GK_LORA_BW_KHZ, GK_LORA_SF, GK_LORA_CR, GK_LORA_SYNC_WORD, LORA_TX_POWER_DBM, GK_LORA_PREAMBLE, LORA_TCXO_V, false);
+  radioStatus = radio.begin(GK_LORA_FREQ_MHZ, GK_LORA_BW_KHZ, GK_LORA_SF, GK_LORA_CR, GK_LORA_SYNC_WORD, txPowerDbm, GK_LORA_PREAMBLE, LORA_TCXO_V, false);
   if (radioStatus == RADIOLIB_ERR_NONE) {
     radio.setDio2AsRfSwitch(true);
     radio.setRfSwitchPins(RADIOLIB_NC, PIN_FEM_CTX);
     radio.setCurrentLimit(140);
+    radio.setRxBoostedGainMode(true, true);   // SX1262 boosted LNA ahead of the front end's own: ~2 dB for ~0.7 mA
     radio.setPacketReceivedAction(onLoraIrq);
     radio.startReceive();
     radioOk = true;

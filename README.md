@@ -94,7 +94,7 @@ tests and headless renders on a Mac only. Nothing has been run at Manresa Island
 | Remote STOP on a live VESC (scale 0.5 / 0.2 / 0.0 read back), START back to 1.0 | **Hardware** 2026-11-05 17:40, kart 2 Heltec on Colin's VESC, wheels-up throttle check still to do |
 | SLOW (ERPM cap) | Built; in telemetry as `slow_mph`; **not run on a live VESC** |
 | Regen on STOP (LispBM script) | Built; **not loaded on any kart** (owner decision) |
-| Repeater relay + heartbeat chip | **Hardware** bench (100 % relayed, 0 drops); range not measured. **Needs reflash** for 27-byte beacons |
+| Repeater relay + heartbeat chip | **Hardware** bench (100 % relayed, 0 drops); reflashed 0.2.1 on 2026-11-07 (27-byte beacons, 22 dBm, boosted RX); range not measured |
 | Pit Pi 4 kiosk, server, T-Beam on `/dev/tbeam`, SD kit first boot | **Hardware** 2026-11-05 |
 | Pit reboot hardening (persistent Wi-Fi keyfiles, eth0 fallback, persistent journal, health chip, check timer, page self-reload, `why_rebooted.sh`) | Committed 2026-11-06 20:59 (1227ab4) and deployed to the live pit; not yet proven across a real power cut. See [pit/README.md](pit/README.md) "If the pit reboots" |
 | Pace car: record a track by driving it, use it as the route | Committed + deployed on the pit 20:59 (1227ab4); tested in the simulator, not yet driven |
@@ -107,7 +107,8 @@ tests and headless renders on a Mac only. Nothing has been run at Manresa Island
 | Race finish, STOP RACE, final results, running positions in the beacon, kart "P3" badge | **Simulator** (beacon firmware committed 2026-11-06 20:33; compiling/flashing it is not recorded) |
 | Demo mode on the kart display | Rendered headless against kart 2's server, zero console errors; not yet watched on the panel (simulated kart, nothing written to the Heltec) |
 | Profile writes / validated link-loss behaviour (requirements acceptance) | **Not started** as a formal bench validation |
-| Range test, dead-zone test, eight-kart load test, drift-cutoff logging | **Not started** |
+| Radio power: T-Beams 22 dBm + boosted RX (flashed 2026-11-07), kart front end 16 dBm drive (~27 dBm) with stored `txpower` | **Hardware** base + repeater; kart build not yet flashed |
+| Range test, dead-zone test, eight-kart load test, drift-cutoff logging | **Not started** (antenna mast for the pit still to build) |
 
 ## Quick starts
 

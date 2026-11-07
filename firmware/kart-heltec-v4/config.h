@@ -3,7 +3,7 @@
 // variant (which runs on this exact board). Everything else is this project's choice.
 #pragma once
 
-#define FW_VERSION      "kart-0.1.0"
+#define FW_VERSION      "kart-0.2.1"
 #define DEFAULT_KART_ID 1            // runtime override: USB command "id N" (stored in flash)
 
 // ---- VESC writes -----------------------------------------------------------
@@ -48,7 +48,14 @@
 #define PIN_FEM_CSD    2    // KCT8103L CSD: HIGH = chip enabled
 #define PIN_FEM_CTX    5    // KCT8103L CTX: HIGH during TX, LOW = RX LNA. SX1262 DIO2 drives CPS.
 #define LORA_TCXO_V    1.8
-#define LORA_TX_POWER_DBM 10 // SX1262 output; the V4.3 front end adds roughly +7..+11 dB on top
+// SX1262 drive into the KCT8103L front end. Radiated = drive + front-end gain, Heltec's table as
+// carried in Meshtastic's LoRaFEMInterface.cpp: drive 0-13 dBm -> +13 dB, 14-15 -> +12, 16-17 -> +11,
+// 18 -> +10, 19 -> +9, 20 -> +8, 21 -> +7. So 10 -> 23 dBm, 14 -> 26, 16 -> 27, 18 and up -> 28
+// (the board's rating, 28 +/- 1 dBm; Heltec's own field test ran the same part at 11 -> ~22).
+// The datasheet's supply current is ~400 mA at 22 dBm and ~750 mA at 27 dBm for the 23 ms packet.
+// Default 16 = ~27 dBm. The console's `txpower N` (stored) overrides it; go back to 10-14 if the
+// kart Pi's 5 V sags (USB resets in the Pi's dmesg) until the Heltec has its own 5 V supply.
+#define LORA_TX_POWER_DBM 16
 
 #define PIN_OLED_SDA   17
 #define PIN_OLED_SCL   18

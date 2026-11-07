@@ -268,7 +268,7 @@ function updateCards() {
     if (st.vesc_link === false) b.push(`<span class="badge unknown">${KIOSK ? "NO VESC" : "VESC LINK DOWN"}</span>`);
     if (st.writes === false) b.push(`<span class="badge grey">${KIOSK ? "WR OFF" : "WRITES OFF"}</span>`);
     const sm = k.scale_mismatch;     // live scale != requested mode for 10 s (pitcore watch_scales): tap resends the mode
-    if (sm && !nul(sm.mode)) b.push(`<button class="badge warnb" data-c="mode" data-k="${k.id}" data-a="${sm.mode}" title="live scale ${fmt(sm.scale, 2)}, ${MODES[sm.mode]} wants ${fmt(sm.want, 2)}${sm.revert_missed ? "; kart reports a boost that did not revert" : ""}">${KIOSK ? "SCALE≠MODE" : "SCALE ≠ MODE, tap to resend"}</button>`);
+    if (sm && !nul(sm.mode)) b.push(`<button class="badge warnb" data-c="mode" data-k="${k.id}" data-a="${sm.mode}" title="live scale ${fmt(sm.scale, 2)}, ${MODES[sm.mode]} wants ${fmt(sm.want, 2)}">${KIOSK ? "SCALE≠MODE" : "SCALE ≠ MODE, tap to resend"}</button>`);
     if (k.reboots && !KIOSK) b.push(`<span class="badge grey" title="kart firmware restarted while the pit was running">REBOOTED${k.reboots > 1 ? " x" + k.reboots : ""}</span>`);
     if (entered.includes(k.id)) b.push('<span class="badge entered">ENTERED</span>');
     if (gameTiming() && k.lap && !fp) b.push(`<span class="badge lap">P${k.lap.pos} L${k.lap.laps}${nul(k.lap.best_s) || KIOSK ? "" : " · " + fmtLap(k.lap.best_s)}</span>`);

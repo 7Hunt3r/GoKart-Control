@@ -85,8 +85,25 @@ is the intended place for this; it is not needed on the track.
 | OLED | on-board | Vext GPIO36 active low. |
 | Power | USB-C 5 V | Do not power the Heltec from the VESC's 3.3 V COMM pin; the amplifier draws too much on transmit. A regulated 5 V from the kart's accessory supply, independent of the display Pi, is the target. |
 
-Transmit power: the SX1262 is set to 10 dBm and the V4.3 front end adds roughly
-7-11 dB. Measure before raising it.
+Transmit power (0.2.1, 2026-11-07): the SX1262 drives the KCT8103L front end at 16 dBm by
+default, about 27 dBm radiated. Heltec's gain table for this part (carried in Meshtastic's
+`LoRaFEMInterface.cpp`): drive 0-13 dBm adds 13 dB, 14-15 adds 12, 16-17 adds 11, 18 adds 10, 19
+adds 9, 20 adds 8, 21 adds 7; the board is rated 28 +/- 1 dBm and tops out from 18 dBm drive.
+The old 10 dBm setting radiated about 23 dBm. The datasheet puts supply current near 400 mA at
+22 dBm and 750 mA at 27 dBm during the 23 ms packet, so a kart whose Heltec hangs off the Pi's
+USB may see 5 V sag: `txpower 10..14` (stored) backs it off until the Heltec has its own 5 V.
+Every build also turns on the SX1262's boosted receive gain (about 2 dB better sensitivity for
+0.7 mA). The pit base and the repeater run their SX1262 at 22 dBm, its maximum (they have no
+front end). Radio parameters themselves (BW500/SF7) are unchanged: see "Range" below.
+
+Range: nothing beats antenna height and placement. The pit base wants a real 915 MHz omni
+(3-6 dBi) on a mast above the trailer/people line with short low-loss coax; the repeater belongs
+on a light pole or roof edge mid-track with a clear view of both the pit and the far side; the
+kart antenna stays vertical on top of the dash, away from the frame and the driver's body. A
+wider modem budget (SF8 at BW500, +2.5 dB) would double the packet airtime and no longer fits a
+repeater copy in the 100 ms slot at 1 Hz, so it needs a shorter telemetry packet first (owner
+decision). Keep BW500: a fixed 915 MHz channel narrower than 500 kHz falls outside the FCC
+digital-modulation rule that allows this power.
 
 ## Kart USB console (115200, newline-terminated; `help` prints this list)
 
@@ -94,6 +111,7 @@ Transmit power: the SX1262 is set to 10 dBm and the V4.3 front end adds roughly
 | --- | --- |
 | `status` | one `{"t":"status"}` line (radio, GPS, VESC limits, identity, `limits_ok`, `revert_missed`, sync, heap) |
 | `id N` | kart id 1-8 (stored; reboot renames the OTA host) |
+| `txpower 0..22` | SX1262 drive into the front end in dBm (stored). Radiated is drive + gain from the table above: 10 = ~23 dBm, 14 = ~26, 16 = ~27 (default), 18+ = ~28. `status` shows `tx_dbm` and `tx_radiated_dbm` |
 | `mode 0..2`, `stop`, `start`, `ping`, `slow [mph]`, `race [secs]` | same as the pit command (USB source, own seq numbers) |
 | `boost SECS SCALE` | timed scale override, 1-30 s, 0.10-1.00 (game zones / mud) |
 | `rate 1\|2` | report rate (default 2 Hz; use 1 Hz when the fleet relies on a repeater) |

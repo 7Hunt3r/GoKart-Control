@@ -1,11 +1,10 @@
 # Prebuilt images
 
-> **Stale image.** `kart-heltec-v4-ble-0.1.0.merged.bin` predates the relay bit, `slow_mph`,
-> BOOST, RACE, the 27-byte beacon and the 2026-11-06 slot/command fixes. Kart 1 (and any new
-> kart) must be built from source until this table is refreshed: `cd firmware && ./build.sh kart
-> upload /dev/cu.usbmodemXXXX`. To refresh: `./build.sh kart compile`, copy
-> `build/kart-heltec-v4/kart-heltec-v4.ino.merged.bin` here under a new version name, update the
-> row and the SHA-256 (`shasum -a 256 <file>`), and bump `FW_VERSION` in `kart-heltec-v4/config.h`.
+> **Current images: 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
+> set are kept for rollback only; 0.1.0 predates the relay bit, `slow_mph`, BOOST, RACE and the
+> 27-byte beacon. To refresh: `./build.sh kart compile` (also `base`, `repeater`), copy
+> `build/<sketch>/<sketch>.ino.merged.bin` here under a new version name, add the row and the
+> SHA-256 (`shasum -a 256 <file>`), and bump `FW_VERSION` in each `config.h`.
 
 Built from this branch with `firmware/build.sh` (arduino-cli, esp32 core 3.3.8). No
 credentials inside: WiFi/OTA settings live in the board's flash and are entered over
@@ -51,3 +50,14 @@ Roll back any time with your own image.
 - `base-tbeam-s3-0.2.0.merged.bin` — flash at 0x0 (8 MB layout). Beacon with race state/positions, repeater heartbeat decode, schedule-based command placement, host `race`/`issued` lines.
 - `repeater-tbeam-s3-0.2.0.merged.bin` — flash at 0x0. Accepts 27-byte beacons; 400 ms dedupe; late-copy drop. Fleet must run `rate 1` while a repeater is in use.
 Bench 2026-11-06 21:33: kart 2 + base on these builds, live bench 16 pass / 0 loss / ping + race + writes outcomes as expected (no VESC linked).
+
+## 0.2.1 (2026-11-07, radio power)
+
+Same radio parameters as 0.2.0 (915.0 MHz, BW500, SF7), so 0.2.0 and 0.2.1 boards interoperate.
+
+- `repeater-tbeam-s3-0.2.1.merged.bin` — SX1262 at 22 dBm (was 20), boosted receive gain, `tx_dbm` in the stat line, `FW_VERSION` finally reports the real version. **Flashed** on the repeater 2026-11-07 12:22 (bench: `rx_bad` 0, heard = relayed, heartbeat decoded by the pit).
+  SHA-256 `6a49788d5044981e96b612a0de24ae2ee685dc37fd7447038e9c5b20b4d42fdd`
+- `base-tbeam-s3-0.2.1.merged.bin` — same two radio changes, `tx_dbm` in `stat`. **Flashed** on the pit base 2026-11-07 12:25 from the pit Pi (`~/flash_base.sh`, esptool 5.6 in `~/esptool-venv`; the Debian `esptool` package has no ESP32-S3 stub).
+  SHA-256 `19976e0be07ed6bed5d6d9375106b120a5a0e76ccb01ce470b6c7ddccbdf264e`
+- `kart-heltec-v4-ble-0.2.1.merged.bin` — SX1262 drive into the KCT8103L front end 16 dBm (about 27 dBm radiated; 0.2.0 used 10 -> ~23), boosted receive gain, stored console `txpower 0..22`, `tx_dbm` / `tx_radiated_dbm` in `status`. **Not flashed yet** (kart 2 was off). After flashing, watch the kart Pi's `dmesg -w` for USB resets while it transmits; `txpower 14` or lower if the Pi's 5 V cannot carry the 750 mA peaks.
+  SHA-256 `b24703a90fee717ce627b0815758af39d94b2babd6ea4582739b35998fb62c01`

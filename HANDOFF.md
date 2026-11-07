@@ -56,6 +56,12 @@ Hardware in hand (from the bench logs):
 - **Repeater** (2026-11-06): relays 100 % of kart 2's packets and every beacon, zero drops; pit
   drops the duplicate copies, loss stays 0 %; ping via the pit applied in 0.3 s with the repeater
   on; heartbeat chip at 16:43 showed repeater id 1, -3 dBm, carrying kart 2, age ~1 s.
+- **Radio power 0.2.1** (2026-11-07 12:25): base and repeater reflashed with the SX1262 at 22 dBm
+  (was 20) and boosted receive gain; stat lines carry `tx_dbm`. Bench: base `fw base-0.2.1`,
+  `sync pps`; repeater `rx_bad 0`, `pit_age_s 0`, heard = relayed, heartbeat decoded at -15 dBm /
+  SNR 12. The kart build drives its KCT8103L front end at 16 dBm (about 27 dBm radiated, was 10 ->
+  ~23) with a stored `txpower 0..22` console override; built, **not flashed** (kart 2 was off).
+  Radio parameters (915.0 MHz, BW500, SF7) are unchanged, so old and new builds interoperate.
 - **Kart Pi 3 B** (2026-11-06 16:26): card from `kart/sdcard` booted, ~6 min to services up;
   cage + Chromium on the 1024x600 HDMI panel; `/dev/heltec` link reading kart 2; shop map pulled
   from the pit. HDMI audio: the vc4-hdmi PCM runs (IEC958, 48 kHz, 2 ch) while the page plays;
@@ -87,6 +93,11 @@ Hardware in hand (from the bench logs):
 
 - SLOW, BOOST and the race grid hold against a live VESC; wheels-up throttle check under STOP.
 - Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
+  Before the range test: flash kart 2 with 0.2.1 and watch the kart Pi's `dmesg -w` for USB resets
+  during transmit (750 mA peaks at 27 dBm off the Pi's USB); `txpower 14` or `12` if it resets.
+  Then the antennas: a 3-6 dBi 915 MHz omni on a mast for the pit base (short low-loss coax), the
+  repeater high on a pole mid-track with line of sight both ways, kart whips vertical on the dash
+  hood. Height and placement are worth more than every firmware change made today.
 - Touch, map redraw speed and demo mode by eye on the Pi 3 B panel.
 - Formal bench validation of link loss / reconnect (requirements acceptance checks) before
   enabling profile writes; saved-flash VESC baseline; controller commercial model and ratings.
@@ -145,9 +156,10 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
    (0 edges after a 5 s cold power-off; PPS still ticking). Hardware: replace the GNSS board. Most
    likely damaged by the earlier swapped-pin search driving the module's TX; the firmware now never
    swaps UART pins (6c3bf58).
-2. **Repeater needs a reflash** after the beacon change (cfa4796): its build predates the 27-byte
-   beacon, so its `gkValidate` rejects the new beacons and it will not relay them (nor send its
-   heartbeat, which rides behind the beacon copy). `./build.sh repeater upload ...`.
+2. ~~Repeater needs a reflash~~ Done 2026-11-07 12:22: repeater on 0.2.1 from the Mac
+   (`rx_bad` 0, every beacon relayed, heartbeat decoded by the pit); the pit base on 0.2.1 from the
+   pit Pi itself (`~/flash_base.sh <merged.bin>`, esptool in `~/esptool-venv`; the Debian esptool
+   package lacks the S3 stub). Kart 2's Heltec still runs the 0.2.0 build (kart was off).
 3. **Pit reboot cause unknown.** On 2026-11-06 the pit Pi rebooted several times, came back with no
    Wi-Fi profile, and the logs were gone (volatile journal; netplan-backed profiles left as 0-byte
    files; the Wi-Fi loss was at 18:10). Wi-Fi and log loss are fixed by 1227ab4 (deployed); the
