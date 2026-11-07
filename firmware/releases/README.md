@@ -1,6 +1,6 @@
 # Prebuilt images
 
-> **Current images: 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
+> **Current images: kart 0.2.2, base and repeater 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
 > set are kept for rollback only; 0.1.0 predates the relay bit, `slow_mph`, BOOST, RACE and the
 > 27-byte beacon. To refresh: `./build.sh kart compile` (also `base`, `repeater`), copy
 > `build/<sketch>/<sketch>.ino.merged.bin` here under a new version name, add the row and the
@@ -61,3 +61,10 @@ Same radio parameters as 0.2.0 (915.0 MHz, BW500, SF7), so 0.2.0 and 0.2.1 board
   SHA-256 `19976e0be07ed6bed5d6d9375106b120a5a0e76ccb01ce470b6c7ddccbdf264e`
 - `kart-heltec-v4-ble-0.2.1.merged.bin` — SX1262 drive into the KCT8103L front end 16 dBm (about 27 dBm radiated; 0.2.0 used 10 -> ~23), boosted receive gain, stored console `txpower 0..22`, `tx_dbm` / `tx_radiated_dbm` in `status`. **Not flashed yet** (kart 2 was off). After flashing, watch the kart Pi's `dmesg -w` for USB resets while it transmits; `txpower 14` or lower if the Pi's 5 V cannot carry the 750 mA peaks.
   SHA-256 `b24703a90fee717ce627b0815758af39d94b2babd6ea4582739b35998fb62c01`
+
+## 0.2.2 (2026-11-07 evening, kart only: modes are speed caps)
+
+Radio unchanged (interoperates with the 0.2.0 / 0.2.1 base and repeater, which stay on 0.2.1).
+
+- `kart-heltec-v4-ble-0.2.2.merged.bin` — ECO / NORMAL / SPORT are now a top-speed cap plus a torque scale (`config.h MODES[]`: 15 mph + 0.50, 25 mph + 0.75, uncapped + 1.0; the old 80 / 100 / 140 A current-only modes were indistinguishable on the kart), the cap computed from the controller's own poles / gear / wheel like SLOW; a BOOST above the mode's scale lifts the cap one mode up for its duration; `mode_actual` and the write verify check the ERPM bound as well as the scale; a capped mode is `rejected` on a controller without drivetrain numbers; `cap_mph` / `cap_erpm` / `baseline_suspect` in `status`; the OLED shows the cap. **Not flashed yet.** Test wheels-up first: after `mode 0`, `status` must show `scale_max` 0.500 and `max_erpm` 6115 on the baseline drivetrain (`mode 1`: 0.750 / 10191; `mode 2`: 1.000 and the controller's own bound back); then the 0.2.1 radio-power watch (`dmesg -w` on the kart Pi for USB resets).
+  SHA-256 `c3ecc33fe881f3ccd3b0636e24002a6a690b7a223e1d60b4671565ec187a6b20`

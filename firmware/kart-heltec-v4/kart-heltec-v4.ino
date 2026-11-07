@@ -33,8 +33,9 @@
  *  W4  STOP wins: it aborts an in-flight write, cancels BOOST and race hold, and while stopActive
  *      every target is 0 (scaleTarget()); only START clears it. BOOST is rejected while stopped;
  *      MODE/SLOW/RACE are remembered but write 0.
- *  W5  Only l_current_max_scale (and the ERPM pair for SLOW) ever differ from what was read from
- *      this controller; battery current limits are never sent; store=0 always (VescLink).
+ *  W5  Only l_current_max_scale and the ERPM pair (mode speed cap, SLOW, boost lift) ever differ
+ *      from what was read from this controller, and the ERPM bound is never raised above it;
+ *      battery current limits are never sent; store=0 always (VescLink).
  *  W6  Duplicate commands (the repeater copy, pit retries) are recognised by source+seq+cmd+arg+
  *      issued over the last CMD_HIST commands and are answered, never re-applied, so an old START
  *      arriving late cannot undo a newer STOP.
@@ -198,6 +199,8 @@ uint32_t rampNextMs = 0;
 CmdRef   rampOwner = NO_OWNER;
 bool     revertMissed = false;        // a timed override ended while the VESC link was down (W3)
 bool     wroteThisBoot = false;       // any SET_MCCONF_TEMP sent since boot (the controller may still hold it)
+float    wErpm = 0;                   // ERPM bound the in-flight write carries (verified like the scale)
+bool     baselineSuspect = false;     // limits read at link-up look like this firmware's own caps (see the link-up code)
 VescActiveLimits firstLimits; bool haveFirst = false; char firstUuid[25] = "";   // first read of the pinned controller this boot
 uint8_t  usbSeq = 0;
 
@@ -278,12 +281,60 @@ static CmdEnt* cmdEnt(const CmdRef& r) {
 static void setResult(const CmdRef& r, uint8_t res) { CmdEnt* e = cmdEnt(r); if (e) e->result = res; }
 static const CmdEnt* lastCmd(int8_t src) { return (src >= 0 && cmdLastIdx[src] >= 0) ? &cmdHist[src][cmdLastIdx[src]] : nullptr; }
 
+// ---------------------------------------------------------------- speed caps
+// ERPM for a road speed from THIS controller's own drivetrain numbers (0 if it has none).
+static float mphToErpm(float mph) {
+  const VescActiveLimits& L = origLimits;
+  if (!origValid || L.motorPoles == 0 || L.gearRatio <= 0 || L.wheelDiameter <= 0) return 0;
+  float wheel_rpm = mph * 1609.34f / 60.0f / (3.14159265f * L.wheelDiameter);
+  return wheel_rpm * L.gearRatio * (L.motorPoles / 2.0f);
+}
+// Mode m's own ERPM bound (config.h MODES[].topMph), never above the controller's own; m out of
+// range or topMph 0 = the controller's own bound. -1 = the mode wants a cap but this controller's
+// poles/gear/wheel are unavailable (SET_MODE is then rejected and startWrite() refuses).
+static float modeCapErpm(uint8_t m) {
+  if (!origValid) return -1;
+  if (m >= GK_MODE_COUNT || MODES[m].topMph == 0) return origLimits.maxErpm;
+  float e = mphToErpm(MODES[m].topMph);
+  return e < 100 ? -1 : fminf(e, origLimits.maxErpm);
+}
+// Boost lift (config.h BOOST_LIFTS_CAP): a timed override ABOVE mode m's scale moves the cap one mode up.
+static uint8_t capModeFor(uint8_t m) {
+#if BOOST_LIFTS_CAP
+  if (m < GK_MODE_COUNT - 1 && ovActive && ovScale > MODES[m].currentMaxScale + 0.001f) return m + 1;
+#endif
+  return m;
+}
+// The ERPM bound the kart wants on the VESC with mode m requested and the live overlays applied:
+// the (lifted) mode cap, then SLOW on top; the lowest wins. -1 = unavailable (see modeCapErpm).
+static float capErpmFor(uint8_t m) {
+  if (!origValid) return -1;
+  float cap = modeCapErpm(capModeFor(m));
+  if (cap < 0) return -1;
+  if (slowActive && slowErpm < cap) cap = slowErpm;
+  return cap;
+}
+static float erpmTarget() { return capErpmFor(modeReq); }   // modeReq GK_MODE_UNKNOWN = the controller's own bound (+ SLOW)
+// The cap as the driver sees it (OLED, status line), mph; 0 = none.
+static uint8_t capMphNow() {
+  uint8_t mph = modeReq != GK_MODE_UNKNOWN ? MODES[capModeFor(modeReq)].topMph : 0;
+  if (slowActive && (mph == 0 || slowMph < mph)) mph = slowMph;
+  return mph;
+}
+
+// mode_actual: the mode whose scale AND ERPM bound the VESC is running right now, given the kart's
+// own overlays (boost lift, SLOW). A controller at its full ERPM bound with ECO's scale is not in
+// ECO. Before this link's first GET_MCCONF only the scale can be compared.
 static uint8_t modeActual(float* scaleOut) {
   const VescActiveLimits& L = vesc.limits();
   if (!L.receivedMs || !vescUp()) { if (scaleOut) *scaleOut = -1; return GK_MODE_UNKNOWN; }
   if (scaleOut) *scaleOut = L.currentMaxScale;
-  for (uint8_t i = 0; i < GK_MODE_COUNT; i++)
-    if (fabsf(L.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) return i;
+  for (uint8_t i = 0; i < GK_MODE_COUNT; i++) {
+    if (fabsf(L.currentMaxScale - MODES[i].currentMaxScale) >= MODE_MATCH_TOL) continue;
+    if (!origValid) return i;
+    float want = capErpmFor(i);
+    if (want >= 0 && fabsf(L.maxErpm - want) <= MODE_ERPM_TOL) return i;
+  }
   return GK_MODE_UNKNOWN;
 }
 
@@ -333,12 +384,6 @@ static float scaleTarget() {
   if (modeReq != GK_MODE_UNKNOWN) return MODES[modeReq].currentMaxScale;
   return origValid ? origLimits.currentMaxScale : 1.0f;
 }
-static float mphToErpm(float mph) {
-  const VescActiveLimits& L = origLimits;
-  if (!origValid || L.motorPoles == 0 || L.gearRatio <= 0 || L.wheelDiameter <= 0) return 0;
-  float wheel_rpm = mph * 1609.34f / 60.0f / (3.14159265f * L.wheelDiameter);
-  return wheel_rpm * L.gearRatio * (L.motorPoles / 2.0f);
-}
 static void requestBrake() {
   // "GKB" + amps + tenths of seconds -> the on-VESC brake script (no-op if none is loaded).
   // Same gate as a limit write (W1): never to an unverified or not-yet-read controller.
@@ -361,18 +406,27 @@ static bool startWrite(float scale, const CmdRef& owner) {
     CmdEnt* e = cmdEnt(wOwner); if (e && e->result == GK_RES_ACCEPTED) e->result = GK_RES_UNKNOWN;
   }
   const VescActiveLimits& L = origLimits;
+  float capE = erpmTarget();                   // mode speed cap (boost-lifted) and SLOW; never above the controller's own
+  if (capE < 0) {
+    uint8_t cm = modeReq != GK_MODE_UNKNOWN ? capModeFor(modeReq) : GK_MODE_UNKNOWN;
+    logf("refusing write: %s wants a %u mph cap but this controller has no drivetrain numbers (poles %u gear %.3f wheel %.3f)",
+         cm != GK_MODE_UNKNOWN ? MODES[cm].name : "?", cm != GK_MODE_UNKNOWN ? MODES[cm].topMph : 0, L.motorPoles, L.gearRatio, L.wheelDiameter);
+    return false;
+  }
   VescTempLimits l;
   l.currentMinScale = L.currentMinScale;
   l.currentMaxScale = scale;
-  l.minErpm = L.minErpm; l.maxErpm = L.maxErpm;
-  if (slowActive) { l.maxErpm = slowErpm; if (l.minErpm < -slowErpm) l.minErpm = -slowErpm; }
+  l.minErpm = L.minErpm; l.maxErpm = capE;
+  if (l.minErpm < -capE) l.minErpm = -capE;    // reverse capped at the same speed
   l.minDuty = L.minDuty; l.maxDuty = L.maxDuty;
   l.wattMin = L.wattMin; l.wattMax = L.wattMax;
   l.sendInCurrent = false;                     // battery limits: always the controller's own
   wAckSeen = vesc.lastAckMs();
   vesc.sendTempLimits(l);
-  wState = W_SENT; wTarget = scale; wSentMs = millis(); wOwner = owner; wroteThisBoot = true;
-  logf("vesc write scale %.3f", scale);
+  wState = W_SENT; wTarget = scale; wErpm = capE; wSentMs = millis(); wOwner = owner; wroteThisBoot = true;
+  uint8_t capM = capMphNow();
+  if (capM) logf("vesc write scale %.3f, cap %u mph = %.0f ERPM", scale, capM, capE);
+  else      logf("vesc write scale %.3f, no speed cap (%.0f ERPM)", scale, capE);
   return true;
 }
 
@@ -409,13 +463,13 @@ static void serviceWrites() {
     case W_VERIFY:
       if (vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - wSentMs) >= 0) {
         wState = W_IDLE;
-        bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL;
-        if (slowActive && fabsf(vesc.limits().maxErpm - slowErpm) > 50) ok = false;
+        bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL
+               && fabsf(vesc.limits().maxErpm - wErpm) <= MODE_ERPM_TOL;
         if (rampIdx < 0) setResult(wOwner, ok ? GK_RES_APPLIED : GK_RES_UNKNOWN);
         if (ok) revertMissed = false;
         modeConfirmed = ok && !stopActive && ((modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL)
                                               || (ovActive && fabsf(wTarget - ovScale) < MODE_MATCH_TOL));
-        logf("vesc write verify %s (scale %.3f)", ok ? "ok" : "MISMATCH", vesc.limits().currentMaxScale);
+        logf("vesc write verify %s (scale %.3f, ERPM %.0f)", ok ? "ok" : "MISMATCH", vesc.limits().currentMaxScale, vesc.limits().maxErpm);
       } else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) setResult(wOwner, GK_RES_UNKNOWN); }
       break;
   }
@@ -457,6 +511,12 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
       case GK_CMD_SET_MODE:
         if (arg >= GK_MODE_COUNT) { cmdResult = GK_RES_REJECTED; break; }
         if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        if (origValid && modeCapErpm(arg) < 0) {           // capped mode, but this controller has no poles/gear/wheel
+          cmdResult = GK_RES_REJECTED;
+          logf("mode %s: its %u mph cap needs this controller's drivetrain numbers (poles %u gear %.3f wheel %.3f)",
+               MODES[arg].name, MODES[arg].topMph, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
+          break;
+        }
         modeReq = arg; modeConfirmed = false;
         if (stopActive || raceHold) break;                 // remembered; applied at START / GO (W4)
         // scaleTarget(), not the bare mode scale: a running BOOST/MUD keeps its scale until its own
@@ -660,6 +720,25 @@ static void serviceVesc() {
     logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m",
          origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
          origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
+    // Honesty check, NO restore (owner rule: reconnect is read-only). If what we just read as "the
+    // controller's own" is one of this firmware's caps (a mode scale below 1, a stop, or an ERPM bound
+    // that is a whole number of mph on this drivetrain), a previous Heltec session probably left it
+    // behind. Keying the kart off and on restores the controller's saved configuration; until then
+    // SPORT writes scale 1.0 but the ERPM baseline is the leftover cap. Reported as baseline_suspect.
+    baselineSuspect = false;
+    if (!wroteThisBoot) {
+      float onePerMph = mphToErpm(1.0f);
+      float mphF = onePerMph > 0 ? origLimits.maxErpm / onePerMph : 0;
+      bool capLike = onePerMph > 0 && mphF <= 60.0f && fabsf(mphF - roundf(mphF)) < 0.02f;
+      bool scaleLike = origLimits.currentMaxScale < 0.05f;
+      for (uint8_t i = 0; i < GK_MODE_COUNT; i++)
+        if (MODES[i].currentMaxScale < 0.999f && fabsf(origLimits.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) scaleLike = true;
+      if (capLike || scaleLike) {
+        baselineSuspect = true;
+        logf("WARNING: limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph): a previous Heltec session probably left them; key the kart off and on to restore the controller's own",
+             origLimits.currentMaxScale, origLimits.maxErpm, mphF);
+      }
+    }
   }
   // A lost FW_VERSION / GET_MCCONF reply must not leave the kart unable to answer a STOP: ask again (read-only).
   static uint32_t idRetryMs = 0;
@@ -928,7 +1007,7 @@ static void usbStatus() {
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
-                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
+                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
                 "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
                 "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"tx_dbm\":%d,\"tx_radiated_dbm\":%d,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
@@ -936,7 +1015,7 @@ static void usbStatus() {
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
                 vesc.fwMajor, vesc.fwMinor, hw, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
-                L.motorPoles, L.gearRatio, L.wheelDiameter,
+                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), gkBool(baselineSuspect),
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, mac,
                 vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
@@ -1059,7 +1138,9 @@ static void serviceOled() {
   float scale; uint8_t ma = modeActual(&scale);
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tf);
-  snprintf(l, sizeof l, "K%u %s%s", kartId, ma != GK_MODE_UNKNOWN ? MODES[ma].name : (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].name : "----"), modeConfirmed ? "*" : "");
+  uint8_t capM = capMphNow(); char capS[8] = "";
+  if (capM) snprintf(capS, sizeof capS, " %u", capM);                 // the speed cap in mph (mode, boost lift or SLOW)
+  snprintf(l, sizeof l, "K%u %s%s%s", kartId, ma != GK_MODE_UNKNOWN ? MODES[ma].name : (modeReq != GK_MODE_UNKNOWN ? MODES[modeReq].name : "----"), modeConfirmed ? "*" : "", capS);
   oled.drawStr(0, 9, l);
   if (stopActive) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "STOP"); oled.setDrawColor(1); }
   else if (raceHold) { oled.drawBox(94, 0, 34, 11); oled.setDrawColor(0); oled.drawStr(98, 9, "GRID"); oled.setDrawColor(1); }

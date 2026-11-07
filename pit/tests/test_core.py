@@ -1121,9 +1121,9 @@ class ScaleMismatch(unittest.TestCase):
         def hear(**kw):
             f.ingest(tele(2, **kw), t, "w")
         ev = []
-        for i in range(25):                                                # SPORT requested, live 0.5714 (ECO)
+        for i in range(25):                                                # SPORT requested, live 0.50 (ECO)
             t = i * 0.5
-            hear(mode_req=2, scale=0.5714, stopped=False)
+            hear(mode_req=2, scale=0.50, stopped=False)
             ev += f.watch_scales(t)
             if t < 10:
                 self.assertIsNone(f.karts[2].snapshot(t)["scale_mismatch"])

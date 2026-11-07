@@ -218,7 +218,7 @@ class EndToEnd(unittest.TestCase):
             code, body, _ = st.request("POST", "/cmd", {"cmd": "boost", "kart": 1, "arg": 100})
             self.assertEqual(code, 200, body)
             s = st.wait(lambda s: s["fleet"]["karts"][0]["vesc"].get("scale") == 1.0, timeout=10)
-            st.wait(lambda s: abs((s["fleet"]["karts"][0]["vesc"].get("scale") or 0) - 100 / 140) < 1e-3, timeout=12)   # auto-revert to NORMAL
+            st.wait(lambda s: abs((s["fleet"]["karts"][0]["vesc"].get("scale") or 0) - 0.75) < 1e-3, timeout=12)   # auto-revert to NORMAL (pitcore.MODE_SCALES[1])
 
             code, body, _ = st.request("POST", "/laps/reset", {})
             self.assertEqual(code, 200, body)

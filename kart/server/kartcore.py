@@ -35,8 +35,11 @@ KART_COLORS = {     # identical to pitcore.KART_COLORS so a kart has one colour 
     5: "#f58231", 6: "#911eb4", 7: "#42d4f4", 8: "#f032e6",
 }
 MODE_NAMES = {0: "ECO", 1: "NORMAL", 2: "SPORT"}
-# Motor-current scale per mode: firmware/kart-heltec-v4/config.h MODES[] (80/140, 100/140, 1.0).
-MODE_SCALES = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}
+# What each mode writes (firmware/kart-heltec-v4/config.h MODES[]; firmware/tests/test_protocol.py checks
+# these copies against it): motor-current scale of the controller's 140 A, and a top-speed cap in mph
+# (0 = none, the controller's own ERPM bound). ECO 70 A / 15 mph, NORMAL 105 A / 25 mph, SPORT 140 A / uncapped.
+MODE_SCALES = {0: 0.50, 1: 0.75, 2: 1.0}
+MODE_TOP_MPH = {0: 15, 1: 25, 2: 0}
 CMD_CODES = {"mode": 1, "stop": 2, "start": 3, "ping": 4, "slow": 5, "boost": 6, "race": 7}
 CMD_NAMES = {v: k for k, v in CMD_CODES.items()}
 CMD_RESULT_NAMES = {0: "none", 1: "accepted", 2: "applied", 3: "no_vesc", 4: "rejected", 5: "unknown"}

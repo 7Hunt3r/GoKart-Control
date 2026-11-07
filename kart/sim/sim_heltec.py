@@ -19,7 +19,8 @@ slow [mph], ping, status, boost SECS SCALE (src 254, own ++usbSeq). Mode changes
 a timed current-scale override like the firmware's GK_CMD_BOOST: cmd line with cmd 6,
 arg = scale percent; rejected (4) while stopped, no_vesc (3) without a VESC; the
 `scale` field follows it and reverts to the mode scale after SECS ("boost over" log);
-STOP/START cancel it. Speed follows the live scale (17 mph at 1.0).
+STOP/START cancel it. Speed follows the live scale (17 mph at 1.0) under the mode's speed cap
+(MODE_TOP_MPH, lifted one mode by a boost, like firmware 0.2.2+).
 GPS like firmware 2026-11-06+: a {"t":"gps"} line per fix at 5 Hz (--nogpsline = off,
 like `gpsline off`), and the self line's USB-only hdop / fix_age_ms / gps_hz /
 base_lat / base_lon / base_fix_age_s (the pit radio's fix: 3 m east, 2 m north of the
@@ -66,7 +67,8 @@ ORIGIN = (41.0940, -73.4167)     # near the shop; not a surveyed course
 COURSE_ORIGIN = (41.09399, -73.41637)   # --course: shop preset origin (map.shop.json)
 R_EARTH = 6371000.0
 FULL_SCALE_MPH = 17.0            # sim speed at scale 1.0 (SPORT)
-MODE_SCALE = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}   # firmware config.h MODES[]
+MODE_SCALE = {0: 0.50, 1: 0.75, 2: 1.0}      # firmware config.h MODES[] (checked by firmware/tests/test_protocol.py)
+MODE_TOP_MPH = {0: 15, 1: 25, 2: 0}          # firmware speed cap per mode, 0 = none; a boost above the mode's scale lifts it one mode
 
 
 def en_to_latlon(e, n):
@@ -174,11 +176,23 @@ class SimKart:
             return self.ov[0]
         return MODE_SCALE.get(self.mode_actual, 0.75)
 
+    def cap_mph(self):
+        """The firmware's speed cap for the live state: the mode's, lifted one mode by a boost above
+        the mode's scale (not by mud), then SLOW on top; None = uncapped."""
+        m = self.mode_actual if self.mode_actual is not None else 1
+        if self.ov and self.ov[0] > MODE_SCALE.get(m, 1.0) + 0.001 and m < 2:
+            m += 1
+        cap = MODE_TOP_MPH.get(m) or None
+        if self.slow_mph and (cap is None or self.slow_mph < cap):
+            cap = self.slow_mph
+        return cap
+
     def target_mph(self):
         if self.stopped or self.novesc:
             return 0.0
         v = self.full_mph * self.eff_scale()
-        return min(v, self.slow_mph) if self.slow_mph else v
+        cap = self.cap_mph()
+        return min(v, cap) if cap else v
 
     def step(self, dt, now):
         if self.pending and now >= self.pending[0]:

@@ -119,8 +119,9 @@ python3 -I pit/tests/test_e2e.py
   commands: they never delay an operator's command (an operator command to the same kart supersedes them),
   never become a card's "last command" or the "last fleet command", and only the newest shows in the list.
   The repeater chip shows the rate (`rep -3 dBm · 1 Hz`); `/api/state` `fleet.rate`.
-- **SCALE ≠ MODE.** When a kart's live `scale` differs from its requested mode's scale (ECO 80/140,
-  NORMAL 100/140, SPORT 1.0) by more than 0.05 for 10 s while online with fresh VESC data, not stopped,
+- **SCALE ≠ MODE.** When a kart's live `scale` differs from its requested mode's scale (ECO 0.50,
+  NORMAL 0.75, SPORT 1.0; the modes' speed caps, 15 / 25 / none mph, are not in telemetry and not
+  checked here) by more than 0.05 for 10 s while online with fresh VESC data, not stopped,
   not in a race grid hold and not boosted by the pit in the last 7 s, the card shows an amber
   "SCALE ≠ MODE, tap to resend" badge (kiosk: SCALE≠MODE). (The kart's own `revert_missed` flag is on
   its USB `status` line only; the telemetry packet has no spare flag bit for it.)

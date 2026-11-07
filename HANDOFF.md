@@ -207,6 +207,21 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
    everything since is only here.
 6. **Game layer** (proposal): ECO/NORMAL karts get up to SPORT torque on a 1.0 boost pad. Whether
    the game is wanted, and the pad scale, are owner calls.
+7. **Mode table = speed caps** (first cut 2026-11-07, your numbers wanted). Eamon drove kart 2 on
+   the old modes and could not tell them apart: they only moved the motor-current scale (80 / 100 /
+   140 A), which shapes the first second of a launch and nothing after it. Kart firmware 0.2.2 makes
+   a mode a top-speed cap plus a torque scale, written the way SLOW already was (ERPM from the
+   controller's own poles / gear / wheel): **ECO 15 mph + 0.50, NORMAL 25 mph + 0.75, SPORT
+   uncapped + 1.0**; a boost pad lifts the cap one mode up for its 5 s. All of it is
+   `firmware/kart-heltec-v4/config.h MODES[]`, one line per mode; the pit / kart Pi / simulator
+   copies are checked against it by the firmware tests. Two things only you can settle: (a) the
+   numbers; (b) **how many controllers a kart has.** The temp-limit write reaches the BLE controller
+   only (`forward_can` 0 in VescLink.cpp); if a kart runs two VESCs over CAN the second never saw any
+   mode, which would also explain "no difference". Before trusting the caps, check the configured
+   drivetrain once: drive a straight at a steady speed and compare GPS mph with wheel mph (kart
+   display and pit log have both); the cap is only as right as `si_gear_ratio` / `si_wheel_diameter`
+   in the controller. The kart logs `baseline_suspect` when the limits it reads at link-up look like
+   its own caps left by a previous Heltec session (fix: key the kart off and on).
 
 ## Doc drift to reconcile
 
@@ -215,6 +230,8 @@ These were found during the 2026-11-06 hygiene pass and are outside this file:
 - `docs/requirements.md` and `AGENTS.md` still list remote stop and geofence enforcement as
   deferred and profile writes as disabled; this branch implements remote STOP, SLOW, BOOST, RACE
   and game zones (zones are not enforcement). Owner decision needed before the docs change.
+- `docs/requirements.md` says no speed caps or current values are set as final; kart firmware
+  0.2.2 writes 15 / 25 mph caps and 0.50 / 0.75 scales for ECO / NORMAL (decision 7, first cut).
 - `firmware/README.md`: header says "not yet run on hardware"; protocol paragraph says 46-byte
   packets at 1 Hz in 100 ms slots (now 47 bytes, 2 Hz, 50 ms slots, 27-byte beacon); STOP ramp
   listed as 0.6/0.3/0.1/0 over 1.5 s (code: 0.5/0.2/0.0 at 150 ms steps); "Not verified" list is
@@ -242,7 +259,7 @@ See the [full report and capture](hardware/vesc/baseline-kart/2026-11-05/README.
 | ADC and UART; Current Reverse Button | Consistent with hardwired throttle/reverse and a UART BLE module. BLE UUID/device identity still needs verification. |
 | Motor-temperature sensor disabled; owner confirms no sensors wired | Show unavailable; do not interpret 0 C as a cool motor. ESC sensing is separate. |
 | CAN multi-ESC enabled; controller ID 69 | Configuration does not prove a second controller is physically present. |
-| 14 poles, ratio ~2.76923, wheel diameter 0.406 m | Configured values only; physically verify before using for MPH limits. |
+| 14 poles, ratio ~2.76923, wheel diameter 0.406 m | Configured values only. Since kart 0.2.2 the mode speed caps (and SLOW) are computed from them: verify once by comparing GPS mph with wheel mph on a straight. |
 
 GET_MCCONF/GET_APPCONF capture current runtime settings. The saved flash configuration has not
 been independently established. The runtime scale was 1.0, but that alone does not prove there
@@ -373,6 +390,13 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   cloud-init profile into `/etc/netplan/90-NM-*.yaml`, which the power cuts truncated to 0 bytes;
   journald was `Storage=volatile`), race positions to the base, pace car recorder; 53 core + 6 e2e
   pit tests; deployed live.
+
+**2026-11-07**
+- 12:22-12:25: radio power 0.2.1 flashed on the repeater and the pit base (see Current state).
+- Evening: kart dash hood reworked (the Heltec plugs into the Pi inside the bay; CAD lives outside
+  this repo). Kart firmware 0.2.2: modes became top-speed caps + torque scales after Eamon drove
+  kart 2 and could not tell ECO from SPORT (decision 7); firmware host tests check the pit / kart /
+  simulator copies of the mode table; all 213 offline tests pass; image built, not flashed.
 
 ## Collaboration and delivery state
 

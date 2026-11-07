@@ -132,6 +132,7 @@ body.pulse .meter.boost .btrack { border-color: #fff2b8; }
 .mbtn { height: 76px; font-size: 20px; padding: 0 2px; position: relative; overflow: hidden; --p: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1; }
 .mbtn small { font-size: 26px; font-style: italic; font-weight: 900; }
+.mbtn .cap { font-size: 12px; font-weight: 400; opacity: .75; margin-top: 3px; }   /* the mode's speed cap (app.js MODE_TOP_MPH) */
 .mbtn.actual { background: #dcdcdc; color: #000; border-color: #dcdcdc; }
 .mbtn.req:not(.actual) { border-style: dashed; border-color: var(--info); color: #8fb6ff; }
 .mbtn:disabled { opacity: .35; }

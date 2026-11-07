@@ -34,8 +34,11 @@ KART_COLORS = {
 }
 
 MODE_NAMES = {0: "ECO", 1: "NORMAL", 2: "SPORT"}
-# Current scale each mode writes (firmware/kart-heltec-v4/config.h MODES: 80 A, 100 A, 140 A of 140 A)
-MODE_SCALES = {0: 80.0 / 140.0, 1: 100.0 / 140.0, 2: 1.0}
+# What each mode writes (firmware/kart-heltec-v4/config.h MODES[]; firmware/tests/test_protocol.py checks
+# these copies against it): motor-current scale of the controller's 140 A, and a top-speed cap in mph
+# (0 = none, the controller's own ERPM bound). ECO 70 A / 15 mph, NORMAL 105 A / 25 mph, SPORT 140 A / uncapped.
+MODE_SCALES = {0: 0.50, 1: 0.75, 2: 1.0}
+MODE_TOP_MPH = {0: 15, 1: 25, 2: 0}
 SCALE_MISMATCH_TOL = 0.05     # live scale this far from the requested mode's scale ...
 SCALE_MISMATCH_S = 10.0       # ... for this long (not stopped, not on the grid, no boost) -> SCALE != MODE
 CMD_RESULT_NAMES = {0: "received", 1: "accepted", 2: "applied", 3: "no_vesc",

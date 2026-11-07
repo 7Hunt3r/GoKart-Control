@@ -119,7 +119,10 @@ machine (`{"on":false}` ends it).
   pit within 30 s; the chip shows that RSSI, "NO PIT" at 0, "PIT ?" when the
   Heltec itself is silent.
 - **Mode**: shows actual (from VESC read-back) with a tick when confirmed, and
-  "requested X: not applied yet" while they differ. ECO / NORMAL / SPORT are
+  "requested X: not applied yet" while they differ. Each mode is a top-speed cap plus a
+  torque scale (firmware `config.h MODES[]`: ECO 15 mph / 50 %, NORMAL 25 mph / 75 %, SPORT
+  uncapped / 100 %); the cap is printed under each button (`MODE_TOP_MPH` in app.js, checked
+  against the firmware by `firmware/tests/test_protocol.py`). ECO / NORMAL / SPORT are
   press-and-hold (`mode_hold_ms`, default 500 ms; 0 = tap) to survive bumps.
   The request goes out as `mode N`; the echo (`cmd`, src 254) and later
   `last_cmd_seq`/`cmd_result` give the result (accepted, applied, NO VESC,
@@ -394,8 +397,9 @@ position events; with `--race-at` the sequence starts at the countdown).
 
 **Safety notes.** Zones only change the current scale (motor torque limit)
 inside the firmware's own limits and never above 1.0; ECO/NORMAL karts do get up
-to SPORT torque on a 1.0 boost pad, which is the point, so place pads on
-straights. The race director's kill is the pit's `enabled` switch (karts stop
+to SPORT torque on a 1.0 boost pad, and (firmware 0.2.2+) a boost above the mode's
+scale lifts the mode's speed cap one mode up for its duration (ECO 15 -> 25 mph,
+NORMAL -> uncapped), which is the point, so place pads on straights. The race director's kill is the pit's `enabled` switch (karts stop
 sending within one poll, 30 s, or at once after a `POST /api/map/refresh`); a pit
 STOP is always immediate. GPS is a few metres off: zones under ~10 m feel random.
 

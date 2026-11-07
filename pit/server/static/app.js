@@ -9,6 +9,8 @@ const MOBILE = document.body.dataset.page === "mobile";
 const COMPACT = KIOSK || MOBILE;                    // short chip/volt texts
 const LOGIN_URL = MOBILE ? "/login?next=/m" : "/login";
 const MODES = ["ECO", "NORMAL", "SPORT"];
+const MODE_TOP_MPH = [15, 25, 0];   // firmware speed cap per mode (config.h MODES[]), 0 = none; checked by firmware/tests/test_protocol.py
+const modeTip = (i) => MODE_TOP_MPH[i] ? `${MODES[i]}: ${MODE_TOP_MPH[i]} mph cap` : `${MODES[i]}: no speed cap`;
 const LINK_TEXT = { online: "ONLINE", stale: "STALE", offline: "OFFLINE", never: "NEVER HEARD" };
 const LINK_CLASS = { online: "ok", stale: "warn", offline: "stale", never: "stale" };
 /* Command outcomes in plain words, the same on the kiosk, operator page and phone. The server's
@@ -123,9 +125,9 @@ const gridSeen = {}, goFlash = {};   // per kart: was holding on the grid; GO ba
 const expanded = new Set();   // mobile: kart ids whose card is expanded (per viewer)
 function kartButtons(k) {
   return `<div class="kbtns">
-    <button data-c="mode" data-k="${k}" data-a="0">ECO</button>
-    <button data-c="mode" data-k="${k}" data-a="1">NORMAL</button>
-    <button data-c="mode" data-k="${k}" data-a="2">SPORT</button>
+    <button data-c="mode" data-k="${k}" data-a="0" title="${modeTip(0)}">ECO</button>
+    <button data-c="mode" data-k="${k}" data-a="1" title="${modeTip(1)}">NORMAL</button>
+    <button data-c="mode" data-k="${k}" data-a="2" title="${modeTip(2)}">SPORT</button>
     <button class="b-slow" data-c="slow" data-k="${k}" data-a="5">SLOW</button>
     <button class="b-boost" data-c="boost" data-k="${k}" data-a="100">BOOST</button>
     <button class="b-stop" data-c="stop" data-k="${k}">STOP</button>
@@ -196,7 +198,8 @@ function modeText(k) {
   const req = k.mode_req_name || "--", act = k.mode_actual_name || "?";
   if (KIOSK && st.mode_confirmed === true && req === act) return `<b>${esc(act)}</b> <span class="o-applied">✓</span>`;
   const conf = st.mode_confirmed === true ? "✓ confirmed" : (st.mode_confirmed === false ? "unconfirmed" : "");
-  return `<b>${esc(req)}</b> → ${esc(act)} <span class="${st.mode_confirmed ? "o-applied" : "o-unknown"}">${conf}</span>`;
+  const cap = !nul(st.mode_actual) && MODE_TOP_MPH[st.mode_actual] ? ` ${MODE_TOP_MPH[st.mode_actual]} mph` : "";
+  return `<b>${esc(req)}</b> → ${esc(act)}${cap} <span class="${st.mode_confirmed ? "o-applied" : "o-unknown"}">${conf}</span>`;
 }
 function outcomeText(k) {
   const pk = S.commands.per_kart[String(k)];

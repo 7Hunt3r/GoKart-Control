@@ -109,7 +109,7 @@ digital-modulation rule that allows this power.
 
 | Command | Effect |
 | --- | --- |
-| `status` | one `{"t":"status"}` line (radio, GPS, VESC limits, identity, `limits_ok`, `revert_missed`, sync, heap) |
+| `status` | one `{"t":"status"}` line (radio, GPS, VESC limits, identity, `limits_ok`, `revert_missed`, `cap_mph` / `cap_erpm` (the speed cap the kart wants right now), `baseline_suspect` (the limits read at link-up look like this firmware's own caps: key the kart off/on), sync, heap) |
 | `id N` | kart id 1-8 (stored; reboot renames the OTA host) |
 | `txpower 0..22` | SX1262 drive into the front end in dBm (stored). Radiated is drive + gain from the table above: 10 = ~23 dBm, 14 = ~26, 16 = ~27 (default), 18+ = ~28. `status` shows `tx_dbm` and `tx_radiated_dbm` |
 | `mode 0..2`, `stop`, `start`, `ping`, `slow [mph]`, `race [secs]` | same as the pit command (USB source, own seq numbers) |
@@ -189,12 +189,20 @@ decodes Colin's 47-byte bench `GK` frame. See `libraries/GoKartProtocol/GoKartPr
 
 ## What the kart does with a command
 
-- `SET_MODE n`: sends the limits read from this controller with only `l_current_max_scale`
-  changed (ECO 80/140, NORMAL 100/140, SPORT 1.0, straight from the Core2 dashboard), asks
-  the VESC for an ack, then re-reads GET_MCCONF and reports `applied` only if the live
-  scale matches. Battery current limits are never sent. While stopped or in a race grid hold
+- `SET_MODE n`: sends the limits read from this controller with two fields changed: the
+  motor-current scale and the ERPM bound, which is a **top-speed cap** computed from this
+  controller's own poles / gear ratio / wheel diameter (the SLOW arithmetic). The table is
+  `config.h MODES[]`: ECO 0.50 (70 A) + 15 mph, NORMAL 0.75 (105 A) + 25 mph, SPORT 1.0 (140 A)
+  + the controller's own bound (no cap). The cap is never raised above the controller's own
+  bound; reverse is capped at the same speed. The kart asks the VESC for an ack, then re-reads
+  GET_MCCONF and reports `applied` only if the live scale **and** ERPM bound match; `mode_actual`
+  is likewise the mode whose scale and cap the VESC is running (a controller at its full bound
+  with ECO's scale is not in ECO). A capped mode is `rejected` when the controller reports no
+  drivetrain numbers. Battery current limits are never sent. While stopped or in a race grid hold
   the mode is remembered and applied at START / GO; during a BOOST the boost scale stays until
-  its timer ends and then the new mode applies.
+  its timer ends and then the new mode applies. (Up to 0.2.1 the modes only moved the current
+  scale, 80 / 100 / 140 A, and were indistinguishable on the kart: a current cap shapes the first
+  second of a launch and nothing after it.)
 - `STOP`: aborts any write in flight, then ramps the scale 0.5, 0.2, 0.0 (`STOP_RAMP`, 150 ms
   steps, each acknowledged and re-read, so about 0.5-1 s) and holds; also asks the optional VESC
   brake script for regen. Cancels BOOST and race hold. Mechanical brakes and hardwired throttle
@@ -204,8 +212,11 @@ decodes Colin's 47-byte bench `GK` frame. See `libraries/GoKartProtocol/GoKartPr
   restores the real limit after a reconnect during a STOP). If no mode was ever requested and
   that scale is 0 (Heltec rebooted during a stop), START answers `rejected`: send a mode.
 - `SLOW n`, `BOOST pct`, `RACE secs`: see `base-tbeam-s3/SERIAL_PROTOCOL.md` and
-  `pit/server/map/ZONES.md`. BOOST and race hold end on the kart's own timer; race GO is
-  `issued + secs` on the shared GPS/beacon clock at millisecond resolution.
+  `pit/server/map/ZONES.md`. A BOOST whose scale is above the mode's also lifts the speed cap one
+  mode up for its duration (ECO -> NORMAL's 25 mph, NORMAL -> uncapped; `config.h BOOST_LIFTS_CAP`);
+  MUD (scale at or below the mode's) keeps the cap, and SLOW always wins when lower. BOOST and
+  race hold end on the kart's own timer; race GO is `issued + secs` on the shared GPS/beacon
+  clock at millisecond resolution.
 - Every write requires: writes compiled in, the link up, GET_MCCONF read in THIS link session,
   and (with a `vescuuid` pin) a matching FW_VERSION reply from this session.
 - `cmd_result` in radio telemetry answers pit commands only; console/kart-Pi commands are

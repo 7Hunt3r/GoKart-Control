@@ -262,7 +262,7 @@ def fix(e, n, stopped=False, **kw):
     lat, lon = ll(e, n)
     # 54 km/h (15 m/s): fast enough that the test tracks' long hops are not GPS outliers
     return {"t": "self", "kart": 2, "fix": True, "lat": lat, "lon": lon, "stopped": stopped, "gps_kph": 54.0,
-            "heading": 90.0, "vesc_link": True, "mode_req": 1, "scale": 0.714, **kw}
+            "heading": 90.0, "vesc_link": True, "mode_req": 1, "scale": 0.75, **kw}
 
 
 def lines(recs):
@@ -548,7 +548,7 @@ class Game(unittest.TestCase):
 
     def test_meter(self):
         g, _ = self.engine(boost_zone())
-        g.on_self(fix(-15, 0, scale=0.714, mode_req=1), 1.0)
+        g.on_self(fix(-15, 0, scale=0.75, mode_req=1), 1.0)
         self.assertEqual(g.meter(1.0)["kind"], "normal")
         g.on_self(fix(-15, 0, scale=1.0, mode_req=1), 1.5)
         self.assertEqual(g.meter(1.5)["kind"], "boost")

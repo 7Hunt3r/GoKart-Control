@@ -33,8 +33,11 @@ Rules every implementation follows:
   refuses smaller. Karts fix at 5 Hz; GPS is still a few metres off, so very small zones can feel random.
 - **boost**: on entry the kart Pi sends the Heltec `boost <secs> <scale>` over USB (firmware
   2026-11-06+: `scale` 0.10-1.00, `secs` 1-30; the Heltec auto-reverts to the mode scale when the
-  time is up, and STOP/START cancel it). `scale` is clamped to 1.0 (never above SPORT or above the
-  controller's own limits, which the firmware echoes). Re-trigger only after the kart has left the
+  time is up, and STOP/START cancel it). A boost whose scale is above the mode's also lifts the
+  mode's speed cap one mode up for the same time (ECO 15 -> 25 mph, NORMAL 25 -> uncapped, SPORT
+  unchanged; firmware 0.2.2+), so a pad on a straight is felt by a kart already sitting at its cap;
+  mud (scale at or below the mode's) keeps the cap. `scale` is clamped to 1.0 (never above SPORT or
+  above the controller's own limits, which the firmware echoes). Re-trigger only after the kart has left the
   zone and `cooldown_s` (default 20) has passed.
 - **mud**: while inside, the kart Pi sends `boost 3 <scale>` and repeats it every 2 s so the cap
   lasts exactly as long as the kart is in the zone (plus at most 3 s). On leaving it simply stops

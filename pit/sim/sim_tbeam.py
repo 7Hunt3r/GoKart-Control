@@ -45,7 +45,7 @@ from pitcore import MODE_SCALES, erpm_for_mph  # noqa: E402
 
 FW = "sim-0.1.0"
 ORIGIN = (41.0727, -73.4047)   # approximate, unsurveyed point near Manresa Island, Norwalk CT
-MODE_MAX_MS = {0: 6.0, 1: 9.0, 2: 12.0}      # simulated top speeds per mode (not real limits)
+MODE_MAX_MS = {0: 6.0, 1: 9.0, 2: 12.0}      # simulated top speeds per mode (the real caps are pitcore.MODE_TOP_MPH: 15 / 25 / none mph)
 R_EARTH = 6371000.0
 
 

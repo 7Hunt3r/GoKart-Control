@@ -3,7 +3,7 @@
 // variant (which runs on this exact board). Everything else is this project's choice.
 #pragma once
 
-#define FW_VERSION      "kart-0.2.1"
+#define FW_VERSION      "kart-0.2.2"
 #define DEFAULT_KART_ID 1            // runtime override: USB command "id N" (stored in flash)
 
 // ---- VESC writes -----------------------------------------------------------
@@ -84,16 +84,32 @@
 #define BASE_WATT_MAX    1500000.0f
 
 // ---- Modes ----------------------------------------------------------------
-// Ported from the Core2 dashboard: motor-current scale relative to the 140 A
-// configured maximum. Owner's eventual intent is top-speed caps instead; that
-// is a separate change once the drivetrain numbers are verified.
-struct ModeDef { const char* name; float currentMaxScale; };
+// A mode is a TOP-SPEED CAP plus a TORQUE (motor-current) SCALE, both written as temporary
+// limits (store=0) on top of the controller's own configuration:
+//   * topMph          -> l_max_erpm (and the reverse bound), computed the way SLOW does it from
+//                        THIS controller's own si_motor_poles / si_gear_ratio / si_wheel_diameter
+//                        (baseline kart: 14 poles, 2.769, 0.406 m -> 15 mph = 6115 ERPM). 0 = no cap,
+//                        the controller's own ERPM bound stays. The VESC tapers the current over the
+//                        last 20 % below the bound (l_erpm_start 0.8), so the cap is a soft ceiling.
+//   * currentMaxScale -> l_current_max_scale, relative to l_current_max (140 A in the baseline).
+// Why both: the Core2 dashboard's modes only moved the current scale (80 / 100 / 140 A) and the
+// three felt the same on the kart (Eamon, kart 2, 2026-11-07): a current cap only shapes the
+// first second of a launch; after that the motor is out of voltage, not current, and the top
+// speed is identical. The owner's stated intent (docs/requirements.md) is top-speed caps with
+// strong acceleration. First cut, for the owner to confirm after driving; edit here only (the
+// pit, kart Pi and simulators carry copies that firmware/tests/test_protocol.py checks against this):
+struct ModeDef { const char* name; float currentMaxScale; uint8_t topMph; };
 static const ModeDef MODES[3] = {
-  { "ECO",    80.0f  / 140.0f },
-  { "NORMAL", 100.0f / 140.0f },
-  { "SPORT",  1.0f },
+  { "ECO",    0.50f, 15 },   //  70 A of 140, 15 mph
+  { "NORMAL", 0.75f, 25 },   // 105 A of 140, 25 mph
+  { "SPORT",  1.00f,  0 },   // 140 A, the controller's own ERPM bound (no cap)
 };
-#define MODE_MATCH_TOL 0.015f
+#define MODE_MATCH_TOL  0.015f   // a live scale this close to a mode's reads as that mode ...
+#define MODE_ERPM_TOL   50.0f    // ... when the live ERPM bound is also this close to the mode's cap
+// A BOOST (timed scale ABOVE the mode's) also lifts the speed cap one mode up for its duration
+// (ECO -> NORMAL's 25 mph, NORMAL -> uncapped, SPORT unchanged); MUD (scale at or below the mode's)
+// keeps the cap. Without this a boost pad on a straight does nothing to a kart already at its cap.
+#define BOOST_LIFTS_CAP 1
 
 // Stop = ramp the current scale down, then hold at 0. Mechanical brakes are untouched.
 // At the same time the kart asks the VESC's brake script (firmware/vesc-lisp/gokart_brake.lisp)

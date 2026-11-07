@@ -16,7 +16,10 @@ What it checks:
      gkTelemetryToJson emits exactly the documented field order. Skipped (reported) otherwise.
   5. The field names the Pi readers use (pit/server/pitcore.py, kart/server/kartcore.py) exist in
      the firmware's JSON (read as text; the Python modules are not imported).
+  6. The mode table (kart-heltec-v4/config.h MODES[]: current scale + top-speed cap per mode) and its
+     copies in the pit, the kart Pi, the kart simulator and both web UIs agree (read as text).
 """
+import ast
 import json
 import os
 import re
@@ -326,6 +329,49 @@ class ReaderFieldNames(unittest.TestCase):
         src = read(os.path.join(FW, "kart-heltec-v4", "kart-heltec-v4.ino"))
         for f in SELF_EXTRA_FIELDS:
             self.assertIn('\\"%s\\":' % f, src, f"self extra {f} missing from usbReport()")
+
+
+class ModeTable(unittest.TestCase):
+    """The mode table lives in firmware/kart-heltec-v4/config.h (MODES[]: name, current scale, top mph);
+    the pit, the kart Pi, the kart simulator and the two web UIs carry copies. They must agree."""
+
+    def _fw(self):
+        src = read(os.path.join(FW, "kart-heltec-v4", "config.h"))
+        rows = re.findall(r'\{\s*"(\w+)",\s*([0-9.]+)f?,\s*(\d+)\s*\}', src)
+        self.assertEqual([r[0] for r in rows], ["ECO", "NORMAL", "SPORT"], rows)
+        return {i: (float(s), int(m)) for i, (_, s, m) in enumerate(rows)}
+
+    def _py_dict(self, path, name):
+        src = read(os.path.join(REPO, *path))
+        m = re.search(r"^" + name + r"\s*=\s*(\{[^}]*\})", src, re.M)
+        self.assertIsNotNone(m, f"{'/'.join(path)}: {name} not found")
+        return ast.literal_eval(m.group(1))
+
+    def test_python_copies(self):
+        fw = self._fw()
+        for path, scales, tops in ((("pit", "server", "pitcore.py"), "MODE_SCALES", "MODE_TOP_MPH"),
+                                   (("kart", "server", "kartcore.py"), "MODE_SCALES", "MODE_TOP_MPH"),
+                                   (("kart", "sim", "sim_heltec.py"), "MODE_SCALE", "MODE_TOP_MPH")):
+            sc, tp = self._py_dict(path, scales), self._py_dict(path, tops)
+            for i, (s, m) in fw.items():
+                self.assertAlmostEqual(sc[i], s, places=3, msg=f"{path[-1]} {scales}[{i}] != config.h")
+                self.assertEqual(tp[i], m, f"{path[-1]} {tops}[{i}] != config.h")
+
+    def test_web_ui_copies(self):
+        fw = self._fw()
+        for path in (("pit", "server", "static", "app.js"), ("kart", "server", "static", "app.js")):
+            src = read(os.path.join(REPO, *path))
+            m = re.search(r"const MODE_TOP_MPH = \[([^\]]*)\]", src)
+            self.assertIsNotNone(m, f"{path[-2]}/{path[-1]}: MODE_TOP_MPH not found")
+            self.assertEqual([int(x) for x in m.group(1).split(",")], [fw[i][1] for i in range(3)], path)
+
+    def test_table_sane(self):
+        fw = self._fw()
+        self.assertEqual(fw[2], (1.0, 0), "SPORT must be the controller's own limits (scale 1.0, no cap)")
+        self.assertTrue(fw[0][0] < fw[1][0] < fw[2][0], "scales must rise ECO < NORMAL < SPORT")
+        self.assertTrue(0 < fw[0][1] < fw[1][1], "caps must be set and rise ECO < NORMAL")
+        # mode_actual is matched on the scale within MODE_MATCH_TOL (0.015): the scales must stay apart
+        self.assertTrue(all(abs(fw[i][0] - fw[j][0]) > 0.03 for i in range(3) for j in range(i)), fw)
 
 
 if __name__ == "__main__":

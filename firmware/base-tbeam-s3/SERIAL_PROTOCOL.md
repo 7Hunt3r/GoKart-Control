@@ -23,7 +23,9 @@ beacon and repeater relay exercised on the bench (2026-11-05/06).
 | `sent` | after a command was transmitted | `seq`, `cmd`, `kart`, `arg`, `ok` (radio accepted it), `wait_ms` (time it waited in the base's queue) |
 | `log` | occasionally | `msg` |
 
-Modes: 0 ECO, 1 NORMAL, 2 SPORT. `mode_actual` is what the kart read back from
+Modes: 0 ECO, 1 NORMAL, 2 SPORT. Each is a top-speed cap plus a motor-current scale
+(kart firmware `config.h MODES[]`, 0.2.2+: ECO 15 mph / 0.50, NORMAL 25 mph / 0.75, SPORT
+uncapped / 1.0). `mode_actual` is the mode whose scale AND cap the kart read back from
 the VESC; `mode_req` is what it was last told. They differ until the kart's
 re-read confirms, and `mode_actual` is `null` after a VESC reboot until a
 command is sent, because the kart never writes on its own (owner reliability rule).
@@ -58,13 +60,13 @@ ignores empty lines, so the leading newline also terminates any such fragment.
 
 | `cmd` | `arg` | Effect on the kart |
 | --- | --- | --- |
-| `mode` | 0 ECO, 1 NORMAL, 2 SPORT | Writes the mode's current scale to the VESC (confirmed by re-read) |
+| `mode` | 0 ECO, 1 NORMAL, 2 SPORT | Writes the mode's current scale and top-speed ERPM cap to the VESC (both confirmed by re-read); `rejected` if the controller has no drivetrain numbers for the cap |
 | `stop` | - | Ramps to stop and holds until START; cancels BOOST (SLOW stays) |
 | `start` | - | Releases STOP; clears SLOW and BOOST |
 | `ping` | - | Echo only (`cmd_result` applied), no VESC write |
 | `slow` | mph 1-60 (0/absent = 5) | ERPM cap at that speed until START (firmware 2026-11-06+) |
 | `race` | 1-30 = grid hold now, GO `arg` s after `issued_utc_s`; 0 or 101-108 = finish (position `arg`-100) | See pit/server/map/ZONES.md "Race start" / "Race finish". The kart prints `{"t":"race",...}` events on USB |
-| `boost` | scale percent 10-100 | Timed current-scale override for 5 s, then auto-reverts to the mode scale; never above 1.0; rejected while stopped; STOP/START cancel it (firmware 2026-11-06+). The USB form `boost SECS SCALE` on the kart sets other durations (game zones) |
+| `boost` | scale percent 10-100 | Timed current-scale override for 5 s, then auto-reverts to the mode scale; never above 1.0; rejected while stopped; STOP/START cancel it (firmware 2026-11-06+). A scale above the mode's also lifts the mode's speed cap one mode up for the same time (0.2.2+). The USB form `boost SECS SCALE` on the kart sets other durations (game zones) |
 | `rate` | 1 or 2 (Hz) | Telemetry report rate, saved on the kart; no VESC involvement (firmware 2026-11-07+). The pit sends `rate 1` to all karts while a repeater heartbeat is heard (now, then every 30 s) and `rate 2` once after 120 s without one: a 50 ms slot cannot hold a 23 ms packet and its 23 ms repeater copy |
 | (`"t":"race"`) | `state` 0-3, `pos[8]` | Not a command (no seq, no echo, no reply): race state + running positions carried in the base's beacons for 30 s, see "Race positions" below |
 

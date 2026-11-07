@@ -11,6 +11,7 @@
 "use strict";
 
 const MODES = ["ECO", "NORMAL", "SPORT"];
+const MODE_TOP_MPH = [15, 25, 0];   // firmware speed cap per mode (config.h MODES[]), 0 = none; checked by firmware/tests/test_protocol.py
 const RESULT_TEXT = { none: "no result", accepted: "accepted", applied: "applied", no_vesc: "NO VESC", rejected: "REJECTED", unknown: "not confirmed" };
 const CMD_TEXT = { mode: "mode", stop: "STOP", start: "START", ping: "ping", slow: "SLOW", status: "status" };
 const $ = (id) => document.getElementById(id);
@@ -125,11 +126,13 @@ function render() {
   let mn = "";
   if (!nul(mr) && mr !== ma) mn = `requested ${MODES[mr]}: not applied yet`;
   else if (!nul(ma) && !st.mode_confirmed) mn = st.stopped ? "held by STOP" : "not confirmed by VESC read-back";
-  else if (!nul(ma)) mn = "confirmed by VESC read-back";
+  else if (!nul(ma)) mn = (MODE_TOP_MPH[ma] ? `${MODE_TOP_MPH[ma]} mph cap · ` : "no speed cap · ") + "confirmed by VESC read-back";
   else mn = "VESC has not reported a mode";
   txt("modeNote", fresh ? mn : nul(me.age_s) ? "no data from the kart computer yet" : `last known (${ageText(me.age_s)} ago)`);
   document.querySelectorAll(".mbtn").forEach((b) => {
     const m = Number(b.dataset.mode);
+    const cap = b.querySelector(".cap");
+    if (cap) cap.textContent = MODE_TOP_MPH[m] ? `${MODE_TOP_MPH[m]} mph` : "no cap";
     b.classList.toggle("actual", m === ma && fresh);
     b.classList.toggle("req", m === mr && fresh);
     b.disabled = !link.connected;
