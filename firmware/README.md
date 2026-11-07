@@ -1,15 +1,18 @@
 # Firmware
 
-Two Arduino sketches plus two small shared libraries. **Status: compiles; not yet
-run on hardware** except where this file says otherwise. Everything here follows the
-owner's reliability rule in `docs/requirements.md`: a kart never writes to its VESC
-because a link dropped or returned; boot and reconnect are read-only.
+Three Arduino sketches plus two small shared libraries. **Status: all three run on bench
+hardware** (kart 2 Heltec V4.3, pit T-Beam S3, repeater T-Beam S3; see "Verified vs not").
+Everything here follows the owner's reliability rule in `docs/requirements.md`: a kart never
+writes to its VESC because a link dropped or returned; boot and reconnect are read-only. The
+write invariants are listed at the top of `kart-heltec-v4/kart-heltec-v4.ino` (W1-W6).
 
 | Folder | Board | Role |
 | --- | --- | --- |
 | `kart-heltec-v4/` | Heltec WiFi LoRa 32 V4.3 + Quectel L76K | Kart supervisor: VESC link, GPS, LoRa, OLED, USB JSON for the kart Pi, WiFi OTA |
-| `base-tbeam-s3/` | LilyGo T-Beam S3 Core (Supreme) | Pit LoRa modem: receives all karts, transmits commands, USB JSON for the Pi 4, WiFi OTA |
-| `libraries/GoKartProtocol/` | both | Packet structs, radio parameters, slot timing, JSON encoder |
+| `base-tbeam-s3/` | LilyGo T-Beam S3 Core (Supreme) | Pit LoRa modem: receives all karts, transmits commands and the 1 Hz beacon, USB JSON for the Pi 4, WiFi OTA |
+| `repeater-tbeam-s3/` | spare T-Beam S3 Core | Plug-anywhere one-hop LoRa repeater for dead zones (see "Repeater") |
+| `libraries/GoKartProtocol/` | all three | Packet structs, radio parameters, airtime + slot plan (with compile-time checks), JSON encoder |
+| `tests/test_protocol.py` | host | `python3 -I firmware/tests/test_protocol.py`: struct layout, nibble helpers, airtime/slot plan, JSON field order, Pi reader field names (compiles the header with the host C++ compiler when present) |
 | `libraries/VescLink/` | kart | VESC 6.00 UART framing: FW_VERSION, GET_VALUES, GET_MCCONF (read-only), SET_MCCONF_TEMP with ack |
 
 The old M5Stack Core2 dashboard is the ancestor of the VESC side (same temp-limit
@@ -27,6 +30,9 @@ cd firmware
 ./build.sh kart                                   # compile kart (VESC over BLE, fleet default)
 ./build.sh kart-uart                              # compile kart with the wired UART transport
 ./build.sh base                                   # compile base station
+./build.sh repeater                               # compile the LoRa repeater
+./build.sh all                                    # compile kart, base and repeater
+./build.sh test                                   # host-side protocol tests (python3, no board needed)
 ./build.sh base upload /dev/cu.usbmodemXXXX       # flash over USB
 ./build.sh kart ota gokart-1.local [otapassword]  # ArduinoOTA once the board is on WiFi
 ```
@@ -82,6 +88,24 @@ is the intended place for this; it is not needed on the track.
 Transmit power: the SX1262 is set to 10 dBm and the V4.3 front end adds roughly
 7-11 dB. Measure before raising it.
 
+## Kart USB console (115200, newline-terminated; `help` prints this list)
+
+| Command | Effect |
+| --- | --- |
+| `status` | one `{"t":"status"}` line (radio, GPS, VESC limits, identity, `limits_ok`, `revert_missed`, sync, heap) |
+| `id N` | kart id 1-8 (stored; reboot renames the OTA host) |
+| `mode 0..2`, `stop`, `start`, `ping`, `slow [mph]`, `race [secs]` | same as the pit command (USB source, own seq numbers) |
+| `boost SECS SCALE` | timed scale override, 1-30 s, 0.10-1.00 (game zones / mud) |
+| `rate 1\|2` | report rate (default 2 Hz; use 1 Hz when the fleet relies on a repeater) |
+| `wifi SSID PASS`, `otapw PASS` | stored in flash for OTA; reboot to apply |
+| `vescmac AA:BB:..\|clear`, `blescan` | pin the VESC BLE address / list candidates |
+| `vescuuid <24 hex>\|now\|clear` | pin the controller UUID; writes then wait for a matching FW_VERSION reply |
+| `gpsline on\|off` | the 5 Hz `{"t":"gps"}` line (one per fix epoch) |
+| `gpsreset`, `gpsrecover`, `gpscold`, `gpspin`, `gpsdump`, `gpstest BAUD` | GNSS diagnostics (block the loop for up to ~10 s; bench only) |
+| `reboot` | restart |
+
+A console line longer than 199 bytes is ignored with a log line (never executed truncated).
+
 ## Base wiring (T-Beam S3 Core)
 
 Nothing to wire: SX1262, u-blox GNSS, AXP2101 power manager and the optional SH1106
@@ -94,8 +118,12 @@ status line says so; that variant is not handled yet.
 
 `firmware/repeater-tbeam-s3` turns a spare T-Beam into a plug-anywhere LoRa repeater for dead
 zones. No configuration: power it from a USB brick and leave it. It listens on the fleet channel
-and re-sends every packet it hears exactly once, 25 ms after reception, which lands inside the
-same kart's 50 ms slot (22 ms packet + 25 ms + 22 ms copy), so no other kart's slot is touched.
+and re-sends every packet it hears exactly once, 25 ms after reception. At **1 Hz** that copy lands
+inside the same kart's 100 ms slot (23 ms packet + 25 ms + 23 ms copy). At **2 Hz** (the kart
+default) it does not: the 50 ms slot only holds the original, and the copy lands on the next kart's
+slot. **A fleet that depends on a repeater should run `rate 1` on every kart** (the compile-time
+slot checks in `GoKartProtocol.h` and `tests/test_protocol.py` encode exactly this). A copy that
+cannot start within 4 ms of its due time is dropped and counted as `late`.
 Copies carry `GK_HDR_RELAY_BIT` (0x80) in the header version byte: a repeater never relays a
 relayed packet (one hop), the pit drops a copy of a packet it already heard directly and shows
 "via repeater" on karts it only hears through the repeater, and a kart syncs its slot timing from
@@ -117,7 +145,8 @@ OLED: `heard n relayed n`, pit RSSI and age, and per-kart RSSI. The screen's I2C
 on the second T-Beam the QMC6310 compass sits at 0x3C (register 0 reads 0x80) and the screen at 0x3D, so a
 fixed 0x3C drives the compass and the screen stays dark. The boot log says which address and driver were
 chosen; `oled sh1106|ssd1306 [3c|3d|auto]` on the USB console overrides and reboots. USB prints one JSON `stat` line a
-second (`heard`, `relayed`, `dupes`, `dropped`, `rx_bad`, `pit_rssi`, `batt_v`, `karts`). Opening
+second (`heard`, `relayed`, `hb_tx`, `dupes`, `dropped`, `late`, `rx_bad`, `pit_rssi`, `pit_age_s`, `batt_v`,
+`uptime_s`, `oled*`, `i2c`, `karts`). Opening
 the USB port with a terminal resets the board (USB-CDC DTR), which is harmless.
 
 Placement: one repeater per dead zone, where it can hear the pit directly. Two repeaters in range
@@ -127,25 +156,47 @@ and every beacon relayed, zero drops; range not yet measured.
 
 ## Protocol in one paragraph
 
-Every kart transmits one 46-byte telemetry packet per second at 915 MHz, SF7, 500 kHz
-(matching Colin's bench transmitter, whose 47-byte frame the base also decodes),
-in a 100 ms slot chosen by kart id and aligned to the GPS PPS edge, so eight karts
-fill 800 ms without colliding. The base sends 14-byte commands in the remaining
-tail of the second. Commands carry a sequence number that the kart echoes with a
-result code in its next telemetry; the host retries until it sees the echo. See
-`libraries/GoKartProtocol/GoKartProtocol.h` and `base-tbeam-s3/SERIAL_PROTOCOL.md`.
+Every kart transmits a 47-byte telemetry packet (23 ms on air) at 915 MHz, SF7, 500 kHz,
+twice a second by default (`rate 1|2`), in a slot chosen by kart id: 50 ms slots in two
+rounds per second at 2 Hz, 100 ms slots at 1 Hz. Slots align to the GPS PPS edge, or to the
+pit beacon when a kart has no PPS. The pit sends a 27-byte beacon at 905 ms (UTC, its own fix,
+sync phase, race state and positions) and 14-byte commands wherever its slot plan shows no
+online kart on the air. A repeater re-sends packets once with the relay bit (0x80 in the
+version byte). Commands carry a sequence number that the kart echoes with a result code in its
+next telemetry; the host retries until it sees the echo, and the kart recognises retries and
+repeater copies (seq + cmd + arg + issue time, last 8 per source) so they are never applied twice.
+Receivers still accept 46-byte telemetry and 22-byte beacons from older builds, and the base
+decodes Colin's 47-byte bench `GK` frame. See `libraries/GoKartProtocol/GoKartProtocol.h`
+(slot plan with compile-time checks) and `base-tbeam-s3/SERIAL_PROTOCOL.md`.
 
 ## What the kart does with a command
 
-- `SET_MODE n`: sends the baseline limits with only `l_current_max_scale` changed
-  (ECO 80/140, NORMAL 100/140, SPORT 1.0, straight from the Core2 dashboard), asks the
-  VESC for an ack, then re-reads GET_MCCONF and reports `applied` only if the live
-  scale matches. Battery current limits are never sent.
-- `STOP`: ramps the scale 0.6, 0.3, 0.1, 0 over about 1.5 s and holds. Mechanical
-  brakes and hardwired throttle are untouched; the kart coasts.
-- `START`: re-applies the requested mode, or the scale observed before the stop.
+- `SET_MODE n`: sends the limits read from this controller with only `l_current_max_scale`
+  changed (ECO 80/140, NORMAL 100/140, SPORT 1.0, straight from the Core2 dashboard), asks
+  the VESC for an ack, then re-reads GET_MCCONF and reports `applied` only if the live
+  scale matches. Battery current limits are never sent. While stopped or in a race grid hold
+  the mode is remembered and applied at START / GO; during a BOOST the boost scale stays until
+  its timer ends and then the new mode applies.
+- `STOP`: aborts any write in flight, then ramps the scale 0.5, 0.2, 0.0 (`STOP_RAMP`, 150 ms
+  steps, each acknowledged and re-read, so about 0.5-1 s) and holds; also asks the optional VESC
+  brake script for regen. Cancels BOOST and race hold. Mechanical brakes and hardwired throttle
+  are untouched; without the script the kart coasts.
+- `START`: clears STOP, SLOW, BOOST and race hold and applies the requested mode, or the scale
+  this controller had when the kart first read it (kept across a BLE drop, so START still
+  restores the real limit after a reconnect during a STOP). If no mode was ever requested and
+  that scale is 0 (Heltec rebooted during a stop), START answers `rejected`: send a mode.
+- `SLOW n`, `BOOST pct`, `RACE secs`: see `base-tbeam-s3/SERIAL_PROTOCOL.md` and
+  `pit/server/map/ZONES.md`. BOOST and race hold end on the kart's own timer; race GO is
+  `issued + secs` on the shared GPS/beacon clock at millisecond resolution.
+- Every write requires: writes compiled in, the link up, GET_MCCONF read in THIS link session,
+  and (with a `vescuuid` pin) a matching FW_VERSION reply from this session.
+- `cmd_result` in radio telemetry answers pit commands only; console/kart-Pi commands are
+  reported on USB (`cmd` lines and the `self` line), so their kart-local seq numbers never
+  alias the pit's.
 - Nothing is written at boot, on VESC reconnect, on WiFi/LoRa/GPS loss, or when a
-  retransmitted command arrives. `mode_actual` comes from a GET_MCCONF re-read
+  retransmitted command arrives. If a BOOST/MUD timer or race GO falls due while the VESC link
+  is down, nothing is written then or on reconnect; `status` shows `revert_missed` and the
+  re-read `mode_actual` tells the pit, which can resend the mode. `mode_actual` comes from a GET_MCCONF re-read
   every 10 s, so the pit sees the truth, including after a VESC power cycle.
 - Build with `-DENABLE_VESC_WRITES=0` for a telemetry-only kart; every write command
   is then answered `rejected`. The default build has writes enabled because the
@@ -177,7 +228,8 @@ before anything is trusted:
 
 ## Verified vs not
 
-- Verified: both sketches compile for their boards (arduino-cli, esp32 3.3.8);
+- Verified: all three sketches compile for their boards (arduino-cli, esp32 3.3.8);
+  `tests/test_protocol.py` passes (struct layout, airtime, slot plan, JSON order);
   the temp-limit payload layout matches bldc `release_6_00` `comm/commands.c`
   (battery limits optional, read only when present); command ids 4/14/48 match
   the 6.00 enum; mcconf offsets computed from the pinned schema.
@@ -191,9 +243,10 @@ before anything is trusted:
   The board shipped running Meshtastic; the first flash needed a 1200-baud touch
   to reach the bootloader, after which it enumerates as "USB JTAG/serial debug
   unit" and normal uploads work.
-- Not verified: GPS fix and PPS (indoors so far), any LoRa packet over the air,
-  OLED on the T-Beam, OTA, and everything on the kart side (front-end control,
-  GPS pin order, PPS slotting, VESC UART wiring, OLED, power draw).
-  First bench steps: flash base, confirm `stat` lines and GPS fix on USB; flash
-  kart with no VESC attached, confirm it appears in the base's `tele` lines;
-  then attach the VESC over USB-powered bench and watch `status`.
+- Verified on hardware since (2026-11-05/06, see HANDOFF.md): LoRa both ways between kart 2,
+  kart 1 and the pit; GPS fix outdoors (5-11 sats); remote STOP/START on a real VESC over BLE
+  with ack + read-back; WiFi OTA on the kart; the repeater relaying kart 2 and the beacon.
+- Not verified: PPS slotting on the air (indoor bench has no PPS), 8-kart load, the base's
+  PPS-kart edge derivation and schedule-based command placement (2026-11-06 night quality pass:
+  compiled and host-tested only), the VESC UART transport, the brake script on any kart,
+  BOOST/RACE against a live VESC, power draw, range.

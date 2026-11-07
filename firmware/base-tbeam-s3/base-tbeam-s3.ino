@@ -3,13 +3,15 @@
  *
  * A LoRa modem for the pit host (Raspberry Pi 4 or a laptop over USB):
  *   - receives every kart's telemetry packet and prints it as one JSON line per packet;
- *   - accepts JSON command lines from the host (mode / stop / start / ping) and transmits
- *     them, in the quiet tail of each second when GPS PPS is available;
+ *   - accepts JSON command lines from the host (mode / stop / start / ping / slow / boost / race)
+ *     and transmits them where the slot plan (GoKartProtocol.h) has no online kart on the air when
+ *     it has a time reference, immediately otherwise; STOP jumps the queue;
+ *   - sends the pit beacon (time, sync phase, race positions) once a second at 905 ms;
  *   - prints its own GPS position and a status line once per second;
  *   - shows "karts online" and per-kart summaries on the OLED;
  *   - joins WiFi when credentials are stored and accepts ArduinoOTA firmware updates.
  *
- * Contract: firmware/base-tbeam-s3/SERIAL_PROTOCOL.md. Status: compiles; NOT yet run on hardware.
+ * Contract: firmware/base-tbeam-s3/SERIAL_PROTOCOL.md. Status: running on the pit T-Beam since 2026-11-05.
  */
 #include <Arduino.h>
 #include <Preferences.h>
@@ -65,14 +67,19 @@ GkTelemetry fleet[GK_MAX_KARTS + 1];
 uint32_t    fleetMs[GK_MAX_KARTS + 1];
 float       fleetRssi[GK_MAX_KARTS + 1];
 GkBenchFrame benchLast; uint32_t benchRx = 0, benchMs = 0; float benchRssi = 0;   // Colin's bench transmitter (kart id 0 = uncommissioned)
-// Second-boundary estimate for the beacon and the command window: GPS PPS when available,
-// else derived from kart slot timing (kart k transmits (k-1)*100 ms after the edge), else free-running.
-#define GK_TELE_AIRTIME_MS 22
+// Per-kart report rate (1 or 2 Hz), estimated from consecutive direct packets; the slot plan depends on it.
+uint8_t  fleetRate[GK_MAX_KARTS + 1]; uint8_t fleetLastSeq[GK_MAX_KARTS + 1]; uint32_t fleetDirectMs[GK_MAX_KARTS + 1];
+uint32_t repeaterHeardMs = 0;              // any relayed packet or heartbeat: commands then need room for the copy
+// Second-boundary estimate for the beacon and command placement: GPS PPS when available, else derived
+// from karts that report a PPS lock (their slots sit on true UTC seconds), else free-running. Karts
+// WITHOUT PPS follow our beacon; deriving our edge from them would chase our own tail (each beacon
+// moved them, each of their packets moved us: seen as drifting slots before 2026-11-06 night).
 uint32_t edgeMicros = 0, edgeSetMs = 0; uint8_t edgeSrc = 0;
-uint32_t beaconTx = 0, lastBeaconMicros = 0; uint8_t beaconSeq = 0;
-struct QueuedCmd { GkCommandMsg msg; bool used; };
+uint32_t beaconTx = 0, beaconSkipped = 0, lastBeaconMicros = 0; uint8_t beaconSeq = 0;
+struct QueuedCmd { GkCommandMsg msg; uint32_t queuedMs; };
 QueuedCmd cmdQueue[CMD_QUEUE_LEN];
 int cmdHead = 0, cmdTail = 0;
+uint32_t cmdDropped = 0, cmdForced = 0;   // queue overflow / sent after GK_CMD_MAX_WAIT_MS without a clear spot
 
 // ---------------------------------------------------------------- display / misc
 U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
@@ -80,7 +87,7 @@ bool     oledOk = false;
 uint32_t oledMs = 0, statMs = 0, wifiRetryMs = 0, hostLineMs = 0;
 bool     wifiStarted = false, otaStarted = false, otaInProgress = false;
 char     usbLine[300];
-uint16_t usbLen = 0;
+uint16_t usbLen = 0; bool usbOverflow = false;
 uint8_t  oledPage = 0;
 
 // ---------------------------------------------------------------- helpers
@@ -196,26 +203,39 @@ static void serviceLoraRx() {
   if (h->src == GK_ADDR_BASE) return;                       // our own beacon/command coming back via a repeater
   loraRx++;
   if (type == GK_MSG_REPEATER_INFO) {
-    GkRepeaterInfo r; memcpy(&r, buf, sizeof r);
+    GkRepeaterInfo r; memcpy(&r, buf, sizeof r); repeaterHeardMs = millis();
     char karts[40] = ""; size_t n = 0;
     for (int k = 1; k <= GK_MAX_KARTS; k++) if (r.karts_mask & (1 << (k - 1))) n += snprintf(karts + n, sizeof karts - n, "%s%d", n ? "," : "", k);
     Serial.printf("{\"t\":\"repeater\",\"id\":%u,\"seq\":%u,\"heard\":%u,\"relayed\":%u,\"batt_v\":%.2f,\"pit_rssi\":%d,\"rssi\":%.0f,\"snr\":%.1f,\"uptime_min\":%u,\"karts\":[%s]}\n",
                   (unsigned)(h->src - GK_ADDR_REPEATER + 1), h->seq, r.heard, r.relayed, r.batt_mv / 1000.0, r.pit_rssi, (double)rssi, (double)snr, r.uptime_min, karts);
     return;
   }
-  if (gkIsRelayed(*h)) relayRx++;
+  const bool relayed = gkIsRelayed(*h);
+  if (relayed) { relayRx++; repeaterHeardMs = millis(); }
   if (type == GK_MSG_TELEMETRY && h->src >= 1 && h->src <= GK_MAX_KARTS) {
-    gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); fleetRssi[h->src] = rssi;
-    if (!ppsFreshB() && !gkIsRelayed(*h)) {
-      // Kart slots start (k-1)*100 ms after the edge; a 2 Hz kart's second-round packet lands
-      // 500 ms later, so ignore candidates that sit ~500 ms from the current estimate.
-      uint32_t cand = loraIrqMicros - ((uint32_t)(h->src - 1) * GK_SLOT_MS + GK_TELE_AIRTIME_MS) * 1000UL;
-      bool accept = true;
-      if (edgeSetMs && millis() - edgeSetMs < 5000) {
-        uint32_t d = (uint32_t)(cand - edgeMicros) % 1000000UL;
-        if (d > 440000UL && d < 560000UL) accept = false;
+    const uint8_t k = h->src; const uint32_t now = millis();
+    // A repeater copy of a packet we already heard directly is still reported (the pit counts
+    // relay_dupes) but does not overwrite the direct packet's RSSI on the OLED.
+    const bool dupCopy = relayed && fleetMs[k] && now - fleetMs[k] < 400 && fleet[k].h.seq == h->seq;
+    if (!dupCopy) { gkCopyTelemetry(fleet[k], buf, len); fleetMs[k] = now; fleetRssi[k] = rssi; }
+    if (!relayed) {
+      if (fleetDirectMs[k] && (uint8_t)(fleetLastSeq[k] + 1) == h->seq) fleetRate[k] = (now - fleetDirectMs[k] < 750) ? 2 : 1;
+      fleetLastSeq[k] = h->seq; fleetDirectMs[k] = now;
+    }
+    if (!ppsFreshB() && !relayed && (fleet[k].flags & GK_FLAG_PPS)) {
+      // This kart's packet started at its slot opening (+ a few ms of loop latency) on a true UTC grid.
+      const uint8_t rate = fleetRate[k] ? fleetRate[k] : 2;
+      const uint32_t startUs = loraIrqMicros - gkAirtimeUs(len);
+      uint32_t cand = startUs - gkSlotStartUs(k, rate, 0);                 // uint32 wrap is fine
+      if (edgeSetMs && now - edgeSetMs < 5000) {
+        // A 2 Hz kart pins the edge only modulo 500 ms: take the candidate nearest the estimate.
+        int32_t d = (int32_t)(cand - edgeMicros) % 1000000L;               // signed: micros() wraps at 2^32, not at a whole second
+        if (d > 500000) d -= 1000000; else if (d < -500000) d += 1000000;
+        if (rate == 2 && d > 250000)  { cand -= 500000UL; d -= 500000; }
+        if (rate == 2 && d < -250000) { cand += 500000UL; d += 500000; }
+        if (d > -20000 && d < 20000) cand = edgeMicros + d / 2;           // small step: smooth loop latency
       }
-      if (accept) { edgeMicros = cand; edgeSetMs = millis(); edgeSrc = 2; }
+      edgeMicros = cand; edgeSetMs = now; edgeSrc = 2;
     }
     char out[640];
     gkTelemetryToJson(out, sizeof out, fleet[h->src], "tele", rssi, snr, millis());
@@ -223,20 +243,47 @@ static void serviceLoraRx() {
   }
 }
 
+static int queueLen() { return (cmdTail - cmdHead + CMD_QUEUE_LEN) % CMD_QUEUE_LEN; }
+// STOP always wins: it goes to the front of the queue, and queued non-STOP commands for the same
+// kart(s) are dropped (the host already marked them superseded and never retries them).
 static bool queueCommand(const GkCommandMsg& m) {
+  if (m.cmd == GK_CMD_STOP) {
+    QueuedCmd keep[CMD_QUEUE_LEN]; int n = 0;
+    for (int i = cmdHead; i != cmdTail; i = (i + 1) % CMD_QUEUE_LEN) {
+      const GkCommandMsg& q = cmdQueue[i].msg;
+      bool hit = q.cmd != GK_CMD_STOP && (m.h.dst == GK_ADDR_ALL || q.h.dst == m.h.dst || q.h.dst == GK_ADDR_ALL);
+      if (hit && q.h.dst == GK_ADDR_ALL && m.h.dst != GK_ADDR_ALL) hit = false;   // a fleet command still owes the other karts
+      if (!hit) keep[n++] = cmdQueue[i];
+    }
+    cmdHead = 0; cmdTail = 0;
+    cmdQueue[cmdTail].msg = m; cmdQueue[cmdTail].queuedMs = millis(); cmdTail++;
+    for (int i = 0; i < n && cmdTail < CMD_QUEUE_LEN - 1; i++) cmdQueue[cmdTail++] = keep[i];
+    return true;
+  }
   int next = (cmdTail + 1) % CMD_QUEUE_LEN;
   if (next == cmdHead) return false;
-  cmdQueue[cmdTail].msg = m; cmdQueue[cmdTail].used = true; cmdTail = next;
+  cmdQueue[cmdTail].msg = m; cmdQueue[cmdTail].queuedMs = millis(); cmdTail = next;
   return true;
 }
 
-static void transmitCommand(const GkCommandMsg& m) {
+// Is [phaseUs, phaseUs + lenUs) clear of every online kart's slot (at its own rate) and of the beacon tail?
+static bool scheduleClear(uint32_t phaseUs, uint32_t lenUs) {
+  const uint32_t now = millis();
+  const bool relay = repeaterHeardMs && now - repeaterHeardMs < 30000;
+  if (gkBeaconBusy(phaseUs, lenUs)) return false;
+  for (uint8_t k = 1; k <= GK_MAX_KARTS; k++)
+    if (fleetMs[k] && now - fleetMs[k] < KART_ONLINE_MS && gkKartBusy(phaseUs, lenUs, k, fleetRate[k] ? fleetRate[k] : 2, relay)) return false;
+  return true;
+}
+
+static void transmitCommand(const GkCommandMsg& m, uint32_t waitMs) {
   if (!radioOk) return;
   int st = radio.transmit((const uint8_t*)&m, sizeof m);
   loraIrq = false;
   radio.startReceive();
   if (st == RADIOLIB_ERR_NONE) loraTx++; else logf("lora tx error %d", st);
-  Serial.printf("{\"t\":\"sent\",\"seq\":%u,\"cmd\":%u,\"kart\":%u,\"arg\":%u,\"ok\":%s}\n", m.h.seq, m.cmd, m.h.dst, m.arg, gkBool(st == RADIOLIB_ERR_NONE));
+  Serial.printf("{\"t\":\"sent\",\"seq\":%u,\"cmd\":%u,\"kart\":%u,\"arg\":%u,\"ok\":%s,\"wait_ms\":%lu}\n", m.h.seq, m.cmd, m.h.dst, m.arg,
+                gkBool(st == RADIOLIB_ERR_NONE), (unsigned long)waitMs);
 }
 
 static void transmitBeacon(uint8_t src) {
@@ -255,21 +302,28 @@ static void transmitBeacon(uint8_t src) {
 
 static void serviceLoraTx() {
   uint8_t src; uint32_t phase = basePhaseUs(&src);
-  // Once per second, in the tail after all kart slots: beacon first, then queued commands.
-  bool beaconWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < 985000UL;
-  bool cmdWindow = phase >= (uint32_t)GK_CMD_WINDOW_START_MS * 1000UL && phase < (uint32_t)GK_CMD_WINDOW_END_MS * 1000UL;
+  // Beacon: at 905 ms, started no later than GK_BEACON_LATE_MS (else the beacon, its repeater copy
+  // and the repeater heartbeat would run into kart 1's slot at 992 ms; skipping one is harmless).
+  bool beaconWindow = phase >= (uint32_t)GK_BEACON_PHASE_MS * 1000UL && phase < (uint32_t)(GK_BEACON_PHASE_MS + GK_BEACON_LATE_MS) * 1000UL;
   static uint32_t lastTxMicros = 0;
-  // Without a real GPS pulse the edge estimate is only as good as the karts' timing, so send
-  // commands immediately; with PPS use the window. One packet per GK_TX_SPACING_MS.
-  if (cmdHead != cmdTail && (src != 1 || cmdWindow) && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
-    transmitCommand(cmdQueue[cmdHead].msg); lastTxMicros = micros();
-    cmdQueue[cmdHead].used = false;
-    cmdHead = (cmdHead + 1) % CMD_QUEUE_LEN;
+  // Commands, one per GK_TX_SPACING_MS (room for a repeater copy). With a time reference (PPS, or
+  // an edge derived from PPS karts) only where the slot plan is clear for the command and its
+  // repeater copy; without one, or after GK_CMD_MAX_WAIT_MS, immediately.
+  if (cmdHead != cmdTail && (uint32_t)(micros() - lastTxMicros) > (uint32_t)GK_TX_SPACING_MS * 1000UL) {
+    const uint32_t lenUs = gkAirtimeUs(sizeof(GkCommandMsg)) + (repeaterHeardMs && millis() - repeaterHeardMs < 30000 ? GK_RELAY_DELAY_MS * 1000UL + gkAirtimeUs(sizeof(GkCommandMsg)) : 0) + 2000UL;
+    const uint32_t waited = millis() - cmdQueue[cmdHead].queuedMs;
+    const bool forced = waited >= GK_CMD_MAX_WAIT_MS;
+    if (src == 0 || forced || scheduleClear(phase, lenUs)) {
+      if (forced && src != 0) cmdForced++;
+      transmitCommand(cmdQueue[cmdHead].msg, waited); lastTxMicros = micros();
+      cmdHead = (cmdHead + 1) % CMD_QUEUE_LEN;
+    }
   }
   // Never put a beacon within 150 ms after a command: a kart that has not yet read the command
   // out of its radio would lose it to the beacon. Skipping a beacon now and then is harmless.
-  if (beaconWindow && (uint32_t)(micros() - lastBeaconMicros) > 600000UL && (uint32_t)(micros() - lastTxMicros) > 150000UL) {
-    lastBeaconMicros = micros(); lastTxMicros = micros(); transmitBeacon(src);
+  if (beaconWindow && (uint32_t)(micros() - lastBeaconMicros) > 600000UL) {
+    if ((uint32_t)(micros() - lastTxMicros) > 150000UL) { lastBeaconMicros = micros(); lastTxMicros = micros(); transmitBeacon(src); }
+    else { lastBeaconMicros = micros(); beaconSkipped++; }
   }
 }
 
@@ -282,6 +336,7 @@ static uint8_t cmdFromName(const char* s) {
   if (!strcmp(s, "slow"))  return GK_CMD_SLOW;
   if (!strcmp(s, "boost")) return GK_CMD_BOOST;   // arg = scale percent 10..100, lasts 5 s
   if (!strcmp(s, "race"))  return GK_CMD_RACE;    // arg = seconds until GO (1..30), timed from issued_utc
+  if (!strcmp(s, "rate"))  return GK_CMD_RATE;    // arg = 1 or 2 Hz
   return GK_CMD_NONE;
 }
 
@@ -307,6 +362,10 @@ static void hostJson(const char* line) {
   if (seq < 1 || seq > 255) { logf("seq must be 1..255"); return; }
   if (cmd == GK_CMD_SET_MODE && (arg < 0 || arg >= GK_MODE_COUNT)) { logf("bad mode %d", arg); return; }
   if (cmd == GK_CMD_SLOW && (arg < 0 || arg > 60)) { logf("bad slow mph %d", arg); return; }
+  if (cmd == GK_CMD_BOOST && (arg < 10 || arg > 100)) { logf("bad boost percent %d", arg); return; }
+  if (cmd == GK_CMD_RACE && !(arg <= 30 || (arg >= 100 && arg <= 100 + GK_MAX_KARTS))) { logf("bad race arg %d", arg); return; }
+  if (arg < 0 || arg > 255) { logf("bad arg %d", arg); return; }
+  if (ttl < 0 || ttl > 65535) { logf("bad ttl %d", ttl); return; }
   GkCommandMsg m; memset(&m, 0, sizeof m);
   gkFillHeader(m.h, GK_MSG_COMMAND, GK_ADDR_BASE, (uint8_t)kart, (uint8_t)seq);
   m.cmd = cmd; m.arg = (uint8_t)arg; m.ttl_s = (uint16_t)ttl;
@@ -316,23 +375,25 @@ static void hostJson(const char* line) {
   static uint32_t issuedBySeq[256] = {0}; static uint8_t issuedKey[256] = {0};
   uint8_t key = (uint8_t)(cmd * 31 + kart);
   uint32_t nowU = gpsUnix();
+  if (!nowU) nowU = (uint32_t)(doc["issued"] | 0);   // no GPS time at the base: the host may supply unix seconds so TTL and race GO still work
   if (issuedBySeq[seq] && issuedKey[seq] == key && nowU && nowU - issuedBySeq[seq] < 60) m.issued_utc_s = issuedBySeq[seq];
   else { m.issued_utc_s = nowU; issuedBySeq[seq] = nowU; issuedKey[seq] = key; }
-  if (!queueCommand(m)) logf("command queue full, dropped seq %d", seq);
+  if (!queueCommand(m)) { cmdDropped++; logf("command queue full, dropped seq %d", seq); }
 }
 
 static void hostText(char* line) {
   char* arg = strchr(line, ' ');
   if (arg) { *arg++ = 0; while (*arg == ' ') arg++; }
   if (!strcmp(line, "status")) {
+    char ssid[72]; gkJsonStr(ssid, sizeof ssid, wifiSsid.c_str());
     Serial.printf("{\"t\":\"status\",\"fw\":\"%s\",\"radio\":%s,\"radio_status\":%d,\"pmu\":%s,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,\"wifi\":\"%s\",\"ssid\":\"%s\",\"heap\":%lu}\n",
       FW_VERSION, gkBool(radioOk), radioStatus, gkBool(pmuOk), gkBool(gpsLocked), (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "",
-      (unsigned long)ppsCount, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", wifiSsid.c_str(), (unsigned long)ESP.getFreeHeap());
+      (unsigned long)ppsCount, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, (unsigned long)ESP.getFreeHeap());
   }
   else if (!strcmp(line, "wifi") && arg) { char* pw = strchr(arg, ' '); if (pw) *pw++ = 0; prefs.putString("ssid", arg); prefs.putString("pass", pw ? pw : ""); logf("wifi credentials stored for '%s'; reboot to apply", arg); }
   else if (!strcmp(line, "otapw") && arg) { prefs.putString("otapw", arg); logf("ota password stored; reboot to apply"); }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("json: {cmd:mode|stop|start|ping, kart:1-8|255, arg, seq:1-255, ttl}; text: status | wifi SSID PASS | otapw PASS | reboot");
+  else if (!strcmp(line, "help")) logf("json: {cmd:mode|stop|start|ping|slow|boost|race, kart:1-8|255, arg, seq:1-255, ttl} or {t:race,state,pos[8]}; text: status | wifi SSID PASS | otapw PASS | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -342,10 +403,11 @@ static void serviceHost() {
     if (c == '\r') continue;
     if (c == '\n') {
       usbLine[usbLen] = 0;
-      if (usbLen) { hostLineMs = millis(); if (usbLine[0] == '{') hostJson(usbLine); else hostText(usbLine); }
-      usbLen = 0; continue;
+      if (usbOverflow) logf("host line longer than %u bytes dropped", (unsigned)(sizeof(usbLine) - 1));   // never parse a truncated line
+      else if (usbLen) { hostLineMs = millis(); if (usbLine[0] == '{') hostJson(usbLine); else hostText(usbLine); }
+      usbLen = 0; usbOverflow = false; continue;
     }
-    if (usbLen < sizeof(usbLine) - 1) usbLine[usbLen++] = c;
+    if (usbLen < sizeof(usbLine) - 1) usbLine[usbLen++] = c; else usbOverflow = true;
   }
   if (millis() - statMs >= STAT_PERIOD_MS) {
     statMs = millis();
@@ -358,10 +420,12 @@ static void serviceHost() {
     char wifi[24] = "null";
     if (WiFi.status() == WL_CONNECTED) snprintf(wifi, sizeof wifi, "\"%s\"", WiFi.localIP().toString().c_str());
     char benchAge[12] = "null"; if (benchMs) snprintf(benchAge, sizeof benchAge, "%lu", (unsigned long)((millis() - benchMs) / 1000));
-    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s,\"beacon_tx\":%lu,\"sync\":\"%s\",\"relay_rx\":%lu}\n",
+    Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":\"%s\",\"rx\":%lu,\"tx\":%lu,\"rx_bad\":%lu,\"uptime_s\":%lu,\"batt_v\":%.2f,\"wifi\":%s,\"karts_online\":%d,\"bench_rx\":%lu,\"bench_age_s\":%s,\"beacon_tx\":%lu,\"sync\":\"%s\",\"relay_rx\":%lu,"
+                  "\"beacon_skipped\":%lu,\"cmd_q\":%d,\"cmd_dropped\":%lu,\"cmd_forced\":%lu,\"heap\":%lu}\n",
                   FW_VERSION, radioOk ? "sx1262" : "none", (unsigned long)loraRx, (unsigned long)loraTx, (unsigned long)loraRxBad,
                   (unsigned long)(millis() / 1000), (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, wifi, kartsOnline(),
-                  (unsigned long)benchRx, benchAge, (unsigned long)beaconTx, ppsFreshB() ? "pps" : (edgeSetMs && millis() - edgeSetMs < 5000 ? "karts" : "free"), (unsigned long)relayRx);
+                  (unsigned long)benchRx, benchAge, (unsigned long)beaconTx, ppsFreshB() ? "pps" : (edgeSetMs && millis() - edgeSetMs < 5000 ? "karts" : "free"), (unsigned long)relayRx,
+                  (unsigned long)beaconSkipped, queueLen(), (unsigned long)cmdDropped, (unsigned long)cmdForced, (unsigned long)ESP.getFreeHeap());
   }
 }
 
@@ -393,6 +457,9 @@ static void serviceWifi() {
 // ---------------------------------------------------------------- oled
 static void serviceOled() {
   if (!oledOk || millis() - oledMs < OLED_REFRESH_MS) return;
+  { uint32_t ph = basePhaseUs(nullptr) / 1000UL;           // a ~25 ms I2C frame push must not delay the beacon
+    if (ph >= GK_BEACON_PHASE_MS - 40 && ph < GK_BEACON_PHASE_MS + GK_BEACON_LATE_MS) return; }
+  if (cmdHead != cmdTail) return;                          // nor a queued command
   oledMs = millis();
   char l[32];
   uint32_t now = millis();
@@ -460,7 +527,7 @@ void setup() {
   if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) esp_task_wdt_init(&wdt);
   esp_task_wdt_add(NULL);
 
-  memset(fleetMs, 0, sizeof fleetMs);
+  memset(fleetMs, 0, sizeof fleetMs); memset(fleetRate, 0, sizeof fleetRate); memset(fleetDirectMs, 0, sizeof fleetDirectMs);
   logf("boot %s pmu %s radio %s (%d)", FW_VERSION, pmuOk ? "ok" : "MISSING", radioOk ? "ok" : "FAILED", radioStatus);
 }
 

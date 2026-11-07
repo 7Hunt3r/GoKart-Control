@@ -2,16 +2,19 @@
  * GoKart Control — plug-anywhere LoRa repeater for LilyGo T-Beam S3 Core.
  *
  * Listens on the fleet channel and re-sends every packet it hears exactly once:
- *   - kart telemetry: GK_RELAY_DELAY_MS after reception, which lands inside the same
- *     kart's 50 ms slot (22 ms packet + 25 ms + 22 ms copy), so no other kart is disturbed;
- *   - pit beacon and commands: same delay; karts dedupe commands by seq, and compensate
- *     the beacon's extra hop for slot timing.
+ *   - kart telemetry: GK_RELAY_DELAY_MS after reception. At 1 Hz that lands inside the same
+ *     kart's 100 ms slot (23 ms packet + 25 ms + 23 ms copy); at 2 Hz (50 ms slots) it lands on
+ *     the next kart's slot, so a fleet that relies on a repeater runs `rate 1` (GoKartProtocol.h);
+ *   - pit beacon and commands: same delay; karts dedupe commands (seq+cmd+arg+issued), and
+ *     compensate the beacon's extra hop for slot timing.
+ * A copy that cannot start within GK_RELAY_LATE_MAX_MS of its due time is dropped (`late`), never
+ * sent into someone else's slot or with a timing a kart would mis-sync on.
  * Copies carry GK_HDR_RELAY_BIT, so a repeater never relays a relayed packet (one hop) and
  * the pit knows a packet came via the repeater. No configuration: power it and leave it.
  * One repeater per area; two in range of each other would relay the same packet at once.
  *
  * OLED: heard/relayed counters, pit beacon RSSI, battery. USB: JSON stat lines once a second.
- * Status: compiles; first unit flashed 2026-11-06.
+ * Status: running on a T-Beam S3 since 2026-11-06 (bench).
  */
 #include <Arduino.h>
 #include <SPI.h>
@@ -29,7 +32,7 @@ SX1262 radio = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUS
 volatile bool loraIrq = false; volatile uint32_t loraIrqMicros = 0;
 void IRAM_ATTR onLoraIrq() { loraIrq = true; loraIrqMicros = micros(); }
 bool radioOk = false; int radioStatus = -999;
-uint32_t heard = 0, relayed = 0, rxBad = 0, dropped = 0, dupes = 0;
+uint32_t heard = 0, relayed = 0, rxBad = 0, dropped = 0, dupes = 0, late = 0;
 uint32_t heardKart[GK_MAX_KARTS + 1] = {0}, relayedKart[GK_MAX_KARTS + 1] = {0};
 uint32_t kartMs[GK_MAX_KARTS + 1] = {0};
 float    kartRssi[GK_MAX_KARTS + 1] = {0};
@@ -126,15 +129,19 @@ static void serviceRx() {
 static void serviceTx() {
   if (qHead == qTail || !radioOk) return;
   Pending& p = queue[qHead];
-  if ((int32_t)(micros() - p.dueMicros) < 0) return;
+  const int32_t lateUs = (int32_t)(micros() - p.dueMicros);
+  if (lateUs < 0) return;
+  if (lateUs > (int32_t)GK_RELAY_LATE_MAX_MS * 1000) {      // missed its moment (loop was busy): drop, do not collide
+    late++; p.used = false; qHead = (qHead + 1) % RELAY_QUEUE_LEN; return;
+  }
   int st = radio.transmit(p.buf, p.len);
   loraIrq = false; radio.startReceive();
   GkHeader* h = (GkHeader*)p.buf;
   if (st == RADIOLIB_ERR_NONE) { relayed++; if (h->src >= 1 && h->src <= GK_MAX_KARTS) relayedKart[h->src]++; }
   bool wasBeacon = (h->src == GK_ADDR_BASE && h->type == GK_MSG_BASE_INFO);
   p.used = false; qHead = (qHead + 1) % RELAY_QUEUE_LEN;
-  // Heartbeat to the pit every 5 s, right behind the beacon copy: still inside the pit's own window
-  // (beacon 905 + 12 ms, copy at ~945-957, heartbeat ~960-970 ms, karts start at 1000).
+  // Heartbeat to the pit every 5 s, right behind the beacon copy: still inside the pit's own tail
+  // (beacon 905-922 ms, copy ~947-964, heartbeat ~966-979; kart 1's slot opens at 992).
   if (wasBeacon && st == RADIOLIB_ERR_NONE && millis() - hbMs >= 5000) {
     hbMs = millis();
     GkRepeaterInfo r; memset(&r, 0, sizeof r);
@@ -173,16 +180,24 @@ static void serviceUsb() {
 
 static void serviceStat() {
   if (millis() - statMs < 1000) return; statMs = millis();
-  char karts[160] = ""; size_t n = 0;
-  for (int k = 1; k <= GK_MAX_KARTS; k++) if (kartMs[k] && millis() - kartMs[k] < 10000) n += snprintf(karts + n, sizeof karts - n, "%s{\"kart\":%d,\"rssi\":%.0f,\"heard\":%lu,\"relayed\":%lu}", n ? "," : "", k, kartRssi[k], (unsigned long)heardKart[k], (unsigned long)relayedKart[k]);
-  Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":%s,\"heard\":%lu,\"relayed\":%lu,\"hb_tx\":%lu,\"dupes\":%lu,\"dropped\":%lu,\"rx_bad\":%lu,\"pit_rssi\":%s,\"pit_age_s\":%s,\"batt_v\":%.2f,\"uptime_s\":%lu,\"oled\":%s,\"oled_drv\":\"%s\",\"oled_addr\":\"0x%02x\",\"id3c\":\"0x%02x\",\"i2c\":\"%s\",\"karts\":[%s]}\n",
-                FW_VERSION, gkBool(radioOk), (unsigned long)heard, (unsigned long)relayed, (unsigned long)hbTx, (unsigned long)dupes, (unsigned long)dropped, (unsigned long)rxBad,
+  // 8 karts x ~62 chars: the old 160-byte buffer overflowed (and snprintf's return then walked
+  // past its end) as soon as a third kart was in range.
+  char karts[GK_MAX_KARTS * 72 + 1] = ""; size_t n = 0;
+  for (int k = 1; k <= GK_MAX_KARTS; k++) {
+    if (!kartMs[k] || millis() - kartMs[k] >= 10000 || n >= sizeof karts - 1) continue;
+    int w = snprintf(karts + n, sizeof karts - n, "%s{\"kart\":%d,\"rssi\":%.0f,\"heard\":%lu,\"relayed\":%lu}", n ? "," : "", k, kartRssi[k], (unsigned long)heardKart[k], (unsigned long)relayedKart[k]);
+    if (w > 0) n = min(n + (size_t)w, sizeof karts - 1);
+  }
+  Serial.printf("{\"t\":\"stat\",\"fw\":\"%s\",\"radio\":%s,\"heard\":%lu,\"relayed\":%lu,\"hb_tx\":%lu,\"dupes\":%lu,\"dropped\":%lu,\"late\":%lu,\"rx_bad\":%lu,\"pit_rssi\":%s,\"pit_age_s\":%s,\"batt_v\":%.2f,\"uptime_s\":%lu,\"oled\":%s,\"oled_drv\":\"%s\",\"oled_addr\":\"0x%02x\",\"id3c\":\"0x%02x\",\"i2c\":\"%s\",\"karts\":[%s]}\n",
+                FW_VERSION, gkBool(radioOk), (unsigned long)heard, (unsigned long)relayed, (unsigned long)hbTx, (unsigned long)dupes, (unsigned long)dropped, (unsigned long)late, (unsigned long)rxBad,
                 baseHeardMs ? String((int)baseRssi).c_str() : "null", baseHeardMs ? String((unsigned long)((millis() - baseHeardMs) / 1000)).c_str() : "null",
                 (pmuOk && pmu) ? pmu->getBattVoltage() / 1000.0 : 0.0, (unsigned long)(millis() / 1000), gkBool(oledOk), oledDrv.c_str(), oledAddr, id3c, i2cFound, karts);
 }
 
 static void serviceOled() {
-  if (!oledOk || millis() - oledMs < 500) return; oledMs = millis();
+  if (!oledOk || millis() - oledMs < 500) return;
+  if (qHead != qTail) return;                     // a ~25 ms I2C frame push would make a queued copy late
+  oledMs = millis();
   char l[32]; uint32_t now = millis();
   oled->clearBuffer(); oled->setFont(u8g2_font_7x14B_tf); oled->drawStr(0, 13, "GOKART REPEATER");
   oled->setFont(u8g2_font_6x10_tf);

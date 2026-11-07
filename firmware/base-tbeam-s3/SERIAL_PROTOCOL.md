@@ -7,18 +7,20 @@ Everything the host needs to know about a kart arrives in `tele` lines; the
 host never has to decode LoRa bytes. Field names follow the agreed telemetry
 fields in `docs/requirements.md` where one exists.
 
-Version: `base-0.1.0`. Status: running on the T-Beam S3; host link and command transmit exercised on hardware; kart reception not yet observed.
+Version: `base-0.1.0`. Status: running on the T-Beam S3; host link, command transmit, kart reception,
+beacon and repeater relay exercised on the bench (2026-11-05/06).
 
 ## T-Beam -> host
 
 | `t` | When | Fields |
 | --- | --- | --- |
-| `tele` | each kart telemetry packet received (about 1 Hz per kart) | `kart` 1-8, `seq`, `lat`/`lon` (decimal degrees, `null` without fix), `fix` bool, `gps_age_s` (255 = never), `sats`, `gps_kph`, `heading`, `volts`, `motor_a`, `batt_a`, `erpm`, `duty` (0-1), `esc_c`, `fault` (0 = none), `mode_req` 0/1/2 or `null`, `mode_actual` 0/1/2 or `null`, `scale` (live VESC current max scale 0-1, `null` unknown), `stopped` bool, `vesc_link` bool, `mode_confirmed` bool, `pps` bool, `wifi` bool, `writes` bool (kart firmware allows VESC writes), `last_cmd_seq`, `cmd_result` (0 none, 1 accepted, 2 applied, 3 no_vesc, 4 rejected, 5 unknown), `ah`, `uptime_s`, `base_rssi` (dBm the kart hears us at), `rssi`, `snr`, `rx_ms` (base millis at receipt), `slow_mph` (SLOW cap in mph, 0 = off; firmware 2026-11-06+), `relayed` bool (packet came through a LoRa repeater; the pit drops a relayed copy of a packet it already heard directly) |
+| `tele` | each kart telemetry packet received (2 Hz per kart by default, 1 Hz with `rate 1`; a repeater copy arrives as a second line with `relayed` true) | `kart` 1-8, `seq`, `lat`/`lon` (decimal degrees, `null` without fix), `fix` bool, `gps_age_s` (255 = never), `sats`, `gps_kph`, `heading`, `volts`, `motor_a`, `batt_a`, `erpm`, `duty` (0-1), `esc_c`, `fault` (0 = none), `mode_req` 0/1/2 or `null`, `mode_actual` 0/1/2 or `null`, `scale` (live VESC current max scale 0-1, `null` unknown), `stopped` bool, `vesc_link` bool, `mode_confirmed` bool, `pps` bool, `wifi` bool, `writes` bool (kart firmware allows VESC writes), `last_cmd_seq`, `cmd_result` (0 none, 1 accepted, 2 applied, 3 no_vesc, 4 rejected, 5 unknown), `ah`, `uptime_s`, `base_rssi` (dBm the kart hears us at), `rssi`, `snr`, `rx_ms` (base millis at receipt), `slow_mph` (SLOW cap in mph, 0 = off; firmware 2026-11-06+), `relayed` bool (packet came through a LoRa repeater; the pit drops a relayed copy of a packet it already heard directly) |
 | `tele` with `"bench":true` | each frame from Colin's bench Heltec (firmware/heltec, 47-byte `GK` frame, every 2 s) | Same field names as above where the frame carries them; `mode_*`, `scale`, `duty`, `ah` are `null`, `stopped`/`writes`/`pps` are `false`. Extra: `boot_id`, `hdop`, `sample_age_ms`. `kart` is 0 until that board is commissioned with `id N`. |
 | `base` | 1 Hz | `lat`, `lon`, `fix`, `sats`, `utc` (unix seconds or `null`), `pps` bool |
 | `repeater` | every 5 s per repeater while it hears the pit beacon | `id` (1 = first repeater), `seq`, `heard`, `relayed` (its counters, 16-bit wrap), `batt_v` (0 = USB only), `pit_rssi` (how the repeater hears the pit), `rssi`/`snr` (how the pit hears the repeater), `uptime_min`, `karts` (ids it heard in the last 10 s) |
-| `stat` | 1 Hz | `fw`, `radio` (`"sx1262"` or `"none"`), `rx`, `tx`, `rx_bad`, `uptime_s`, `batt_v`, `wifi` (IP string or `null`), `karts_online` (heard within 5 s), `bench_rx`, `bench_age_s` (`null` until a bench frame is heard), `beacon_tx`, `sync` (`pps`/`karts`/`free`), `relay_rx` (packets heard via a repeater) |
-| `sent` | after a command was transmitted | `seq`, `cmd`, `kart`, `arg` |
+| `stat` | 1 Hz | `fw`, `radio` (`"sx1262"` or `"none"`), `rx`, `tx`, `rx_bad`, `uptime_s`, `batt_v`, `wifi` (IP string or `null`), `karts_online` (heard within 5 s), `bench_rx`, `bench_age_s` (`null` until a bench frame is heard), `beacon_tx`, `sync` (`pps` = own GPS pulse, `karts` = derived from karts that report a PPS lock, `free`), `relay_rx` (packets heard via a repeater), `beacon_skipped` (beacon not sent: a command went out < 150 ms earlier), `cmd_q` (commands waiting), `cmd_dropped` (queue full), `cmd_forced` (sent after 600 ms without a clear spot in the slot plan), `heap` |
+| `status` | reply to the text command `status` | `fw`, `radio`, `radio_status`, `pmu`, `gps_locked`, `gps_cfg`, `pps_count`, `wifi`, `ssid`, `heap` |
+| `sent` | after a command was transmitted | `seq`, `cmd`, `kart`, `arg`, `ok` (radio accepted it), `wait_ms` (time it waited in the base's queue) |
 | `log` | occasionally | `msg` |
 
 Modes: 0 ECO, 1 NORMAL, 2 SPORT. `mode_actual` is what the kart read back from
@@ -45,6 +47,8 @@ One JSON object per line:
 {"cmd":"ping","kart":1,"seq":20}
 {"cmd":"slow","kart":2,"arg":5,"seq":21,"ttl":10}
 {"cmd":"boost","kart":3,"arg":100,"seq":22,"ttl":10}
+{"cmd":"race","kart":255,"arg":5,"seq":23,"ttl":10}
+{"t":"race","state":2,"pos":[2,1,0,3,0,0,0,0]}
 ```
 
 | `cmd` | `arg` | Effect on the kart |
@@ -54,23 +58,36 @@ One JSON object per line:
 | `start` | - | Releases STOP; clears SLOW and BOOST |
 | `ping` | - | Echo only (`cmd_result` applied), no VESC write |
 | `slow` | mph 1-60 (0/absent = 5) | ERPM cap at that speed until START (firmware 2026-11-06+) |
+| `race` | 1-30 = grid hold now, GO `arg` s after `issued_utc_s`; 0 or 101-108 = finish (position `arg`-100) | See pit/server/map/ZONES.md "Race start" / "Race finish". The kart prints `{"t":"race",...}` events on USB |
 | `boost` | scale percent 10-100 | Timed current-scale override for 5 s, then auto-reverts to the mode scale; never above 1.0; rejected while stopped; STOP/START cancel it (firmware 2026-11-06+). The USB form `boost SECS SCALE` on the kart sets other durations (game zones) |
+| (`"t":"race"`) | `state` 0-3, `pos[8]` | Not a command (no seq, no echo, no reply): race state + running positions carried in the base's beacons for 30 s, see "Race positions" below |
 
 - `kart`: 1-8 or 255 for all karts.
 - `seq`: 1-255, assigned by the host, rolling. The kart echoes it in
-  `last_cmd_seq` with `cmd_result`. A kart treats a command as a retransmit when
-  the source, seq and `issued_utc_s` all match the last command from that source
-  (pit and USB are tracked separately), so retries are safe. Because the base
-  stamps `issued_utc_s` from GPS time, a restarted host reusing a seq is not
-  mistaken for a retransmit once the base has a fix; without GPS time the host
-  should avoid reusing the seq a kart currently reports.
-- `ttl`: seconds. Karts with GPS time reject a command older than this. 0 or
-  absent = no expiry. The base stamps `issued_utc_s` from its own GPS.
+  `last_cmd_seq` with `cmd_result` (radio telemetry carries pit commands only; the
+  kart's own console/kart-Pi commands never appear there). A kart treats a command as
+  a retransmit when seq, cmd, arg and `issued_utc_s` match one of the last 8 commands
+  from the pit within 30 s, and then reports that command's result again without
+  re-applying it; so a retry or a late repeater copy of an older command (e.g. a START
+  after a newer STOP) cannot act twice. The base keeps the first `issued_utc_s` for a
+  retry of the same seq/cmd/kart within 60 s. Without GPS time at the base
+  `issued_utc_s` is 0, TTLs are not enforced, and the host should avoid reusing a seq
+  a kart currently reports (pitcore does).
+- Validation at the base: `kart` 1-8/255, `seq` 1-255, `mode` arg 0-2, `slow` 0-60,
+  `boost` 10-100, `race` 0-30 or 100-108, any arg 0-255, `ttl` 0-65535; anything else
+  is logged and not sent. A host line over 299 bytes is dropped (logged), never parsed truncated.
+- Placement: STOP goes to the front of the base's queue and removes queued non-STOP
+  commands for the same kart. With a time reference (`sync` `pps` or `karts`) a command
+  waits for a spot where no online kart (at its observed 1 or 2 Hz) and no beacon is on
+  the air, at most 600 ms; without one it goes out at once. Commands are spaced 50 ms
+  (room for a repeater copy).
+- `ttl`: seconds. Karts with GPS or beacon time reject a command older than this
+  (`cmd_result` 4). 0 or absent = no expiry. The base stamps `issued_utc_s` from its own GPS.
 - Delivery policy belongs to the host: retransmit every 1.5 s, up to 5 times,
   until every addressed kart that is online reports the seq, then read
   `cmd_result`. A fleet command has eight individual outcomes, never one flag.
 
-Plain-text lines are also accepted for maintenance: `status`,
+Plain-text lines are also accepted for maintenance: `status`, `help`,
 `wifi <ssid> <password>` (stored on the board for OTA, never echoed), `otapw <password>`,
 `reboot`.
 
@@ -80,6 +97,12 @@ Plain-text lines are also accepted for maintenance: `status`,
 1-8 (0 = none). The base puts them into every beacon for the next 30 s (send at least every 10 s while racing).
 Each kart prints `{"t":"race","kart":N,"event":"position","position":P,"state":S}` when its own value changes
 and carries `race_pos`/`race_state` on its USB `self` line, so the kart display can show "P3" with no Wi-Fi.
+
+Pit host schedule (pit/server/pit_server.py `_race_tick`, 2026-11-06): state 1 with all positions 0 the moment
+START RACE is pressed, then every 2 s while the race runs (state 1 until GO, then 2, positions from the live
+leaderboard: finished karts keep their finishing place, the rest by completed laps desc then earliest last
+crossing, no completed lap = 0), state 3 with the final positions 3 times over 6 s when the race ends, and
+state 0 once on NEW RACE / reset laps. The session log records one `race_pos` event per change, not each repeat.
 
 ## Map package endpoint (host side, for the kart Pis later)
 

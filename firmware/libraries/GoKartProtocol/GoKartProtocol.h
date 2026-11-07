@@ -1,11 +1,11 @@
 // GoKartProtocol.h — shared LoRa packet format for GoKart Control.
 //
-// Used by firmware/kart-heltec-v4 (kart side) and firmware/base-tbeam-s3 (pit
-// side). Everything on the air is one of the packed structs below,
+// Used by firmware/kart-heltec-v4 (kart side), firmware/base-tbeam-s3 (pit side) and
+// firmware/repeater-tbeam-s3. Host test: firmware/tests/test_protocol.py. Everything on the air is one of the packed structs below,
 // little-endian, with GkHeader first. Keep packets small: airtime is the scarce
 // resource with eight karts sharing one channel.
 //
-// Status: DESIGNED AND COMPILED, NOT YET EXERCISED OVER THE AIR.
+// Status: in use over the air on the bench since 2026-11-05 (kart 2, pit, repeater).
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -21,15 +21,19 @@
 // treat it like the original (dedupe by src+seq); repeaters never relay a relayed packet.
 #define GK_HDR_RELAY_BIT   0x80
 // Relay timing: a repeater transmits a copy GK_RELAY_DELAY_MS after the end of reception.
-// A kart's 22 ms packet plus 25 ms plus a 22 ms copy fits inside its 50 ms slot.
+// A kart's 23 ms packet plus 25 ms plus a 23 ms copy fits inside its 100 ms slot at 1 Hz, NOT
+// inside a 50 ms slot at 2 Hz (see "Slot timing"). A copy the repeater could not start within
+// GK_RELAY_LATE_MAX_MS of its due time is dropped: a late beacon copy would mis-sync karts and a
+// late telemetry copy would land in the next kart's slot.
 #define GK_RELAY_DELAY_MS  25
+#define GK_RELAY_LATE_MAX_MS 4
 
 // ---- Radio parameters (identical on both ends) ----------------------------
 // US ISM band. These match Colin's installed Heltec bench transmitter
 // (firmware/heltec: 915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8) so both
-// frame formats share one channel. SF7/BW500 puts a 46-byte telemetry packet near
-// 20 ms airtime, comfortably inside the 100 ms kart slot. Change SF/BW on every
-// board together. Range is traded for airtime; raise SF if the track proves too
+// frame formats share one channel. SF7/BW500 puts the 47-byte telemetry packet at
+// 23.1 ms on air (gkAirtimeUs), which sets the slot plan below. Change SF/BW on every
+// board together (the static_asserts below re-check the plan). Range is traded for airtime; raise SF if the track proves too
 // big and lower the report rate to match. Not yet declared the final fleet setting.
 #define GK_LORA_FREQ_MHZ       915.0
 #define GK_LORA_BW_KHZ         500.0
@@ -38,37 +42,119 @@
 #define GK_LORA_SYNC_WORD      0x12    // RadioLib "private" sync word, same on SX127x/SX126x
 #define GK_LORA_PREAMBLE       8
 
+// ---- Airtime ---------------------------------------------------------------
+// LoRa time on air in microseconds for a len-byte payload at the fleet settings (Semtech
+// AN1200.13 / SX126x datasheet 6.1.4: explicit header, CRC on, low-data-rate optimisation off,
+// which is what RadioLib selects at SF7/BW500). Tsym = 2^SF / BW = 256 us here.
+//   47-byte telemetry 23.1 ms, 27-byte beacon 16.7 ms, 22-byte old beacon 14.1 ms,
+//   16-byte repeater heartbeat 12.9 ms, 14-byte command 11.6 ms.
+static constexpr uint32_t gkTsymUs() { return (uint32_t)((1UL << GK_LORA_SF) * 1000UL / (uint32_t)GK_LORA_BW_KHZ); }
+static constexpr uint32_t gkPayloadSymbols(uint32_t len) {
+  return 8 + ((8 * len + 28 + 16 > 4 * GK_LORA_SF)
+                ? ((8 * len - 4 * GK_LORA_SF + 28 + 16 + 4 * GK_LORA_SF - 1) / (4 * GK_LORA_SF)) * GK_LORA_CR : 0);
+}
+static constexpr uint32_t gkAirtimeUs(uint32_t len) {
+  return (4 * GK_LORA_PREAMBLE + 17) * gkTsymUs() / 4 + gkPayloadSymbols(len) * gkTsymUs();
+}
+
 // ---- Slot timing -----------------------------------------------------------
-// Karts with a GPS PPS edge align their transmit to the top of the UTC second:
-// kart k transmits at (k-1) * GK_SLOT_MS after the edge. Without PPS a kart
-// free-runs at 1 Hz with random jitter and simply risks collisions. The base
-// station sends commands in the tail of the second (after slot 8) when it has
-// PPS, otherwise immediately.
+// Karts with a GPS PPS edge align their transmit to the top of the UTC second. Kart k's
+// slot opens GK_SLOT_GUARD_MS before (k-1) * slot after the edge; kart 1's opens in the
+// tail of the previous round (at 992 ms at 1 Hz, 492/992 ms at 2 Hz). A kart that hears the
+// pit beacon but has no PPS aligns to the beacon instead; with neither it free-runs with
+// random jitter and simply risks collisions.
+//
+// Per-second schedule at the fleet radio settings (ms after the edge; airtime from gkAirtimeUs):
+//   1 Hz: kart k  (k-1)*100-8 .. +16 late .. +23 packet, repeater copy +25 ms after it (+23)
+//         -> each kart's packet AND its repeater copy fit in its 100 ms slot; slots end at 792.
+//   2 Hz: kart k  (k-1)*50-8 and 500+(k-1)*50-8, +16 late, +23 packet -> fits a 50 ms slot,
+//         BUT a repeater copy (+25 +23) does NOT: it lands on kart k+1's slot. Use rate 1
+//         on every kart of a fleet that relies on a repeater (see firmware/README.md).
+//   900-992: pit beacon at 905 (+8 late, 17 ms), its repeater copy 25 ms later,
+//         the repeater heartbeat right behind it every 5 s; all done by ~980.
+//   Pit commands (14 bytes, 12 ms; +25 +12 for a repeater copy) go wherever the base's
+//   schedule says no kart that is online, and no beacon, is on the air (gkScheduleBusy);
+//   immediately when the base has no time reference.
 #define GK_REPORT_PERIOD_MS    1000
 #define GK_SLOT_MS             100
 #define GK_SLOT_GUARD_MS       8      // early offset so the preamble starts inside the slot
-#define GK_BASE_WINDOW_MS      (GK_MAX_KARTS * GK_SLOT_MS + 20)
+// Latest a kart may start its packet after its slot opened. A loop that is later than this
+// skips the round instead of transmitting over the next kart's slot.
+#define GK_TX_LATE_MS          16
 // Pit beacon: sent at this phase of the base's second, in the tail after all kart slots
-// (also clear of the second 2 Hz round, which ends at 900 ms with 50 ms slots).
+// (also clear of the second 2 Hz round, which ends by 881 ms).
 #define GK_BEACON_PHASE_MS     905
-// Pit commands go out in their own window just before the beacon, spaced so a kart can
-// read one packet out of the radio before the next arrives.
+#define GK_BEACON_LATE_MS      8      // the base skips a beacon rather than start it later than 913 ms
+// Legacy fixed command window (still used as the preferred place when the base has PPS and
+// the schedule check finds it clear at 1 Hz). Spacing covers one command plus its repeater copy.
 #define GK_CMD_WINDOW_START_MS 815
 #define GK_CMD_WINDOW_END_MS   895
-#define GK_TX_SPACING_MS       40
-// Airtime of a 22-byte beacon at SF7/BW500 (preamble 8, explicit header, CRC), rounded up.
-#define GK_BEACON_AIRTIME_MS   12
+#define GK_TX_SPACING_MS       50
+// A command never waits longer than this for a clear spot in the schedule; after that it goes
+// out anyway (a possible collision beats a stalled STOP).
+#define GK_CMD_MAX_WAIT_MS     600
+// Airtime of a beacon (27 bytes; 22 from old bases) at the fleet settings, rounded to ms.
+#define GK_BEACON_AIRTIME_MS   ((gkAirtimeUs(27) + 500) / 1000)
 // A kart that hears the beacon but has no GPS PPS aligns its slots to it (sync source 2).
 #define GK_SYNC_MAX_AGE_MS     3000
 // Optional 2 Hz reporting: two rounds per second with half-width slots. Per-kart runtime
-// setting ("rate 1|2" on the kart console); the base does not care.
+// setting ("rate 1|2" on the kart console); the base estimates each kart's rate from arrivals.
 #define GK_SLOT_MS_2HZ         50
+
+// ---- Schedule self-check (compile time) -------------------------------------
+// If one of these fires, a radio parameter or packet size change broke the slot plan above.
+#define GK_TELE_AIR_MS_CEIL   ((gkAirtimeUs(47) + 999) / 1000)
+#define GK_BEACON_AIR_MS_CEIL ((gkAirtimeUs(27) + 999) / 1000)
+#define GK_HB_AIR_MS_CEIL     ((gkAirtimeUs(16) + 999) / 1000)
+static_assert(gkAirtimeUs(47) == 23104, "airtime formula / radio settings changed: re-check the whole slot plan");
+static_assert(GK_TX_LATE_MS + GK_TELE_AIR_MS_CEIL + 2 <= GK_SLOT_MS_2HZ,
+              "2 Hz: a late packet would run into the next kart's slot");
+static_assert(GK_TX_LATE_MS + 2 * GK_TELE_AIR_MS_CEIL + GK_RELAY_DELAY_MS + 2 <= GK_SLOT_MS,
+              "1 Hz: packet + repeater copy no longer fit one slot");
+static_assert((GK_MAX_KARTS - 1) * GK_SLOT_MS - GK_SLOT_GUARD_MS + GK_TX_LATE_MS + 2 * GK_TELE_AIR_MS_CEIL + GK_RELAY_DELAY_MS
+              <= GK_BEACON_PHASE_MS, "1 Hz: kart 8 (with its repeater copy) runs into the beacon");
+static_assert(500 + (GK_MAX_KARTS - 1) * GK_SLOT_MS_2HZ - GK_SLOT_GUARD_MS + GK_TX_LATE_MS + GK_TELE_AIR_MS_CEIL
+              <= GK_BEACON_PHASE_MS, "2 Hz: kart 8's second-round packet runs into the beacon");
+static_assert(GK_BEACON_PHASE_MS + GK_BEACON_LATE_MS + 2 * GK_BEACON_AIR_MS_CEIL + GK_RELAY_DELAY_MS + 3 + GK_HB_AIR_MS_CEIL
+              <= GK_REPORT_PERIOD_MS - GK_SLOT_GUARD_MS, "beacon + repeater copy + heartbeat run into kart 1's slot");
+static_assert(2 * gkAirtimeUs(14) + GK_RELAY_DELAY_MS * 1000UL + 1000UL <= GK_TX_SPACING_MS * 1000UL,
+              "command spacing shorter than a command plus its repeater copy");
+
+// Where kart `kart` reporting at `rate` (1 or 2 Hz) may be on the air, as offsets in microseconds
+// from the second's edge: round n (0..rate-1) occupies [start, start + len) modulo one second.
+// `relay` adds the repeater copy. Used by the base to place commands and by the host test.
+static inline uint32_t gkSlotStartUs(uint8_t kart, uint8_t rate, uint8_t round) {
+  const uint32_t slotUs = (rate == 2 ? GK_SLOT_MS_2HZ : GK_SLOT_MS) * 1000UL;
+  const uint32_t periodUs = 1000000UL / (rate == 2 ? 2 : 1);
+  return (round * periodUs + (uint32_t)(kart - 1) * slotUs + 1000000UL - GK_SLOT_GUARD_MS * 1000UL) % 1000000UL;
+}
+static inline uint32_t gkSlotBusyLenUs(bool relay) {
+  return GK_TX_LATE_MS * 1000UL + gkAirtimeUs(47) + (relay ? GK_RELAY_DELAY_MS * 1000UL + gkAirtimeUs(47) : 0);
+}
+// True when [aUs, aUs + aLen) and [bUs, bUs + bLen) overlap on a 1 s circle.
+static inline bool gkCircOverlap(uint32_t aUs, uint32_t aLen, uint32_t bUs, uint32_t bLen) {
+  uint32_t d = (bUs + 1000000UL - aUs) % 1000000UL;    // b's start, seen from a's start
+  if (d < aLen) return true;
+  uint32_t e = (aUs + 1000000UL - bUs) % 1000000UL;    // a's start, seen from b's start
+  return e < bLen;
+}
+static inline bool gkKartBusy(uint32_t atUs, uint32_t lenUs, uint8_t kart, uint8_t rate, bool relay) {
+  if (kart < 1 || kart > GK_MAX_KARTS) return false;
+  for (uint8_t r = 0; r < (rate == 2 ? 2 : 1); r++)
+    if (gkCircOverlap(atUs, lenUs, gkSlotStartUs(kart, rate, r), gkSlotBusyLenUs(relay))) return true;
+  return false;
+}
+// The pit's own tail: beacon (+ late start) + repeater copy + heartbeat.
+static inline bool gkBeaconBusy(uint32_t atUs, uint32_t lenUs) {
+  return gkCircOverlap(atUs, lenUs, GK_BEACON_PHASE_MS * 1000UL,
+                       GK_BEACON_LATE_MS * 1000UL + 2 * gkAirtimeUs(27) + GK_RELAY_DELAY_MS * 1000UL + 3000UL + gkAirtimeUs(16));
+}
 
 // ---- Message types ---------------------------------------------------------
 enum GkMsgType : uint8_t {
-  GK_MSG_TELEMETRY = 0x01,   // kart -> everyone, once per second
+  GK_MSG_TELEMETRY = 0x01,   // kart -> everyone, 1 or 2 Hz
   GK_MSG_COMMAND   = 0x02,   // base -> one kart or all
-  GK_MSG_BASE_INFO = 0x03,   // base -> everyone (base position, time), optional
+  GK_MSG_BASE_INFO = 0x03,   // base -> everyone once a second: time, sync phase, pit fix, race state
   GK_MSG_REPEATER_INFO = 0x04, // repeater -> base heartbeat every 5 s, right after it relays a beacon
 };
 
@@ -82,6 +168,7 @@ enum GkCommand : uint8_t {
   GK_CMD_SLOW     = 5,   // cap speed: arg = mph (0 = 5 mph); sets the ERPM limit from the controller's own drivetrain numbers
   GK_CMD_BOOST    = 6,   // timed current-scale override: arg = scale in percent (10..100), 5 s over LoRa; USB `boost SECS SCALE`
   GK_CMD_RACE     = 7,   // race start: hold the kart at zero power now, release (GO) arg seconds after issued_utc_s (1..30); all karts share the pit clock
+  GK_CMD_RATE     = 8,   // telemetry rate: arg 1 or 2 Hz, saved on the kart (the pit sends 1 while a repeater is in use: a 50 ms slot cannot hold a packet and its copy)
 };
 
 // Result of the last command a kart received, reported inside telemetry.
@@ -238,6 +325,20 @@ static inline bool gkAddressedToMe(const GkHeader& h, uint8_t me) {
 // emitted as null, never as zero.
 #include <stdio.h>
 static inline const char* gkBool(bool b) { return b ? "true" : "false"; }
+// Copy `in` into `out` as the inside of a JSON string: quote/backslash escaped, control and
+// non-ASCII bytes dropped. For text that is not ours: SSIDs, pinned strings typed on the console,
+// the VESC's hardware name. Always NUL-terminates; truncates to fit.
+static inline const char* gkJsonStr(char* out, size_t n, const char* in) {
+  size_t o = 0;
+  if (!n) return out;
+  for (; in && *in && o + 1 < n; in++) {
+    unsigned char c = (unsigned char)*in;
+    if (c == '"' || c == '\\') { if (o + 2 >= n) break; out[o++] = '\\'; out[o++] = (char)c; }
+    else if (c >= 0x20 && c < 0x7F) out[o++] = (char)c;
+  }
+  out[o] = 0;
+  return out;
+}
 static inline int gkTelemetryToJson(char* out, size_t n, const GkTelemetry& t, const char* type,
                                     float rssi, float snr, uint32_t rxMs) {
   char lat[20] = "null", lon[20] = "null", mreq[6] = "null", mact[6] = "null", scale[12] = "null";
@@ -305,7 +406,8 @@ static inline bool gkDecodeBenchFrame(const uint8_t* b, size_t len, GkBenchFrame
 }
 // JSON "tele" line for a bench frame, same field names as the contract; absent values are null.
 static inline int gkBenchToJson(char* out, size_t n, const GkBenchFrame& f, float rssi, float snr, uint32_t rxMs) {
-  char lat[20] = "null", lon[20] = "null", volts[12] = "null", ma[12] = "null", ba[12] = "null", erpm[16] = "null", esc[12] = "null", fault[6] = "null", sats[6] = "null", kph[12] = "null", hdop[10] = "null";
+  char lat[20] = "null", lon[20] = "null", volts[12] = "null", ma[12] = "null", ba[12] = "null", erpm[16] = "null", esc[12] = "null", fault[6] = "null", sats[6] = "null", kph[12] = "null", hdop[10] = "null", age[8] = "null";
+  if (f.sampleAgeMs != 65535) snprintf(age, sizeof age, "%u", (unsigned)f.sampleAgeMs);
   if (f.gpsValid) { snprintf(lat, sizeof lat, "%.7f", f.lat_e7 / 1e7); snprintf(lon, sizeof lon, "%.7f", f.lon_e7 / 1e7); }
   if (f.vescValid) { snprintf(volts, sizeof volts, "%.1f", f.volts); snprintf(ma, sizeof ma, "%.1f", f.motorA); snprintf(ba, sizeof ba, "%.1f", f.battA); snprintf(erpm, sizeof erpm, "%ld", (long)f.erpm); snprintf(esc, sizeof esc, "%.1f", f.escC); if (f.fault != 255) snprintf(fault, sizeof fault, "%u", f.fault); }
   if (f.sats != 255) snprintf(sats, sizeof sats, "%u", f.sats);
@@ -319,5 +421,5 @@ static inline int gkBenchToJson(char* out, size_t n, const GkBenchFrame& f, floa
     "\"sample_age_ms\":%s,\"rssi\":%.0f,\"snr\":%.1f,\"rx_ms\":%lu}",
     f.kartId, (unsigned long)f.seq, (unsigned long)f.bootId, lat, lon, gkBool(f.gpsValid),
     f.fixAgeMs == 65535 ? 255 : (unsigned)(f.fixAgeMs / 1000), sats, hdop, kph, volts, ma, ba, erpm, esc, fault, gkBool(f.vescValid),
-    (unsigned long)(f.millis / 1000), f.sampleAgeMs == 65535 ? "null" : "0", (double)rssi, (double)snr, (unsigned long)rxMs);
+    (unsigned long)(f.millis / 1000), age, (double)rssi, (double)snr, (unsigned long)rxMs);
 }

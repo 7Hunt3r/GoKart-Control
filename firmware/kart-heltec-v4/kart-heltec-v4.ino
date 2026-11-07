@@ -15,7 +15,30 @@
  * Reliability rule (docs/requirements.md): nothing in here writes to the VESC because a
  * link went down or came back. Boot and reconnect are read-only.
  *
- * Status: compiles; NOT yet run on hardware.
+ * Status: running on Heltec V4.3 (kart 2, bench 2026-11-05/06); see firmware/README.md.
+ *
+ * ---- VESC write invariants (audit list; keep true when editing) -------------------------
+ *  W1  Every write goes through startWrite(), which refuses unless: writes are compiled in,
+ *      the link is up, this link session's GET_MCCONF has been read (origValid, read AFTER the
+ *      link came up, never a stale copy) and the identity check passed (vescIdentityOk(): with
+ *      a UUID pin, the FW_VERSION reply of THIS session must match). requestBrake() and the
+ *      SET_MCCONF_TEMP path share that gate (writeAllowed()).
+ *  W2  Writes happen only (a) inside handleCommand() for a pit/USB command that is not a
+ *      retransmit, or (b) in serviceWrites() to finish something such a command started: the
+ *      STOP ramp, race GO, and the end of a timed BOOST/MUD override. Nothing on boot, on BLE/UART
+ *      (re)connect, on LoRa/GPS/WiFi loss, or because the pit went quiet. No lease/heartbeat.
+ *  W3  Timed overrides (BOOST/MUD, race hold) end on the kart's own millis() timer, not on any
+ *      pit message. If the VESC link is down when a timer ends, nothing is written; the next
+ *      re-read shows the truth (mode_actual) and a pit command fixes it (no replay on reconnect).
+ *  W4  STOP wins: it aborts an in-flight write, cancels BOOST and race hold, and while stopActive
+ *      every target is 0 (scaleTarget()); only START clears it. BOOST is rejected while stopped;
+ *      MODE/SLOW/RACE are remembered but write 0.
+ *  W5  Only l_current_max_scale (and the ERPM pair for SLOW) ever differ from what was read from
+ *      this controller; battery current limits are never sent; store=0 always (VescLink).
+ *  W6  Duplicate commands (the repeater copy, pit retries) are recognised by source+seq+cmd+arg+
+ *      issued over the last CMD_HIST commands and are answered, never re-applied, so an old START
+ *      arriving late cannot undo a newer STOP.
+ * ------------------------------------------------------------------------------------------
  */
 #include <Arduino.h>
 #include <Preferences.h>
@@ -31,6 +54,7 @@
 #include <GoKartProtocol.h>
 #include <VescLink.h>
 #include "config.h"
+#include "cmd_types.h"
 #if !VESC_TRANSPORT_UART
 #include <NimBLEDevice.h>
 #endif
@@ -52,15 +76,17 @@ int8_t   baseRssi = 0;
 uint32_t baseHeardMs = 0;
 uint8_t  txSeq = 0;
 uint32_t lastTxMs = 0;
-uint32_t lastTxEdge = 0, lastTxRound = 0xFFFFFFFF;
 uint16_t txJitter = 0;
 uint8_t  reportRate = 1;                      // 1 or 2 reports per second ("rate N" on the console)
 // Beacon sync: when there is no GPS PPS, align slots to the pit beacon's second.
 uint32_t syncEdgeMicros = 0, syncMs = 0;
-uint32_t baseUtc = 0, baseUtcMs = 0; uint8_t pitKartsOnline = 0; uint8_t baseSyncSrc = 0;
+uint32_t baseUtc = 0, baseUtcMs = 0; uint16_t baseUtcOffMs = 0;   // pit beacon UTC second, millis() at its reception, ms into that second at reception
+uint8_t  pitKartsOnline = 0; uint8_t baseSyncSrc = 0;
+uint32_t lastSlotStartUs = 0; bool lastSlotValid = false;        // absolute start of the slot we last transmitted in
 uint8_t  racePos = 0, raceState = 0; uint32_t racePosMs = 0;   // from the pit beacon: running position (0 = none) and race state
 // VESC identity pin (UUID from FW_VERSION), optional
 String   vescUuid; bool vescIdentityBad = false; uint32_t vescIdCheckedMs = 0;
+uint32_t vescLinkUpMs = 0;                    // when this link session started: replies older than this are not trusted
 
 // ---------------------------------------------------------------- gps
 TinyGPSPlus gps;
@@ -73,7 +99,8 @@ static const int GPS_CFG_N = sizeof(GPS_CFGS) / sizeof(GPS_CFGS[0]);
 int      gpsCfgIdx = 0;
 bool     gpsLocked = false, gpsConfigured = false; uint32_t gpsLockedMs = 0, gpsFixCount = 0, gpsLineMs = 0;
 uint32_t gpsDetectStartMs = 0, gpsResetMs = 0, gpsConfigMs = 0; int gpsResets = 0;   // detection watchdog: hard-reset the module when no baud locks
-bool     gpsLineOn = true;                 // {"t":"gps"} USB line on every new fix (up to 5 Hz) for the kart Pi
+bool     gpsLineOn = true;                 // {"t":"gps"} USB line once per fix epoch (5 Hz) for the kart Pi
+uint32_t gpsLineEpoch = 0xFFFFFFFF;          // NMEA time (hhmmsscc) of the last epoch reported: GGA and RMC both carry it
 double   baseLat = 0, baseLon = 0; uint32_t baseFixMs = 0;   // pit radio's own fix from the beacon (for position-domain correction)
 uint32_t gpsCfgStartMs = 0, gpsGoodAtStart = 0, gpsLastCharMs = 0;
 volatile uint32_t ppsMicros = 0, ppsCount = 0;
@@ -143,19 +170,30 @@ bool     raceHold = false; uint32_t raceGoMs = 0; uint32_t raceGoUnix = 0;
 // Limits as first read from this controller after link-up: everything we write echoes these
 // (not the capture constants), so each kart keeps its own configuration.
 VescActiveLimits origLimits; bool origValid = false;
-uint8_t  lastCmdSeq = 0, lastCmdSrc = 0xFE, cmdResult = GK_RES_NONE;
-// Per-source duplicate detection: a retransmit (same source, same seq, same issue time)
-// is reported again but never re-applied. Index 0 = pit base, 1 = USB/local.
-uint8_t  dupSeq[2] = {0, 0};
-uint32_t dupIssued[2] = {0, 0};
-bool     dupValid[2] = {false, false};
+// Command bookkeeping per source: index 0 = pit (LoRa), 1 = USB/local. The radio telemetry carries
+// ONLY the pit's last seq/result: USB commands are numbered by this kart (++usbSeq) and would alias
+// the pit's seq space (a mud zone sends `boost` every 2 s), so the pit would match the wrong command
+// or never see its STOP echoed. The USB self line carries whichever source spoke last.
+#define CMD_HIST    8          // retransmit memory per source (W6)
+#define CMD_DUP_MS  30000      // a copy older than this is a new command (pit retries end after ~9 s)
+CmdEnt   cmdHist[2][CMD_HIST]; uint8_t cmdHistNext[2] = {0, 0};
+int8_t   cmdLastIdx[2] = {-1, -1};    // newest entry per source
+int8_t   lastSrcIdx = -1;             // which source spoke last
+uint8_t  cmdResult = GK_RES_NONE;     // result of the command handleCommand() is processing
+static const CmdRef NO_OWNER = { -1, -1, 0, 0 };
+CmdRef   cmdCur = NO_OWNER;           // the command being handled right now
 bool     modeConfirmed = false;
 enum WriteState { W_IDLE, W_SENT, W_VERIFY };
 WriteState wState = W_IDLE;
 float    wTarget = 0;
 uint32_t wSentMs = 0, wAckSeen = 0;
+CmdRef   wOwner = NO_OWNER;           // command whose result the in-flight write decides (NO_OWNER = automatic)
 int      rampIdx = -1;
 uint32_t rampNextMs = 0;
+CmdRef   rampOwner = NO_OWNER;
+bool     revertMissed = false;        // a timed override ended while the VESC link was down (W3)
+bool     wroteThisBoot = false;       // any SET_MCCONF_TEMP sent since boot (the controller may still hold it)
+VescActiveLimits firstLimits; bool haveFirst = false; char firstUuid[25] = "";   // first read of the pinned controller this boot
 uint8_t  usbSeq = 0;
 
 // ---------------------------------------------------------------- fleet
@@ -168,7 +206,7 @@ bool     oledOk = false;
 uint32_t oledMs = 0, usbReportMs = 0, wifiRetryMs = 0;
 bool     wifiStarted = false, otaStarted = false, otaInProgress = false;
 char     usbLine[200];
-uint8_t  usbLen = 0;
+uint8_t  usbLen = 0; bool usbOverflow = false;
 
 // ---------------------------------------------------------------- helpers
 static void logf(const char* fmt, ...) {
@@ -187,18 +225,53 @@ static bool writesEnabled() {
 }
 
 static bool vescUp() { return vesc.linkUp(VESC_LINK_TIMEOUT_MS); }
-
-static uint32_t gpsUnix() {
-  if (gps.date.isValid() && gps.time.isValid() && gps.date.age() <= 5000)
-    return gkUnixFromCivil(gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second());
-  if (baseUtc && millis() - baseUtcMs < 120000) return baseUtc + (millis() - baseUtcMs) / 1000;   // pit beacon time
-  return 0;
+// Identity (W1): with a UUID pin, only a FW_VERSION reply received in THIS link session counts.
+static bool vescIdentityOk() {
+  if (vescIdentityBad) return false;
+  if (vescUuid.length() != 24) return true;                        // no pin: the BLE address pin is the identity
+  return vesc.fwSeenMs && (int32_t)(vesc.fwSeenMs - vescLinkUpMs) >= 0 && vescUuid.equalsIgnoreCase(vesc.uuidHex);
 }
+static bool writeAllowed() { return writesEnabled() && vescUp() && origValid && vescIdentityOk(); }
 
 static bool ppsFresh() {
   if (!ppsCount) return false;
   return (uint32_t)(micros() - ppsMicros) < 2000000UL;
 }
+
+// UTC now in milliseconds (0 = unknown). GPS: the NMEA time of the last epoch plus its age; with a
+// fresh PPS edge the sub-second part comes from the edge (NMEA sentences arrive tens of ms after the
+// epoch they describe, which would otherwise skew karts against each other). Else the pit beacon.
+// Used for race GO, so every kart releases on the same instant to a few ms.
+static uint64_t utcNowMs() {
+  if (gps.date.isValid() && gps.time.isValid() && gps.date.age() <= 5000 && gps.time.age() <= 5000) {
+    uint32_t u = gkUnixFromCivil(gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second());
+    if (u) {
+      uint64_t est = (uint64_t)u * 1000ULL + gps.time.centisecond() * 10UL + gps.time.age();
+      if (ppsFresh()) {
+        uint32_t pm; noInterrupts(); pm = ppsMicros; interrupts();
+        uint32_t sincePps = (uint32_t)(micros() - pm) / 1000UL;
+        if (sincePps < 1500) {
+          uint64_t edge = (est - sincePps + 500ULL) / 1000ULL * 1000ULL;   // the PPS edge is a whole UTC second
+          return edge + sincePps;
+        }
+      }
+      return est;
+    }
+  }
+  if (baseUtc && millis() - baseUtcMs < 120000)                         // pit beacon time
+    return (uint64_t)baseUtc * 1000ULL + baseUtcOffMs + (millis() - baseUtcMs);
+  return 0;
+}
+static uint32_t gpsUnix() { return (uint32_t)(utcNowMs() / 1000ULL); }
+
+// ---------------------------------------------------------------- command bookkeeping
+static CmdEnt* cmdEnt(const CmdRef& r) {
+  if (r.src < 0 || r.idx < 0) return nullptr;
+  CmdEnt* e = &cmdHist[r.src][r.idx];
+  return (e->used && e->seq == r.seq && e->ms == r.ms) ? e : nullptr;   // nullptr once the slot was reused
+}
+static void setResult(const CmdRef& r, uint8_t res) { CmdEnt* e = cmdEnt(r); if (e) e->result = res; }
+static const CmdEnt* lastCmd(int8_t src) { return (src >= 0 && cmdLastIdx[src] >= 0) ? &cmdHist[src][cmdLastIdx[src]] : nullptr; }
 
 static uint8_t modeActual(float* scaleOut) {
   const VescActiveLimits& L = vesc.limits();
@@ -210,7 +283,7 @@ static uint8_t modeActual(float* scaleOut) {
 }
 
 // ---------------------------------------------------------------- telemetry
-static void fillTelemetry(GkTelemetry& t) {
+static void fillTelemetry(GkTelemetry& t, bool forRadio) {
   memset(&t, 0, sizeof t);
   gkFillHeader(t.h, GK_MSG_TELEMETRY, kartId, GK_ADDR_ALL, txSeq);
   uint32_t now = millis();
@@ -237,10 +310,11 @@ static void fillTelemetry(GkTelemetry& t) {
   t.mode_actual = ma;
   t.scale_x1000 = (scale < 0) ? 65535 : (uint16_t)(scale * 1000);
   t.slow_mph = slowActive ? slowMph : 0;
-  t.last_cmd_seq = lastCmdSeq;
-  t.cmd_result = cmdResult;
+  const CmdEnt* lc = lastCmd(forRadio ? 0 : lastSrcIdx);   // radio: pit commands only (see CmdEnt)
+  t.last_cmd_seq = lc ? lc->seq : 0;
+  t.cmd_result = lc ? lc->result : GK_RES_NONE;
   t.uptime_s = (uint16_t)(now / 1000);
-  t.base_rssi = (baseHeardMs && now - baseHeardMs < 30000) ? baseRssi : 0;
+  t.base_rssi = (baseHeardMs && now - baseHeardMs < 30000) ? (baseRssi ? baseRssi : -1) : 0;   // 0 means "not heard"; a bench-strong 0 dBm reads -1
   t.flags = (fix ? GK_FLAG_GPS_FIX : 0) | (ppsFresh() ? GK_FLAG_PPS : 0) | (vup ? GK_FLAG_VESC_LINK : 0)
           | (stopActive ? GK_FLAG_STOPPED : 0) | (modeConfirmed ? GK_FLAG_MODE_CONFIRMED : 0)
           | ((vup && v.faultCode) ? GK_FLAG_FAULT : 0) | (WiFi.status() == WL_CONNECTED ? GK_FLAG_WIFI : 0)
@@ -261,17 +335,26 @@ static float mphToErpm(float mph) {
   return wheel_rpm * L.gearRatio * (L.motorPoles / 2.0f);
 }
 static void requestBrake() {
-  // "GKB" + amps + tenths of seconds -> the on-VESC brake script (no-op if none is loaded)
+  // "GKB" + amps + tenths of seconds -> the on-VESC brake script (no-op if none is loaded).
+  // Same gate as a limit write (W1): never to an unverified or not-yet-read controller.
+  if (!writeAllowed()) { logf("brake request not sent: VESC not verified/read yet"); return; }
   uint8_t d[5] = { 'G', 'K', 'B', (uint8_t)STOP_BRAKE_AMPS, (uint8_t)(STOP_BRAKE_SECS * 10) };
   vesc.sendCustomAppData(d, sizeof d);
   logf("brake request sent to VESC script: %u A for %.1f s", STOP_BRAKE_AMPS, STOP_BRAKE_SECS);
 }
 
-static bool startWrite(float scale) {
-  if (!writesEnabled() || !vescUp() || vescIdentityBad) return false;
+// owner: the command whose cmd_result this write decides; NO_OWNER for the automatic writes of W2(b).
+static bool startWrite(float scale, const CmdRef& owner) {
+  if (!writesEnabled() || !vescUp()) return false;
+  if (!vescIdentityOk()) { logf("refusing write: VESC identity %s", vescIdentityBad ? "MISMATCH" : "not confirmed yet"); return false; }
   // Per-vehicle: every field except the motor-current scale is echoed back from the live
   // configuration just read out of THIS controller (GET_MCCONF). Never write before that read.
   if (!origValid) { logf("refusing write: this VESC's limits have not been read yet"); return false; }
+  // A write still waiting for its ack/verify is superseded: its command's outcome is unknown
+  // (the new write carries the whole target state, so nothing is lost on the VESC side).
+  if (wState != W_IDLE && (wOwner.src != owner.src || wOwner.seq != owner.seq || wOwner.ms != owner.ms)) {
+    CmdEnt* e = cmdEnt(wOwner); if (e && e->result == GK_RES_ACCEPTED) e->result = GK_RES_UNKNOWN;
+  }
   const VescActiveLimits& L = origLimits;
   VescTempLimits l;
   l.currentMinScale = L.currentMinScale;
@@ -283,9 +366,16 @@ static bool startWrite(float scale) {
   l.sendInCurrent = false;                     // battery limits: always the controller's own
   wAckSeen = vesc.lastAckMs();
   vesc.sendTempLimits(l);
-  wState = W_SENT; wTarget = scale; wSentMs = millis();
+  wState = W_SENT; wTarget = scale; wSentMs = millis(); wOwner = owner; wroteThisBoot = true;
   logf("vesc write scale %.3f", scale);
   return true;
+}
+
+// Automatic follow-up write (W2b): only when allowed, and never while stopped (W4).
+static void autoWrite(const char* why) {
+  if (stopActive) return;
+  if (!writeAllowed()) { revertMissed = true; logf("%s: VESC not reachable, nothing written (re-read will show the live scale)", why); return; }
+  startWrite(scaleTarget(), NO_OWNER);
 }
 
 static void serviceWrites() {
@@ -294,126 +384,166 @@ static void serviceWrites() {
     raceHold = false;
     Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"go\"}\n", kartId);
     logf("race: GO");
-    if (!stopActive && vescUp() && origValid) startWrite(scaleTarget());
+    autoWrite("race GO");
   }
   if (ovActive && (int32_t)(now - ovUntilMs) >= 0) {
     ovActive = false; logf("boost over, back to %.2f", scaleTarget());
-    if (!stopActive && vescUp() && origValid) startWrite(scaleTarget());
+    autoWrite("boost end");
   }
   if (rampIdx >= 0 && wState == W_IDLE && (int32_t)(now - rampNextMs) >= 0) {
     const int n = sizeof(STOP_RAMP) / sizeof(STOP_RAMP[0]);
-    if (!startWrite(STOP_RAMP[rampIdx])) { cmdResult = GK_RES_NO_VESC; rampIdx = -1; }
+    if (!startWrite(STOP_RAMP[rampIdx], rampOwner)) { setResult(rampOwner, GK_RES_NO_VESC); rampIdx = -1; }
     else { rampIdx++; rampNextMs = now + STOP_RAMP_STEP_MS; if (rampIdx >= n) rampIdx = -1; }
   }
   switch (wState) {
     case W_IDLE: break;
     case W_SENT:
       if (vesc.lastAckMs() != wAckSeen) { wState = W_VERIFY; wSentMs = now; vesc.requestMotorConfig(); }
-      else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) cmdResult = GK_RES_UNKNOWN; logf("vesc write: no ack"); }
+      else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) setResult(wOwner, GK_RES_UNKNOWN); logf("vesc write: no ack"); }
       break;
     case W_VERIFY:
       if (vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - wSentMs) >= 0) {
         wState = W_IDLE;
         bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL;
         if (slowActive && fabsf(vesc.limits().maxErpm - slowErpm) > 50) ok = false;
-        if (rampIdx < 0) cmdResult = ok ? GK_RES_APPLIED : GK_RES_UNKNOWN;
+        if (rampIdx < 0) setResult(wOwner, ok ? GK_RES_APPLIED : GK_RES_UNKNOWN);
+        if (ok) revertMissed = false;
         modeConfirmed = ok && !stopActive && ((modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL)
                                               || (ovActive && fabsf(wTarget - ovScale) < MODE_MATCH_TOL));
         logf("vesc write verify %s (scale %.3f)", ok ? "ok" : "MISMATCH", vesc.limits().currentMaxScale);
-      } else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) cmdResult = GK_RES_UNKNOWN; }
+      } else if (now - wSentMs > VESC_ACK_TIMEOUT_MS) { wState = W_IDLE; if (rampIdx < 0) setResult(wOwner, GK_RES_UNKNOWN); }
       break;
   }
 }
 
 // ---------------------------------------------------------------- commands
-static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg) {
-  Serial.printf("{\"t\":\"cmd\",\"kart\":%u,\"src\":%u,\"seq\":%u,\"cmd\":%u,\"arg\":%u,\"result\":%u}\n", kartId, src, seq, cmd, arg, cmdResult);
+static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint8_t result) {
+  Serial.printf("{\"t\":\"cmd\",\"kart\":%u,\"src\":%u,\"seq\":%u,\"cmd\":%u,\"arg\":%u,\"result\":%u}\n", kartId, src, seq, cmd, arg, result);
 }
 
 static uint8_t boostSecs = 0;   // set by the USB `boost` command just before handleCommand
 static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint16_t ttl, uint32_t issued) {
-  int si = (src == GK_ADDR_BASE) ? 0 : 1;
-  if (dupValid[si] && dupSeq[si] == seq && dupIssued[si] == issued) { emitCmd(src, seq, cmd, arg); return; }   // retransmit: report, do not re-apply
-  dupValid[si] = true; dupSeq[si] = seq; dupIssued[si] = issued;
-  lastCmdSeq = seq; lastCmdSrc = src;
+  const int8_t si = (src == GK_ADDR_BASE) ? 0 : 1;
+  const uint32_t nowMs = millis();
+  // W6: a retransmit (repeater copy or pit retry) is reported again, never re-applied.
+  for (int i = 0; i < CMD_HIST; i++) {
+    CmdEnt& e = cmdHist[si][i];
+    if (e.used && e.seq == seq && e.cmd == cmd && e.arg == arg && e.issued == issued && nowMs - e.ms < CMD_DUP_MS) {
+      cmdLastIdx[si] = i; lastSrcIdx = si;           // echo THIS seq in telemetry so the sender sees it
+      emitCmd(src, seq, cmd, arg, e.result);
+      return;
+    }
+  }
+  const int8_t idx = (int8_t)cmdHistNext[si]; cmdHistNext[si] = (cmdHistNext[si] + 1) % CMD_HIST;
+  cmdHist[si][idx] = { seq, cmd, arg, GK_RES_ACCEPTED, issued, nowMs, true };
+  cmdLastIdx[si] = idx; lastSrcIdx = si;
+  cmdCur = { si, idx, seq, nowMs };
+  bool expired = false;
   if (ttl && issued) {
     uint32_t now = gpsUnix();
-    if (now && now > issued + ttl) { cmdResult = GK_RES_REJECTED; logf("command %u expired", seq); emitCmd(src, seq, cmd, arg); return; }
+    if (now && now > issued + ttl) expired = true;
   }
-  cmdResult = GK_RES_ACCEPTED;
-  switch (cmd) {
-    case GK_CMD_PING:
-      cmdResult = GK_RES_APPLIED; break;
-    case GK_CMD_SET_MODE:
-      if (arg >= GK_MODE_COUNT) { cmdResult = GK_RES_REJECTED; break; }
-      modeReq = arg; modeConfirmed = false;
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      if (stopActive) break;                             // remembered; applied at START
-      if (!startWrite(MODES[arg].currentMaxScale)) cmdResult = GK_RES_NO_VESC;
-      break;
-    case GK_CMD_STOP:
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      if (!vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
-      if (!stopActive) preStopScale = origValid ? origLimits.currentMaxScale : -1.0f;
-      stopActive = true; modeConfirmed = false; ovActive = false; raceHold = false;
-      requestBrake();                                   // regen via the VESC script, if present
-      rampIdx = 0; rampNextMs = millis();
-      break;
-    case GK_CMD_START: {
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      stopActive = false; slowActive = false; ovActive = false; raceHold = false; rampIdx = -1;
-      float s = scaleTarget();
-      if (!origValid) { cmdResult = GK_RES_NO_VESC; break; }
-      if (!startWrite(s)) cmdResult = GK_RES_NO_VESC;
-      break;
-    }
-    case GK_CMD_RACE: {                                    // arg = seconds until GO; 0 or 100+position = race finished
-      if (arg == 0 || (arg >= 100 && arg <= 100 + GK_MAX_KARTS)) {
-        bool wasHold = raceHold; raceHold = false;
-        Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"finish\",\"position\":%d}\n", kartId, arg ? (int)(arg - 100) : 0);
-        logf("race: finish%s", wasHold ? " (hold released)" : "");
-        cmdResult = GK_RES_APPLIED;
-        if (wasHold && !stopActive && vescUp() && origValid && writesEnabled()) { if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC; }
+  if (expired) { cmdResult = GK_RES_REJECTED; logf("command %u expired", seq); }
+  else {
+    cmdResult = GK_RES_ACCEPTED;
+    switch (cmd) {
+      case GK_CMD_PING:
+        cmdResult = GK_RES_APPLIED; break;
+      case GK_CMD_SET_MODE:
+        if (arg >= GK_MODE_COUNT) { cmdResult = GK_RES_REJECTED; break; }
+        if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        modeReq = arg; modeConfirmed = false;
+        if (stopActive || raceHold) break;                 // remembered; applied at START / GO (W4)
+        // scaleTarget(), not the bare mode scale: a running BOOST/MUD keeps its scale until its own
+        // timer ends and then reverts to this new mode.
+        if (!startWrite(scaleTarget(), cmdCur)) cmdResult = GK_RES_NO_VESC;
+        break;
+      case GK_CMD_STOP:
+        if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        if (!vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
+        if (!stopActive) preStopScale = origValid ? origLimits.currentMaxScale : -1.0f;
+        stopActive = true; modeConfirmed = false; ovActive = false; raceHold = false;
+        if (wState != W_IDLE) {                           // W4: STOP does not wait behind another write
+          CmdEnt* e = cmdEnt(wOwner); if (e && e->result == GK_RES_ACCEPTED) e->result = GK_RES_UNKNOWN;
+          wState = W_IDLE;
+        }
+        requestBrake();                                   // regen via the VESC script, if present
+        rampIdx = 0; rampNextMs = nowMs; rampOwner = cmdCur;
+        break;
+      case GK_CMD_START: {
+        if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        stopActive = false; slowActive = false; ovActive = false; raceHold = false; rampIdx = -1;
+        if (!origValid || !vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
+        float s = scaleTarget();
+        if (s < 0.05f) {                                  // no mode known and the controller read back ~0
+          cmdResult = GK_RES_REJECTED;                    // (Heltec rebooted during a stop?): say so, do not fake "applied"
+          logf("start: no mode requested and this controller's scale read %.2f; send a mode", s);
+          break;
+        }
+        if (!startWrite(s, cmdCur)) cmdResult = GK_RES_NO_VESC;
         break;
       }
-      if (arg > 30) { cmdResult = GK_RES_REJECTED; break; }
-      uint32_t nowU = gpsUnix(); uint32_t goInMs;
-      if (issued && nowU && issued + arg > nowU) goInMs = (issued + arg - nowU) * 1000UL;   // shared clock: same instant on every kart
-      else if (issued && nowU) goInMs = 0;                                                 // arrived after GO: release now
-      else goInMs = (uint32_t)arg * 1000UL;
-      raceHold = true; raceGoMs = millis() + goInMs; raceGoUnix = issued ? issued + arg : 0; ovActive = false;
-      Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"countdown\",\"go_in_ms\":%lu,\"secs\":%u,\"go_utc\":%lu}\n", kartId, (unsigned long)goInMs, arg, (unsigned long)raceGoUnix);
-      logf("race: grid hold, GO in %lu ms", (unsigned long)goInMs);
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      if (stopActive) break;                                 // already stopped: GO releases nothing until START
-      if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
-      if (!startWrite(0.0f)) cmdResult = GK_RES_NO_VESC;
-      break;
+      case GK_CMD_RATE: {                                  // arg = 1 or 2 Hz, persisted; no VESC involvement
+        if (arg != 1 && arg != 2) { cmdResult = GK_RES_REJECTED; break; }
+        if (reportRate != arg) { reportRate = (uint8_t)arg; prefs.putUChar("rate", (uint8_t)arg); logf("report rate %u Hz (pit)", arg); }
+        cmdResult = GK_RES_APPLIED; break;
+      }
+      case GK_CMD_RACE: {                                  // arg = seconds until GO; 0 or 100+position = race finished
+        if (arg == 0 || (arg >= 100 && arg <= 100 + GK_MAX_KARTS)) {
+          bool wasHold = raceHold; raceHold = false;
+          Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"finish\",\"position\":%d}\n", kartId, arg ? (int)(arg - 100) : 0);
+          logf("race: finish%s", wasHold ? " (hold released)" : "");
+          cmdResult = GK_RES_APPLIED;
+          if (wasHold && !stopActive && writesEnabled()) { if (!startWrite(scaleTarget(), cmdCur)) cmdResult = GK_RES_NO_VESC; }
+          break;
+        }
+        if (arg > 30) { cmdResult = GK_RES_REJECTED; break; }
+        // GO = issued + arg on the shared clock (GPS or pit beacon, ms resolution), so every kart
+        // launches on the same instant even if it heard a later retry; no clock = arg s from now.
+        uint64_t nowU = utcNowMs(); uint32_t goInMs;
+        uint64_t goAt = (uint64_t)(issued + arg) * 1000ULL;
+        if (issued && nowU) goInMs = goAt > nowU ? (uint32_t)(goAt - nowU) : 0;   // 0 = arrived after GO: release now
+        else goInMs = (uint32_t)arg * 1000UL;
+        if (goInMs > 31000UL) goInMs = (uint32_t)arg * 1000UL;                   // clocks disagree wildly: fall back
+        raceHold = true; raceGoMs = nowMs + goInMs; raceGoUnix = issued ? issued + arg : 0; ovActive = false;
+        Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"countdown\",\"go_in_ms\":%lu,\"secs\":%u,\"go_utc\":%lu}\n", kartId, (unsigned long)goInMs, arg, (unsigned long)raceGoUnix);
+        logf("race: grid hold, GO in %lu ms", (unsigned long)goInMs);
+        if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        if (stopActive) break;                             // already stopped: GO releases nothing until START
+        if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
+        if (!startWrite(0.0f, cmdCur)) cmdResult = GK_RES_NO_VESC;
+        break;
+      }
+      case GK_CMD_BOOST: {                                 // arg = scale percent; duration from boostSecs (USB) or 5 s
+        uint8_t secs = boostSecs ? boostSecs : 5; boostSecs = 0;
+        if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        if (arg < 10 || arg > 100 || stopActive) { cmdResult = GK_RES_REJECTED; break; }
+        if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
+        ovScale = arg / 100.0f; ovActive = true; ovUntilMs = nowMs + secs * 1000UL;
+        logf("boost: scale %.2f for %u s", ovScale, secs);
+        if (!startWrite(scaleTarget(), cmdCur)) cmdResult = GK_RES_NO_VESC;
+        break;
+      }
+      case GK_CMD_SLOW: {
+        if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
+        if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
+        float mph = arg ? (float)arg : (float)SLOW_DEFAULT_MPH;
+        float e = mphToErpm(mph);
+        if (e < 100) { cmdResult = GK_RES_REJECTED; logf("slow: drivetrain numbers unavailable"); break; }
+        slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
+        logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
+        if (!startWrite(scaleTarget(), cmdCur)) cmdResult = GK_RES_NO_VESC;
+        break;
+      }
+      default:
+        cmdResult = GK_RES_REJECTED;
     }
-    case GK_CMD_BOOST: {                                   // arg = scale percent; duration from boostSecs (USB) or 5 s
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      if (arg < 10 || arg > 100 || stopActive) { cmdResult = GK_RES_REJECTED; break; }
-      if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
-      ovScale = arg / 100.0f; ovActive = true; ovUntilMs = millis() + (boostSecs ? boostSecs : 5) * 1000UL;
-      logf("boost: scale %.2f for %u s", ovScale, boostSecs ? boostSecs : 5); boostSecs = 0;
-      if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC;
-      break;
-    }
-    case GK_CMD_SLOW: {
-      if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-      if (!vescUp() || !origValid) { cmdResult = GK_RES_NO_VESC; break; }
-      float mph = arg ? (float)arg : (float)SLOW_DEFAULT_MPH;
-      float e = mphToErpm(mph);
-      if (e < 100) { cmdResult = GK_RES_REJECTED; logf("slow: drivetrain numbers unavailable"); break; }
-      slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
-      logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
-      if (!startWrite(scaleTarget())) cmdResult = GK_RES_NO_VESC;
-      break;
-    }
-    default:
-      cmdResult = GK_RES_REJECTED;
   }
-  emitCmd(src, seq, cmd, arg);
+  // The synchronous outcome; a write's ack/verify updates this entry later through wOwner.
+  CmdEnt* me = cmdEnt(cmdCur);
+  if (me && !(cmdResult == GK_RES_ACCEPTED && me->result != GK_RES_ACCEPTED)) me->result = cmdResult;
+  emitCmd(src, seq, cmd, arg, cmdResult);
+  cmdCur = NO_OWNER;
 }
 
 // ---------------------------------------------------------------- vesc link
@@ -436,7 +566,8 @@ class ScanCB : public NimBLEScanCallbacks {
 };
 static ScanCB scanCB;
 static void bleReport() {
-  Serial.printf("{\"t\":\"ble\",\"kart\":%u,\"pinned\":\"%s\",\"connected\":%s,\"candidates\":[", kartId, vescMac.c_str(), gkBool(bleConnected));
+  char pin[40]; gkJsonStr(pin, sizeof pin, vescMac.c_str());
+  Serial.printf("{\"t\":\"ble\",\"kart\":%u,\"pinned\":\"%s\",\"connected\":%s,\"candidates\":[", kartId, pin, gkBool(bleConnected));
   for (int i = 0; i < bleCandN; i++) Serial.printf("%s{\"addr\":\"%s\",\"rssi\":%d,\"age_s\":%lu}", i ? "," : "", bleCands[i].addr.toString().c_str(), bleCands[i].rssi, (unsigned long)((millis() - bleCands[i].seenMs) / 1000));
   Serial.println("]}");
 }
@@ -494,28 +625,49 @@ static void bleService() {
 static void serviceVesc() {
 #if !VESC_TRANSPORT_UART
   bleService();
-  if (!bleConnected) { if (vescLinkWas) { vescLinkWas = false; modeConfirmed = false; logf("vesc link lost"); } return; }
+  if (!bleConnected) {
+    if (vescLinkWas) { vescLinkWas = false; modeConfirmed = false; vesc.markLinkLost(); logf("vesc link lost (ble disconnect)"); }
+    return;
+  }
 #endif
   vesc.poll();
   uint32_t now = millis();
   bool up = vescUp();
-  if (up && !vescLinkWas) {              // link came up: read-only reconciliation only
+  if (up && !vescLinkWas) {              // link came up: read-only reconciliation only (W2)
+    vescLinkUpMs = now;
     vesc.requestFirmware();
     vesc.requestMotorConfig(); vescMcconfMs = now;
     modeConfirmed = false; vescIdentityBad = false; vescIdCheckedMs = 0; origValid = false;
     logf("vesc link up");
   }
-  if (up && !origValid && vesc.limits().receivedMs && wState == W_IDLE) {
+  // Baseline for every write: the limits read in THIS link session (a reply from before the link
+  // dropped is not trusted, W1). If this boot already wrote overrides to the controller and it
+  // kept them across the link drop, the live scale/ERPM are OUR overrides, not the baseline:
+  // keep the earlier baseline for those fields so START still restores the real limits.
+  if (up && !origValid && vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - vescLinkUpMs) >= 0 && wState == W_IDLE) {
     origLimits = vesc.limits(); origValid = true;
+    if (haveFirst && wroteThisBoot && !strcmp(firstUuid, vesc.uuidHex)) {   // same controller (uuid, or both unknown)
+      origLimits.currentMaxScale = firstLimits.currentMaxScale;
+      origLimits.minErpm = firstLimits.minErpm; origLimits.maxErpm = firstLimits.maxErpm;
+      logf("vesc relinked with this session's overrides: keeping baseline scale %.2f ERPM %.0f..%.0f (live %.2f)",
+           origLimits.currentMaxScale, origLimits.minErpm, origLimits.maxErpm, vesc.limits().currentMaxScale);
+    } else { firstLimits = origLimits; haveFirst = true; strlcpy(firstUuid, vesc.uuidHex, sizeof firstUuid); }
     logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m",
          origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
          origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
   }
+  // A lost FW_VERSION / GET_MCCONF reply must not leave the kart unable to answer a STOP: ask again (read-only).
+  static uint32_t idRetryMs = 0;
+  if (up && wState == W_IDLE && now - vescMcconfMs >= 2000 && !origValid) { vescMcconfMs = now; vesc.requestMotorConfig(); }
+  if (up && now - vescLinkUpMs >= 2000 && now - idRetryMs >= 2000 && vescUuid.length() == 24 && !vescIdentityOk() && !vescIdentityBad) {
+    idRetryMs = now; vesc.requestFirmware();
+  }
   if (up && vesc.fwSeenMs && vesc.fwSeenMs != vescIdCheckedMs) {
     vescIdCheckedMs = vesc.fwSeenMs;
     bool bad = vescUuid.length() == 24 && !vescUuid.equalsIgnoreCase(vesc.uuidHex);
+    char hw[32]; gkJsonStr(hw, sizeof hw, vesc.hwName);
     if (bad != vescIdentityBad) { vescIdentityBad = bad; logf(bad ? "VESC IDENTITY MISMATCH: uuid %s, pinned %s; writes refused" : "vesc identity ok uuid %s", vesc.uuidHex, vescUuid.c_str()); }
-    else if (!bad) logf("vesc fw %u.%02u %s uuid %s", vesc.fwMajor, vesc.fwMinor, vesc.hwName, vesc.uuidHex);
+    else if (!bad) logf("vesc fw %u.%02u %s uuid %s", vesc.fwMajor, vesc.fwMinor, hw, vesc.uuidHex);
   }
   if (!up && vescLinkWas) { modeConfirmed = false; logf("vesc link lost"); }
   vescLinkWas = up;
@@ -595,8 +747,12 @@ static void serviceGps() {
   }
   else if (!gpsConfigured && now - gpsLockedMs > 500) gpsConfigure();
   if (gps.location.isValid() && gps.location.isUpdated()) {
-    fixLat = gps.location.lat(); fixLon = gps.location.lng(); lastFixMs = now; gpsFixCount++;
-    if (gpsLineOn) {           // fast fix line for the kart Pi: position, Doppler speed/course, quality
+    fixLat = gps.location.lat(); fixLon = gps.location.lng(); lastFixMs = now;
+    // GGA and RMC both update the location: report each fix epoch once (5 Hz, not 10).
+    uint32_t epoch = gps.time.isValid() ? gps.time.value() : 0xFFFFFFFE;
+    bool newEpoch = epoch != gpsLineEpoch || epoch == 0xFFFFFFFE; gpsLineEpoch = epoch;
+    if (newEpoch) gpsFixCount++;
+    if (gpsLineOn && newEpoch) {           // fast fix line for the kart Pi: position, Doppler speed/course, quality
       Serial.printf("{\"t\":\"gps\",\"kart\":%u,\"lat\":%.7f,\"lon\":%.7f,\"kph\":%.1f,\"heading\":%.1f,\"hdop\":%.2f,\"sats\":%u,\"ms\":%lu}\n",
                     kartId, fixLat, fixLon, gps.speed.isValid() ? gps.speed.kmph() : 0.0, gps.course.isValid() ? gps.course.deg() : 0.0,
                     gps.hdop.isValid() ? gps.hdop.hdop() : 99.0, gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0, (unsigned long)now);
@@ -629,10 +785,16 @@ static void serviceLoraRxOne() {
   if (!type) { loraRxBad++; return; }
   loraRx++;
   const GkHeader* h = (const GkHeader*)buf;
-  if (h->src == GK_ADDR_BASE) { baseRssi = (int8_t)rssi; baseHeardMs = millis(); }
+  const bool relayed = gkIsRelayed(*h);
+  const uint32_t irqUs = loraIrqMicros;
+  if (h->src == GK_ADDR_BASE && !relayed) { baseRssi = (int8_t)constrain(rssi, -127.0f, 0.0f); baseHeardMs = millis(); }   // a repeater copy is not how we hear the pit
   switch (type) {
     case GK_MSG_TELEMETRY:
-      if (h->src >= 1 && h->src <= GK_MAX_KARTS && h->src != kartId) { gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); emitFleet(h->src, rssi, snr); }
+      if (h->src >= 1 && h->src <= GK_MAX_KARTS && h->src != kartId) {
+        // Repeater copy of a packet already heard directly: drop it (the kart Pi would count it twice).
+        if (relayed && fleetMs[h->src] && millis() - fleetMs[h->src] < 400 && fleet[h->src].h.seq == h->seq) break;
+        gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); emitFleet(h->src, rssi, snr);
+      }
       break;
     case GK_MSG_COMMAND: {
       GkCommandMsg c; memcpy(&c, buf, len);
@@ -642,17 +804,20 @@ static void serviceLoraRxOne() {
     case GK_MSG_BASE_INFO: {
       GkBaseInfo b; gkCopyBeacon(b, buf, len);
       static uint32_t directBeaconMs = 0;
-      bool relayed = gkIsRelayed(b.h);
       if (!relayed) directBeaconMs = millis();
-      if (!relayed || !directBeaconMs || millis() - directBeaconMs > 1500) {   // sync from the repeater only when the pit itself is out of reach
-        uint32_t extra = relayed ? (GK_RELAY_DELAY_MS + GK_BEACON_AIRTIME_MS) : 0;   // one extra hop
-        syncEdgeMicros = loraIrqMicros - ((uint32_t)b.phase_ms + GK_BEACON_AIRTIME_MS + extra) * 1000UL;
-        syncMs = millis();
+      const bool useIt = !relayed || !directBeaconMs || millis() - directBeaconMs > 1500;   // the repeater's copy only when the pit itself is out of reach
+      // The IRQ fires at the end of reception: the beacon started phase_ms into the pit's second
+      // and lasted its own airtime (22 or 27 bytes); a relayed copy adds the delay and a second airtime.
+      const uint32_t airUs = gkAirtimeUs(len);
+      const uint32_t agoUs = (uint32_t)b.phase_ms * 1000UL + airUs + (relayed ? GK_RELAY_DELAY_MS * 1000UL + airUs : 0);
+      if (useIt) { syncEdgeMicros = irqUs - agoUs; syncMs = millis(); }
+      if (useIt && b.utc_s) {                            // pit clock: UTC second b.utc_s started agoUs before the IRQ
+        baseUtc = b.utc_s; baseUtcOffMs = (uint16_t)(agoUs / 1000UL);
+        baseUtcMs = millis() - (uint32_t)(micros() - irqUs) / 1000UL;
       }
       baseSyncSrc = b.sync_src; pitKartsOnline = b.karts_online;
       if (len >= (size_t)sizeof(GkBaseInfo)) { uint8_t p = gkBeaconPos(b, kartId); if (p != racePos || b.race_state != raceState) Serial.printf("{\"t\":\"race\",\"kart\":%u,\"event\":\"position\",\"position\":%u,\"state\":%u}\n", kartId, p, b.race_state); racePos = p; raceState = b.race_state; racePosMs = millis(); }
       if (b.lat_e7 && b.lon_e7) { baseLat = b.lat_e7 / 1e7; baseLon = b.lon_e7 / 1e7; baseFixMs = millis(); }
-      if (b.utc_s) { baseUtc = b.utc_s; baseUtcMs = millis(); }
       break;
     }
     default: break;
@@ -660,27 +825,42 @@ static void serviceLoraRxOne() {
 }
 
 static bool syncFresh() { return syncMs && millis() - syncMs < GK_SYNC_MAX_AGE_MS; }
+static bool slotEdge(uint32_t& edge) {
+  if (ppsFresh()) { noInterrupts(); edge = ppsMicros; interrupts(); return true; }
+  if (syncFresh()) { edge = syncEdgeMicros; return true; }
+  return false;
+}
+// Slot plan in GoKartProtocol.h. The slot opens GK_SLOT_GUARD_MS before (k-1)*slot (kart 1 in the tail of
+// the previous round) and closes GK_TX_LATE_MS later: a loop that is later than that skips the round
+// rather than run over the next kart. One transmission per slot, even when the reference edge moves
+// (new PPS second, beacon re-sync) between two checks: dedupe on the slot's absolute start time.
 static bool slotDue() {
-  uint32_t now = millis();
-  uint32_t edge = 0; bool have = false;
-  if (ppsFresh()) { noInterrupts(); edge = ppsMicros; interrupts(); have = true; }
-  else if (syncFresh()) { edge = syncEdgeMicros; have = true; }
-  if (have) {
-    uint32_t periodUs = 1000000UL / reportRate;
-    uint32_t slotUs = (reportRate == 2 ? GK_SLOT_MS_2HZ : GK_SLOT_MS) * 1000UL;
-    uint32_t since = micros() - edge;             // the edge may be a few seconds old (beacon sync)
-    uint32_t round = since / periodUs, inRound = since % periodUs;
-    int32_t start = (int32_t)((kartId - 1) * slotUs) - GK_SLOT_GUARD_MS * 1000;
-    if (edge == lastTxEdge && round == lastTxRound) return false;
-    if ((int32_t)inRound >= start && (int32_t)inRound < start + 40000) { lastTxEdge = edge; lastTxRound = round; return true; }
-    return false;
+  uint32_t edge;
+  if (slotEdge(edge)) {
+    const uint32_t periodUs = 1000000UL / reportRate;
+    const uint32_t slotUs = (reportRate == 2 ? GK_SLOT_MS_2HZ : GK_SLOT_MS) * 1000UL;
+    const uint32_t nowUs = micros();
+    const uint32_t since = nowUs - edge + GK_SLOT_GUARD_MS * 1000UL;   // the edge may be a few seconds old (beacon sync)
+    const uint32_t inRound = since % periodUs;
+    const uint32_t start = (uint32_t)(kartId - 1) * slotUs;
+    if (inRound < start || inRound >= start + GK_TX_LATE_MS * 1000UL) return false;
+    const uint32_t slotStartUs = nowUs - (inRound - start);
+    if (lastSlotValid && (uint32_t)(slotStartUs - lastSlotStartUs + periodUs / 2) < periodUs) return false;   // same slot
+    lastSlotStartUs = slotStartUs; lastSlotValid = true;
+    return true;
   }
-  return (now - lastTxMs) >= (uint32_t)(1000 / reportRate + txJitter);
+  return (millis() - lastTxMs) >= (uint32_t)(1000 / reportRate + txJitter);
+}
+// True right after our own transmission while slot-synced: the safe moment for slow work (OLED).
+static bool quietAfterTx() {
+  uint32_t edge;
+  if (!radioOk || !slotEdge(edge)) return true;
+  return millis() - lastTxMs < 200;
 }
 
 static void serviceLoraTx() {
   if (!radioOk || !slotDue()) return;
-  GkTelemetry t; fillTelemetry(t);
+  GkTelemetry t; fillTelemetry(t, true);
   digitalWrite(PIN_LED, HIGH);
   int st = radio.transmit((uint8_t*)&t, sizeof t);
   loraIrq = false;                       // the TX-done interrupt also raised DIO1
@@ -719,7 +899,7 @@ static void serviceWifi() {
 
 // ---------------------------------------------------------------- usb
 static void usbReport() {
-  GkTelemetry t; fillTelemetry(t);
+  GkTelemetry t; fillTelemetry(t, false);
   char buf[720];
   int n = gkTelemetryToJson(buf, sizeof buf, t, "self", 0, 0, millis());
   if (n > 0 && n < (int)sizeof buf - 160 && buf[n - 1] == '}') {       // USB-only extras: fix quality and the pit radio's own fix
@@ -735,25 +915,28 @@ static void usbReport() {
 
 static void usbStatus() {
   const VescActiveLimits& L = vesc.limits();
+  char ssid[72], mac[40], upin[40], hw[32];                 // console-typed / VESC-supplied text: escape for JSON
+  gkJsonStr(ssid, sizeof ssid, wifiSsid.c_str()); gkJsonStr(mac, sizeof mac, vescMac.c_str());
+  gkJsonStr(upin, sizeof upin, vescUuid.c_str()); gkJsonStr(hw, sizeof hw, vesc.hwName);
   char hdopStr[12] = "null"; if (gps.hdop.isValid()) snprintf(hdopStr, sizeof hdopStr, "%.2f", gps.hdop.hdop());
   Serial.printf("{\"t\":\"status\",\"kart\":%u,\"fw\":\"%s\",\"built\":\"" __DATE__ " " __TIME__ "\",\"writes\":%s,\"transport\":\"%s\",\"radio\":%s,\"radio_status\":%d,"
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
                 "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
-                "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
-                "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"heap\":%lu}\n",
+                "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
+                "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
                 (unsigned long)loraTx, (unsigned long)loraRx, (unsigned long)loraRxBad, gkBool(gpsLocked),
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
-                vesc.fwMajor, vesc.fwMinor, vesc.hwName, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
+                vesc.fwMajor, vesc.fwMinor, hw, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
                 L.motorPoles, L.gearRatio, L.wheelDiameter,
-                WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", wifiSsid.c_str(), vescMac.c_str(),
-                vesc.uuidHex, vescUuid.c_str(), gkBool(!vescIdentityBad), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
+                WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, mac,
+                vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
                 hdopStr, (unsigned long)gps.location.age(), gps.location.isValid() ? gps.location.lat() : 0.0, gps.location.isValid() ? gps.location.lng() : 0.0,
-                (unsigned long)ESP.getFreeHeap());
+                (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
 }
 
 static void usbCommand(char* line) {
@@ -790,6 +973,7 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "vescmac") && arg) {
     if (!strcmp(arg, "clear")) { prefs.remove("vescmac"); vescMac = ""; logf("vesc address cleared"); }
     else { prefs.putString("vescmac", arg); vescMac = arg; logf("vesc address pinned to %s", arg); }
+    haveFirst = false; wroteThisBoot = false;            // a different controller gets its own baseline
 #if !VESC_TRANSPORT_UART
     if (bleConnected && pClient) pClient->disconnect();
 #endif
@@ -833,7 +1017,7 @@ static void usbCommand(char* line) {
   }
   else if (!strcmp(line, "gpsline") && arg) { gpsLineOn = !strcmp(arg, "on"); prefs.putBool("gpsline", gpsLineOn); logf("gps fix line %s", gpsLineOn ? "on" : "off"); }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | gpsreset | gpsrecover | gpsdump | gpstest BAUD | ping | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX | vescmac clear | blescan | vescuuid <hex>|now|clear | rate 1|2 | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -841,8 +1025,13 @@ static void serviceUsb() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
-    if (c == '\n') { usbLine[usbLen] = 0; if (usbLen) usbCommand(usbLine); usbLen = 0; continue; }
-    if (usbLen < sizeof(usbLine) - 1) usbLine[usbLen++] = c;
+    if (c == '\n') {
+      usbLine[usbLen] = 0;
+      if (usbOverflow) logf("console line longer than %u bytes ignored", (unsigned)(sizeof(usbLine) - 1));   // never run a truncated command (e.g. a cut wifi password)
+      else if (usbLen) usbCommand(usbLine);
+      usbLen = 0; usbOverflow = false; continue;
+    }
+    if (usbLen < sizeof(usbLine) - 1) usbLine[usbLen++] = c; else usbOverflow = true;
   }
   if (millis() - usbReportMs >= USB_SELF_REPORT_MS) { usbReportMs = millis(); usbReport(); }
 }
@@ -850,6 +1039,7 @@ static void serviceUsb() {
 // ---------------------------------------------------------------- oled
 static void serviceOled() {
   if (!oledOk || millis() - oledMs < OLED_REFRESH_MS) return;
+  if (!quietAfterTx()) return;           // a full-frame I2C push takes ~25 ms: never in front of our own slot
   oledMs = millis();
   char l[32];
   float scale; uint8_t ma = modeActual(&scale);

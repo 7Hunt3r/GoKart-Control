@@ -35,9 +35,10 @@
 
 #define OLED_REFRESH_MS   500
 #define STAT_PERIOD_MS    1000
-#define KART_ONLINE_MS    5000
-#define GPS_DETECT_STEP_MS 4000
 #define WDT_TIMEOUT_S     20
 #define RELAY_QUEUE_LEN   8
 #define RELAY_SEEN_LEN    32
-#define RELAY_SEEN_MS     5000
+// Dedupe window: only a true double reception. It used to be 5 s, which also swallowed the pit's own
+// command retries (same seq, sent 1.5 s apart) for karts that only hear the pit through this repeater,
+// and a rebooted kart's restarted seq numbers.
+#define RELAY_SEEN_MS     400
