@@ -93,8 +93,11 @@ Hardware in hand (from the bench logs):
 
 - SLOW, BOOST and the race grid hold against a live VESC; wheels-up throttle check under STOP.
 - Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
-  Before the range test: flash kart 2 with 0.2.1 and watch the kart Pi's `dmesg -w` for USB resets
-  during transmit (750 mA peaks at 27 dBm off the Pi's USB); `txpower 14` or `12` if it resets.
+  Kart 2 runs 0.2.2 (OTA 2026-11-07 20:14). The `dmesg -w` USB-reset watch (750 mA peaks at 27 dBm
+  off the Pi's USB) is still owed: it needs the Heltec actually cabled to the kart Pi, and on
+  2026-11-07 it was powered separately; `txpower 14` or `12` if it resets. Give the kart Pi 3 B a
+  5 V 3 A supply first: it browned out that evening with only the panel on it (`get_throttled`
+  0x50005, see Known issues 10).
   Then the antennas: a 3-6 dBi 915 MHz omni on a mast for the pit base (short low-loss coax), the
   repeater high on a pole mid-track with line of sight both ways, kart whips vertical on the dash
   hood. Height and placement are worth more than every firmware change made today.
@@ -110,10 +113,13 @@ with its touch USB on "5V IN + TOUCH". The kiosk opens by itself (`gokart-pit` +
 `gokart-kiosk` services). Top bar: radio link, repeater chip (if one is out), GAME chip, SOUND
 chip, and a health chip only when something is wrong (UNDERVOLT, throttled, had undervolt). If
 the code changed since the last session, run `pit/deploy.sh` from the Mac first (last deployed
-2026-11-06 20:59, 1227ab4).
+2026-11-07 20:19 with `--install`, 5d2f891; kart Pi the same evening, 20:18).
 
 **Kart boot.** Power the kart Pi and the Heltec (a separate regulated 5 V for the Heltec is the
-target, not the VESC 3.3 V pin). The Heltec connects only to its pinned VESC; its OLED and the
+target, not the VESC 3.3 V pin). The kart Pi wants its own 5 V 3 A: the Pi 3 B logged
+under-voltage and throttling with just the touch panel on it (2026-11-07), and a Heltec on its
+USB adds 750 mA transmit peaks. The Heltec's USB-C must go to the Pi's USB-A or the driver page
+shows USB (no link) and the kart runs on LoRa alone. The Heltec connects only to its pinned VESC; its OLED and the
 driver page show the link. The driver page's PIT chip shows how well the kart hears the pit
 (`base_rssi`; NO PIT at 0). Maps and zones arrive whenever the kart Pi reaches the pit over Wi-Fi
 and survive reboots on the track. In the pit, `ping` each kart once.
@@ -152,14 +158,16 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
 
 ## Known issues
 
-1. **Kart 2 GPS board dead** (2026-11-06): the L76K daughterboard no longer drives its TX line
-   (0 edges after a 5 s cold power-off; PPS still ticking). Hardware: replace the GNSS board. Most
-   likely damaged by the earlier swapped-pin search driving the module's TX; the firmware now never
-   swaps UART pins (6c3bf58).
+1. ~~**Kart 2 GPS board dead**~~ (2026-11-06): the L76K daughterboard no longer drove its TX line
+   (0 edges after a 5 s cold power-off; PPS still ticking); most likely damaged by the earlier
+   swapped-pin search driving the module's TX; the firmware now never swaps UART pins (6c3bf58).
+   2026-11-07 20:15: kart 2 reports a 10-satellite fix again over LoRa, so the board was replaced
+   or recovered; note which board is fitted before trusting it on track.
 2. ~~Repeater needs a reflash~~ Done 2026-11-07 12:22: repeater on 0.2.1 from the Mac
    (`rx_bad` 0, every beacon relayed, heartbeat decoded by the pit); the pit base on 0.2.1 from the
    pit Pi itself (`~/flash_base.sh <merged.bin>`, esptool in `~/esptool-venv`; the Debian esptool
-   package lacks the S3 stub). Kart 2's Heltec still runs the 0.2.0 build (kart was off).
+   package lacks the S3 stub). Kart 2's Heltec: 0.2.2 by OTA 2026-11-07 20:14 (0.2.1's radio
+   change rode along).
 3. **Pit reboot cause unknown.** On 2026-11-06 the pit Pi rebooted several times, came back with no
    Wi-Fi profile, and the logs were gone (volatile journal; netplan-backed profiles left as 0-byte
    files; the Wi-Fi loss was at 18:10). Wi-Fi and log loss are fixed by 1227ab4 (deployed); the
@@ -171,12 +179,17 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
 5. **Nothing has been driven through a real zone yet.** All game evidence is simulated.
 6. **Boost and race have not run on a live VESC.** First test: one boost pad on a straight, kart in
    ECO, wheels up, confirm the scale read-back rises and drops after 5 s; then a race with one kart.
-7. The 27-byte beacon base build and the kart P-badge firmware are committed but their flashing is
-   not recorded (the pit server sends race positions to the base since 1227ab4).
+7. ~~27-byte beacon / P-badge flashing not recorded~~: the base build is on the pit base (0.2.1,
+   2026-11-07 12:25) and the kart P-badge firmware is on kart 2 (0.2.2 by OTA, 20:14). The P badge
+   has still not been seen in a real race (the pit sends race positions since 1227ab4).
 8. One base build (queue dedupe + a different window expression) stopped receiving entirely on
    2026-11-05 and was reverted; cause not understood.
 9. `base_rssi` 0 means "not heard", but side by side the true RSSI is 0 to -1 dBm, so the pit can
    show 0 on the bench. Outdoors it reads normally.
+10. **Kart Pi 3 B under-voltage** (2026-11-07 20:14): `vcgencmd get_throttled` 0x50005 (under-voltage
+    and throttled, now and since boot), six "Undervoltage detected" lines in dmesg, the touch panel
+    dropped and re-enumerated once; the Heltec was NOT on its USB at the time. Supply or cable. The
+    kart display now carries the pit's health chip so it shows UNDERVOLT on the panel (kart/README.md).
 
 ## Decisions for Colin
 
@@ -405,3 +418,12 @@ of coherent, checked milestones; fetch and reconcile before pushing; focused bra
 for parallel work ([CONTRIBUTING.md](CONTRIBUTING.md)). No team members have been invited by
 this project and no messages sent on anyone's behalf. Never put credentials or the pit password
 into source control.
+- Evening, 20:10-20:40: bench power-cycled (both Pis rebooted about 20:10; the T-Beam base stayed
+  up). Kart 2 Heltec flashed 0.2.2 over WiFi (`espota.py -i 192.168.151.44 -p 3232 -f
+  firmware/build/kart-heltec-v4/kart-heltec-v4.ino.bin`: OTA takes the app image, not the merged one;
+  the pit saw the reboot). Pit and kart Pi deployed with `--install` (5d2f891; the leftover
+  `/etc/default/gokart-kart-kiosk` removed). Ping to kart 2 from the new pit build applied in under
+  2 s. VESC off, so the wheels-up `mode 0` read-back is still owed. Found: the Heltec was not on the
+  kart Pi's USB (the Pi saw only the touch panel; the kart ran on WiFi + LoRa alone), the kart Pi 3 B
+  was browning out (Known issues 10), and kart 2's GPS fixes again (10 sats). Kart display gained the
+  pit's health chip.
