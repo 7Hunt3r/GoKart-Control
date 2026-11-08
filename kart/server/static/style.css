@@ -59,6 +59,16 @@ body.alerting .battnote { display: none; }
 /* Heltec USB link not up: one chip replaces PIT / VESC / GPS (they would all read "?") */
 .chip.link { flex: 1; justify-content: center; }
 body.pulse .chip.link.warn { opacity: .7; }
+/* Pi power health chip (same states/colours as the pit pages): red UNDERVOLT, amber THROTTLED, dim
+   HAD UNDERVOLT. While it shows, the chip row compacts so all of it still fits the 380 px dash column
+   (the row never wraps or widens the page; the health chip is the one that never gets cut).
+   Measured in DejaVu Sans Bold: KART 2 / PIT -72 / VESC / GPS 11 5Hz / UNDERVOLT fits 361 px at 12 px. */
+.chip.health { flex-shrink: 0; }
+.chip.health.warn { background: #ffb000; border-color: #ffb000; color: #000; }
+.chip.health.stale { background: var(--stale); border-color: #8a8a8a; color: #e8e8e8; }
+.chips.crowded { gap: 3px; }
+.chips.crowded .chip { font-size: 12px; padding: 0 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chips.crowded .chip.health { overflow: visible; }
 
 /* speedometer: black card, arc 0-30 mph, big italic number, gear badge */
 .speedo { position: relative; flex: 1 1 0; min-height: 112px; background: var(--card); border: 2px solid #26292e; border-radius: 12px; overflow: hidden; }

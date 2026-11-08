@@ -1166,5 +1166,48 @@ class SimRacePositions(unittest.TestCase):
         self.assertEqual([sim.position_at(go + x * lap + 1)[0] for x in range(4)], [3, 2, 1, 1])
 
 
+class PiHealth(unittest.TestCase):
+    """Pi power health (health.py is a byte-identical copy of the pit's) and the driver page chip."""
+
+    def test_health_py_is_shared(self):
+        with open(os.path.join(KART, "server", "health.py")) as f:
+            kart = f.read()
+        with open(os.path.join(os.path.dirname(KART), "pit", "server", "health.py")) as f:
+            pit = f.read()
+        self.assertEqual(kart, pit, "kart and pit health.py must be identical copies")
+
+    def test_statuses(self):
+        import health
+        snap = health.Health(reader=lambda: "throttled=0x50005\n", temp_reader=lambda: 61.0).sample()
+        self.assertEqual(snap["status"], "undervolt")
+        self.assertEqual(snap["throttled"], "0x50005")
+        f = snap["flags"]
+        self.assertTrue(f["undervolt_now"] and f["throttled_now"])
+        self.assertTrue(f["undervolt_since_boot"] and f["throttled_since_boot"])
+        self.assertFalse(f["freq_capped_now"])
+        self.assertEqual(health.Health(reader=lambda: "throttled=0x0", temp_reader=None).sample()["status"], "ok")
+        real_which = health.shutil.which
+        health.shutil.which = lambda name: None                 # no vcgencmd (Mac, CI)
+        try:
+            off = health.Health(temp_reader=lambda: None)
+        finally:
+            health.shutil.which = real_which
+        self.assertFalse(off.available)
+        self.assertEqual(off.sample()["status"], "unavailable")
+
+    def test_chip_js(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not installed")
+        prog = js_function("healthChip") + """
+console.log(JSON.stringify([{available:true,status:'undervolt'},{available:true,status:'throttled'},
+  {available:true,status:'had_undervolt'},{available:true,status:'ok'},{available:false,status:'unavailable'},
+  undefined].map(healthChip)));"""
+        out = json.loads(subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20).stdout)
+        self.assertEqual(out[:3], [{"text": "UNDERVOLT", "cls": "bad"}, {"text": "THROTTLED", "cls": "warn"},
+                                   {"text": "HAD UNDERVOLT", "cls": "stale"}])
+        self.assertEqual(out[3:], [None, None, None])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

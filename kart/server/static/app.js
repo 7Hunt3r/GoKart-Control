@@ -35,6 +35,15 @@ function setChip(id, text, c) { txt(id, text); cls($(id), "chip " + (c || "")); 
 function show(id, on) { $(id).classList.toggle("hidden", !on); }
 function cfg(k, d) { return S && S.config && !nul(S.config[k]) ? S.config[k] : d; }
 /* pit chip colour from how well the kart hears the pit (base_rssi, dBm): > -90 green, > -105 amber, else red */
+/* server.health -> null (nothing to show) or {text, cls}: same rule and words as the pit pages
+   (pit/server/static/watch.js healthChip), in the driver page's capitals. Shown only when wrong. */
+function healthChip(h) {
+  if (!h || !h.available) return null;
+  if (h.status === "undervolt") return { text: "UNDERVOLT", cls: "bad" };
+  if (h.status === "throttled") return { text: "THROTTLED", cls: "warn" };
+  if (h.status === "had_undervolt") return { text: "HAD UNDERVOLT", cls: "stale" };
+  return null;
+}
 function pitSignalClass(rssi) {
   if (nul(rssi)) return "";
   return rssi > -90 ? "ok" : rssi > -105 ? "warn" : "bad";
@@ -91,6 +100,11 @@ function render() {
   else if (g.fix_fresh) setChip("gpsChip", `GPS ${nul(g.sats_now) ? "" : g.sats_now}${g.gps_hz === 5 ? " 5Hz" : ""}`, "ok");
   else setChip("gpsChip", "NO FIX", "warn");
   show("linkChip", !linkUp); show("pitChip", linkUp); show("vescChip", linkUp); show("gpsChip", linkUp);
+  // Pi power health (vcgencmd get_throttled): only when something is wrong; the row compacts to fit 380 px
+  const hc = healthChip(S.server.health);
+  if (hc) setChip("healthChip", hc.text, "health " + hc.cls);
+  show("healthChip", !!hc);
+  cls($("chips"), hc ? "chips crowded" : "chips");
 
   // speed: GPS ground speed from a fresh fix only; the arc falls back to wheel mph when there is no fix
   const d = me.derived || {};

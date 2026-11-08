@@ -34,7 +34,7 @@ def free_port():
 
 
 class Stack:
-    def __init__(self, sim_args=(), pit=True, zones=None):
+    def __init__(self, sim_args=(), pit=True, zones=None, config=None):
         self.tmp = tempfile.TemporaryDirectory()
         t = self.tmp.name
         self.procs = []
@@ -66,7 +66,7 @@ class Stack:
         self.logs = os.path.join(t, "logs")
         cfg = os.path.join(t, "config.json")
         with open(cfg, "w") as f:
-            json.dump({"map_poll_s": 2, "kart_id": 2}, f)
+            json.dump(dict({"map_poll_s": 2, "kart_id": 2}, **(config or {})), f)
         self.procs.append(subprocess.Popen(
             [sys.executable, "-I", SERVER, "--tcp", first[1], "--bind", "127.0.0.1", "--http-port", str(self.port),
              "--config", cfg, "--log-dir", self.logs, "--cache-dir", os.path.join(t, "cache"), "--pit-url", pit_url],
@@ -551,6 +551,59 @@ class ServerPieces(unittest.TestCase):
                 a2.stopping.set(); a2.maps.stop()
             finally:
                 self.ks.Link = real_link
+
+
+class PiHealthE2E(unittest.TestCase):
+    """server.health in /api/state from the sampling thread (health_file stands in for vcgencmd)."""
+
+    def test_health_field_transitions_and_chip(self):
+        tmp = tempfile.mkdtemp()
+        hf = os.path.join(tmp, "throttled")
+        with open(hf, "w") as f:
+            f.write("throttled=0x0\n")
+        st = Stack(["--nofix"], pit=False, config={"health_file": hf, "health_period_s": 0.3})
+        try:
+            h = st.wait(lambda s: s["server"]["health"]["status"] == "ok", what="health ok")["server"]["health"]
+            self.assertTrue(h["available"])
+            self.assertEqual(h["throttled"], "0x0")
+            with open(hf, "w") as f:
+                f.write("throttled=0x50005\n")
+            h = st.wait(lambda s: s["server"]["health"]["status"] == "undervolt", what="undervolt")["server"]["health"]
+            self.assertEqual(h["throttled"], "0x50005")
+            for k in ("undervolt_now", "throttled_now", "undervolt_since_boot", "throttled_since_boot"):
+                self.assertTrue(h["flags"][k], k)
+            # demo mode still works and the (real) Pi health stays in the state
+            code, body = st.request("POST", "/api/demo", {"on": True})
+            self.assertEqual(code, 200, body)
+            s = st.wait(lambda s: s["demo"]["active"], what="demo on")
+            self.assertEqual(s["server"]["health"]["status"], "undervolt")
+            self.assertEqual(st.request("POST", "/api/demo", {"on": False})[0], 200)
+            with open(hf, "w") as f:
+                f.write("throttled=0x50000\n")
+            st.wait(lambda s: s["server"]["health"]["status"] == "had_undervolt", what="had_undervolt")
+            body = st.request("GET", "/")[1]
+            self.assertIn(b'id="healthChip"', body)
+            self.assertIn(b"healthChip(S.server.health)", st.request("GET", "/static/app.js")[1])
+            time.sleep(1.2)                                             # session log flushes at least once a second
+            ev = []
+            for name in sorted(os.listdir(st.logs)):
+                with open(os.path.join(st.logs, name)) as f:
+                    ev += [(r["prev"], r["status"]) for r in map(json.loads, f) if r.get("what") == "health"]
+            self.assertEqual(ev, [("ok", "undervolt"), ("undervolt", "had_undervolt")])
+        finally:
+            st.close()
+            shutil.rmtree(tmp)
+
+    def test_health_unavailable_off_pi(self):
+        if shutil.which("vcgencmd"):
+            self.skipTest("running on a Pi")
+        st = Stack(["--nofix"], pit=False)
+        try:
+            h = st.state()["server"]["health"]
+            self.assertFalse(h["available"])
+            self.assertEqual(h["status"], "unavailable")
+        finally:
+            st.close()
 
 
 if __name__ == "__main__":

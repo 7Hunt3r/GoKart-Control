@@ -21,6 +21,9 @@ HTTP (default 0.0.0.0:8081; the kiosk uses 127.0.0.1):
   /map/<file>   cached course imagery;  /map/package.json  the cached package
   /map/zones.json  the cached game zones (pit/server/map/ZONES.md), 404 when none
   /healthz      "ok"
+Pi power health (health.py, a byte-identical copy of pit/server/health.py): vcgencmd
+get_throttled + CPU temperature every health_period_s, in state server.health; status
+transitions go to the session log and the journal. Off a Pi it reports "unavailable".
 Session logs: <kart>/logs/session-*.jsonl (every serial line both ways, every request,
 every game event and every game command).
 
@@ -46,6 +49,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import health  # noqa: E402
 import kartcore  # noqa: E402
 from demo import Demo  # noqa: E402
 from link import Link  # noqa: E402
@@ -80,6 +84,8 @@ DEFAULTS = {
     "sound": True,                      # driver page: synthesized game sounds (WebAudio, static/sound.js)
     "sound_volume": 0.8,                # master volume of those sounds, 0-1
     "rotate": 0,                        # install.sh only: 180 = panel mounted ports-down (kernel + touch rotation)
+    "health_period_s": health.PERIOD_S, # vcgencmd get_throttled + CPU temp sample period (Pi only)
+    "health_file": None,                # tests/dev: read the get_throttled text from this file instead of vcgencmd
 }
 # config sanity: (type, min, max) for numbers; a bad value is replaced by the default and reported
 CONFIG_RULES = {
@@ -87,6 +93,7 @@ CONFIG_RULES = {
     "follow_resume_s": (float, 1, 600), "mode_hold_ms": (int, 0, 5000), "map_fps": (int, 1, 30),
     "http_port": (int, 1, 65535), "status_poll_s": (float, 5, 3600), "max_log_mb": (float, 10, 100000),
     "demo_max_s": (float, 10, 3600), "sound_volume": (float, 0, 1), "rotate": (int, 0, 180),
+    "health_period_s": (float, 0.2, 3600),
 }
 CONFIG_BOOLS = ("beginner_mode", "remote_cmd", "game", "gps_correction", "demo", "sound")
 CONFIG_CHOICES = {"map_orientation": ("heading_up", "north_up"), "rotate": (0, 180)}
@@ -99,6 +106,13 @@ SSE_SKIP = ("heltec", "rx_lines", "rx_bad", "gps_lines", "kiosk")   # /api/state
 DEMO_FINISH_LAPS = 3                    # demo mode: FINISH (P1) after this many laps
 PUBLIC_CFG = ("kart_id", "beginner_mode", "map_orientation", "follow_span_m", "follow_resume_s",
               "mode_hold_ms", "map_fps", "game", "sound", "sound_volume", "demo")
+
+
+def _file_reader(path):
+    def read():
+        with open(path) as f:
+            return f.read()
+    return read
 
 
 def wall_iso(ts=None):
@@ -274,7 +288,9 @@ class App:
         self.config_warnings = []
         self.kiosk = None                  # last heartbeat from the driver page on this Pi (frame stats)
         self.kiosk_mono = None
-        self.log.write("event", what="server_start", version=VERSION, pid=os.getpid(),
+        self.health = health.Health(reader=_file_reader(cfg["health_file"]) if cfg.get("health_file") else "auto",
+                                    on_change=self._on_health)
+        self.log.write("event", what="server_start", version=VERSION, pid=os.getpid(), health=self.health.available,
                        source=cfg.get("tcp") or cfg.get("serial_port") or "auto",
                        config={k: cfg.get(k) for k in PUBLIC_CFG + ("pit_urls",)})
 
@@ -489,6 +505,24 @@ class App:
         self.link.start()
         self.maps.start()
         threading.Thread(target=self._ticker, name="ticker", daemon=True).start()
+        threading.Thread(target=self._health_loop, name="health", daemon=True).start()
+
+    def _health_loop(self):
+        period = max(0.2, float(self.cfg.get("health_period_s") or health.PERIOD_S))
+        while not self.stopping.is_set():
+            try:
+                self.health.sample()
+            except Exception as e:          # never let a sensor problem kill the thread
+                print(f"{wall_iso()} health sample failed: {e!r}", flush=True)
+            if self.stopping.wait(period):
+                break
+
+    def _on_health(self, prev, snap):
+        """Status transitions go to the session log and the journal (same as the pit server)."""
+        self.log.write("event", what="health", status=snap["status"], prev=prev,
+                       throttled=snap["throttled"], temp_c=snap["temp_c"])
+        print(f"{wall_iso()} health {prev} -> {snap['status']} throttled={snap['throttled']} "
+              f"temp={snap['temp_c']}C", flush=True)
 
     def _ticker(self):
         while not self.stopping.wait(0.25):
@@ -555,6 +589,7 @@ class App:
         d.update({
             "server": {"version": VERSION, "time": wall_iso(), "log_file": os.path.basename(self.log.path),
                        "log_errors": self.log.errors, "config_warnings": self.config_warnings,
+                       "health": self.health.snapshot(),
                        "link": {"connected": self._connected(),
                                 # "up" | "reconnecting" (was up, retrying) | "connecting" (never up yet) | "demo"
                                 "state": "demo" if dm is not None else lsnap.get("state",

@@ -450,6 +450,16 @@ Hostname `gokart-kart-N` (`gokart-kart-N.local`), user `kart`, app in
   both. **Documented, not enabled on kart 2, and not yet tried on a panel**: if cage/wlroots does
   not honour the kernel rotation, the fallback is cage's own `-r -r` in the kiosk unit (the touch
   rule would then have to go).
+- **Pi power health chip** (same module and rule as the pit, `server/health.py` is a byte-identical
+  copy of `pit/server/health.py`): the server samples `vcgencmd get_throttled` and the CPU
+  temperature every `health_period_s` (default 10 s; `health_file` = tests/dev only, read the
+  get_throttled text from a file) into `/api/state` `server.health`, and logs every status change
+  to the session log and the journal (`health ok -> undervolt throttled=0x50005 ...`). The driver
+  page shows a chip after GPS only when something is wrong: red UNDERVOLT (under-voltage now), amber
+  THROTTLED (frequency capped / throttled / soft temperature limit now), dim HAD UNDERVOLT (only the
+  since-boot bit); while it shows, the chip row shrinks to 12 px so it still fits the 380 px column.
+  Off a Pi (Mac, tests) the status is "unavailable" and there is no chip. The kart Pi needs a
+  5 V 3 A supply; the Pi 3 B on the bench browned out with the panel alone, 2026-11-07.
 
 ```sh
 journalctl -u gokart-kart -f
