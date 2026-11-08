@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -513,8 +514,18 @@ class ServerPieces(unittest.TestCase):
             real.on_line('{"t":"self","kart":2,"fix":true,"lat":41.09,"lon":-73.41}')
             self.assertEqual(app.state()["self"]["gps"]["last_fix"]["lat"], 41.09)
             app.maps.stop()
+            # the simulator's reader thread may still be delivering a line that was in flight at
+            # demo_stop: wait for it, then make sure it did not save the simulated kart's game timing
+            # as the real kart's (game-state.json lives next to the cache dir)
+            for _ in range(150):
+                if not any(t.name.startswith("demo-") for t in threading.enumerate()):
+                    break
+                time.sleep(0.02)
+            self.assertFalse(os.path.exists(os.path.join(tmp.name, "game-state.json")),
+                             "a late demo line wrote the simulator's game state")
         finally:
             self.ks.Link = real_link
+            app.log.close()
             tmp.cleanup()
 
     def test_game_timing_survives_server_restart(self):

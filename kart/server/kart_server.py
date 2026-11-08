@@ -450,7 +450,7 @@ class App:
             d = self.demo
             demo_finish = (demo and d is not None and not self.game.race["finished"]
                            and any(r.get("ev") == "lap" and r.get("lap", 0) >= DEMO_FINISH_LAPS for r in game))
-        self._game_out(game)
+        self._game_out(game, demo=demo)
         if demo_finish:                    # demo: after 3 laps the simulated pit flags the kart home in P1
             d.write_text("finish 1")
             self.log.write("event", what="demo_finish", laps=DEMO_FINISH_LAPS, position=1)
@@ -484,8 +484,11 @@ class App:
     def _connected(self):
         return True if self.demo is not None else self.link.connected
 
-    def _game_out(self, recs):
-        """Log every game record; send the command lines (outside the app lock)."""
+    def _game_out(self, recs, demo=False):
+        """Log every game record; send the command lines (outside the app lock). demo=True marks
+        records from a simulated line: they are never saved as the real kart's game state, even if
+        the demo was stopped while the line was in flight (the reader thread could otherwise write
+        the simulator's laps/race into game-state.json a few ms after demo_stop)."""
         for r in recs:
             if r["ev"] == "cmd":
                 sent = self._connected() and self._send_text(r["line"], wait=False)
@@ -497,7 +500,7 @@ class App:
         if recs:
             self._state_cache = (0.0, b"{}")
             self._parts_cache = (0.0, {})
-            if self.demo is None and any(r["ev"] in kartcore.GAME_TIMING_EVENTS for r in recs):
+            if not demo and self.demo is None and any(r["ev"] in kartcore.GAME_TIMING_EVENTS for r in recs):
                 self._save_game_state()
 
     # -- background ------------------------------------------------------------
