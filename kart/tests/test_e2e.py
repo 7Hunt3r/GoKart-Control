@@ -207,7 +207,8 @@ class EndToEnd(unittest.TestCase):
         try:
             code, body = st.request("GET", "/")
             for marker in (b'id="speedo"', b'id="gear"', b'id="boostMeter"', b'id="lapPanel"', b'id="gameChip"',
-                           b'id="flash"', b'id="stopBanner"', b'id="slowBanner"', b'id="connBanner"'):
+                           b'id="flash"', b'id="stopBanner"', b'id="slowBanner"', b'id="connBanner"',
+                           b'id="sunBtn"'):
                 self.assertIn(marker, body)
             s = st.wait(lambda s: s["game"]["on"], what="game on (zones fetched)")
             self.assertEqual(s["map"]["zones"]["version"], 1)
@@ -410,12 +411,13 @@ class ServerPieces(unittest.TestCase):
         self.assertTrue(os.path.exists(log.path))
 
     def test_config_validation(self):
-        cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS, map_fps=500, kart_id=9, sound="yes", bogus=1,
+        cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS, map_fps=500, kart_id=9, sound="yes", sun_mode=1, bogus=1,
                                               map_orientation="sideways", rotate=90, pit_urls="http://x"))
-        self.assertEqual((cfg["map_fps"], cfg["kart_id"], cfg["sound"], cfg["map_orientation"], cfg["rotate"]),
-                         (10, 2, True, "heading_up", 0))
+        self.assertEqual((cfg["map_fps"], cfg["kart_id"], cfg["sound"], cfg["sun_mode"], cfg["map_orientation"], cfg["rotate"]),
+                         (10, 2, True, True, "heading_up", 0))
         self.assertEqual(cfg["pit_urls"], ["http://x"])
-        self.assertEqual(len(w), 6, w)
+        self.assertEqual(len(w), 7, w)
+        self.assertIs(self.ks.validate_config(dict(self.ks.DEFAULTS, sun_mode=False))[0]["sun_mode"], False)
         cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS))
         self.assertEqual(w, [])
         with tempfile.TemporaryDirectory() as d:

@@ -299,6 +299,15 @@ two 14 px note lines (mode read-back, last command), the boost meter (only while
 stopped) and the red VESC fault pill; sound controls bottom-right (at most 248 px, TEST SOUND wraps
 above); NO GPS FIX YET in the middle of the map; the map note footer along the bottom edge. The
 LAST | BEST strip and the speed / battery notes stay in the page (app.js fills them) but are not shown.
+**SUN mode** (2026-11-09; the 7" panel cannot be made brighter: OSD only, no DDC/CI): `body.sun`, on
+by default (`sun_mode`), toggled by the SUN button under ALL in the map buttons and remembered per
+device in localStorage `gk_sun` (once tapped, it beats the config). Every HUD surface becomes opaque
+black with a 3 px white edge (inset shadows, so nothing moves or resizes), text pure white, the
+active mode button and the gear badge #ffd400 with black text, a pending request dashed blue on
+black, speed digits 104 viewBox units (~63 px) with a black stroke. On the map: the photo is drawn
+with `contrast(1.35) saturate(1.3) brightness(1.08)` (once per cached-layer build), the track band
+15 % wider with a 3 px black edge, the own-kart arrow with a 3 px black ring outside its white
+outline, an opaque scale bar and map note. Sun off is the night/normal look above.
 The speed card: 0-30 mph arc, GPS mph (~58 px italic; wheel mph,
 labelled WHEEL, only when there is no GPS fix), the mode as a gear badge (E / N / S,
 dashed blue while a request is pending), a BOOST meter (the live VESC current
@@ -541,6 +550,7 @@ by the default and reported in the journal (`CONFIG: ...`), the session log and 
 | `game` / `gps_correction` | true / false | game layer; pit-base position correction |
 | `demo` / `demo_max_s` | true / 180 | demo mode allowed; its length |
 | `sound` / `sound_volume` | true / 0.8 | page sounds |
+| `sun_mode` | true | SUN theme by default (the SUN button overrides it per device) |
 | `rotate` | 0 | install.sh only: 180 = ports-down mount |
 
 ### Troubleshooting

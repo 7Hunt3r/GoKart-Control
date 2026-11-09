@@ -34,6 +34,19 @@ function svgCls(el, v) { if (el.getAttribute("class") !== v) el.setAttribute("cl
 function setChip(id, text, c) { txt(id, text); cls($(id), "chip " + (c || "")); }
 function show(id, on) { $(id).classList.toggle("hidden", !on); }
 function cfg(k, d) { return S && S.config && !nul(S.config[k]) ? S.config[k] : d; }
+/* SUN theme (body.sun, style.css): opaque HUD, white borders, yellow active mode, contrast-boosted map
+   photo. Config sun_mode (default on); once the driver taps SUN, this device's choice (gk_sun) wins. */
+let sunPref = (() => { try { const v = localStorage.getItem("gk_sun"); return v === "1" ? true : v === "0" ? false : null; } catch (e) { return null; } })();
+let sunOn = null;
+function sunApply() {
+  const on = sunPref !== null ? sunPref : cfg("sun_mode", true) !== false;
+  if (on === sunOn) return;
+  sunOn = on;
+  document.body.classList.toggle("sun", on);
+  const b = $("sunBtn");
+  if (b) b.classList.toggle("sel", on);
+  if (typeof requestDraw === "function" && S) requestDraw();     // the layer key includes sunOn: photo filter, band
+}
 /* pit chip colour from how well the kart hears the pit (base_rssi, dBm): > -90 green, > -105 amber, else red */
 /* server.health -> null (nothing to show) or {text, cls}: same rule and words as the pit pages
    (pit/server/static/watch.js healthChip), in the driver page's capitals. Shown only when wrong. */
@@ -176,7 +189,7 @@ function render() {
 
   renderGame(game, fresh, st);
   renderRace((game && game.race) || {});
-  sndConfig(); sndUi(); soundTest(S.sound_test);
+  sndConfig(); sndUi(); soundTest(S.sound_test); sunApply();
   show("sndTest", !!dm.active);
   // pulses (BOOST label, USB link chip) flip with each render (5 Hz) instead of a 60 fps CSS animation:
   // on a Pi 3 B every animated frame is a full GPU composite
@@ -600,9 +613,10 @@ function drawTrack(ctx, en, px, dim) {          // cached layer: band, edge, dir
   const t = S.game && S.game.track;
   if (!t || !t.points || t.points.length < 2) return;
   const P = t.points.map((p) => en(p[0], p[1]));
-  const w = trackWidthPx(t);
+  const w = trackWidthPx(t) * (sunOn ? 1.15 : 1);              // sun: 15 % wider band with a 3 px black edge
   ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
-  trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "rgba(0,70,90,.55)"; ctx.lineWidth = w + 5; ctx.stroke();
+  if (sunOn) { trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "#000"; ctx.lineWidth = w + 6; ctx.stroke(); }
+  else { trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "rgba(0,70,90,.55)"; ctx.lineWidth = w + 5; ctx.stroke(); }
   trackPath(ctx, P, t.closed, px); ctx.strokeStyle = dim ? "rgba(0,229,255,.28)" : "rgba(0,229,255,.5)"; ctx.lineWidth = w; ctx.stroke();
   const cs = Math.max(5, Math.min(15, w * 0.42));     // direction chevrons, a little larger than the band edge
   trackChevrons(t.points, t.closed, en, 15).forEach(([e, n, hd]) => {
@@ -632,7 +646,7 @@ function drawTrackAhead(ctx, en, px, mePos) {
   for (let i = k + 1; i < seq.length && acc < 80; i++) { acc += Math.hypot(seq[i][0] - seq[i - 1][0], seq[i][1] - seq[i - 1][1]); ahead.push(seq[i]); }
   if (ahead.length < 2) return;
   ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
-  trackPath(ctx, ahead, false, px); ctx.strokeStyle = "rgba(0,240,255,.75)"; ctx.lineWidth = trackWidthPx(t); ctx.stroke();
+  trackPath(ctx, ahead, false, px); ctx.strokeStyle = "rgba(0,240,255,.75)"; ctx.lineWidth = trackWidthPx(t) * (sunOn ? 1.15 : 1); ctx.stroke();
   ctx.restore();
 }
 
@@ -873,6 +887,7 @@ function drawMap() {
       ctx.rotate(hd);
       ctx.beginPath(); ctx.moveTo(0, -34); ctx.lineTo(22, 22); ctx.lineTo(0, 11); ctx.lineTo(-22, 22); ctx.closePath();
     } else { ctx.beginPath(); ctx.arc(0, 0, 18, 0, 2 * Math.PI); }
+    if (sunOn) { ctx.lineJoin = "round"; ctx.lineWidth = 15; ctx.strokeStyle = "#000"; ctx.stroke(); }   // sun: 3 px black outside the white
     ctx.save();
     ctx.shadowColor = "rgba(0,0,0,.65)"; ctx.shadowBlur = 10; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 4;
     ctx.lineJoin = "round"; ctx.lineWidth = 9; ctx.strokeStyle = "#f2f2f2"; ctx.stroke();
@@ -889,7 +904,8 @@ function drawMap() {
 
   // scale bar (bottom-left, just above the HUD speed card: style.css .speedo is bottom 22 + 156 tall) + north arrow
   const step = niceStep(90 / view.scale), len = step * view.scale, sb = H - 208;
-  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(8, sb, len + 70, 26);
+  ctx.fillStyle = sunOn ? "#000" : "rgba(0,0,0,.55)"; ctx.fillRect(8, sb, len + 70, 26);
+  if (sunOn) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(9, sb + 1, len + 68, 24); }
   ctx.strokeStyle = "#e6e6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(14, sb + 18); ctx.lineTo(14 + len, sb + 18); ctx.stroke();
   ctx.fillStyle = "#e6e6e6"; ctx.font = "bold 14px sans-serif"; ctx.fillText(`${step} m`, 20 + len, sb + 22);
   // north compass: top-right, under the map buttons, 1.5x the old size (r 30)
@@ -916,7 +932,7 @@ function layerKey(pkg, headingUp, dpr) {
   const g = S.game || {}, t = g.track;
   return [mapGen, mapImgSrc, mapImgReady, !!g.on, (g.inside || []).join("|"),
     t ? t.points.length + ":" + t.width_m + ":" + t.closed + ":" + t.points[0] + ":" + t.points[t.points.length - 1] : "",
-    headingUp, dpr, pkg && pkg.origin ? pkg.origin.lat + "," + pkg.origin.lon : ""].join(";");
+    headingUp, dpr, sunOn, pkg && pkg.origin ? pkg.origin.lat + "," + pkg.origin.lon : ""].join(";");
 }
 function ensureLayer(en, pkg, W, H, cyS, dpr, headingUp) {
   const reach = Math.hypot(W / 2, Math.max(cyS, H - cyS));        // view centre -> farthest screen corner
@@ -945,7 +961,9 @@ function ensureLayer(en, pkg, W, H, cyS, dpr, headingUp) {
     const x0 = Math.max(0, p0[0]), y0 = Math.max(0, p0[1]), x1 = Math.min(2 * half, p1[0]), y1 = Math.min(2 * half, p1[1]);
     if (x1 > x0 && y1 > y0 && dw > 0 && dh > 0) {            // only the part of the photo inside the layer
       ctx.imageSmoothingQuality = "medium";
+      if (sunOn) ctx.filter = "contrast(1.35) saturate(1.3) brightness(1.08)";   // sun: once per layer build, cheap
       ctx.drawImage(mapImg, (x0 - p0[0]) / dw * iw, (y0 - p0[1]) / dh * ih, (x1 - x0) / dw * iw, (y1 - y0) / dh * ih, x0, y0, x1 - x0, y1 - y0);
+      ctx.filter = "none";
     }
   }
   if (pkg && pkg.course && pkg.course.length > 1) {
@@ -1098,7 +1116,13 @@ function touched() {
 })();
 
 document.querySelector(".mapctl").addEventListener("click", (e) => {
-  const b = e.target.closest("button"); if (!b || !S) return;
+  const b = e.target.closest("button");
+  if (b && b.id === "sunBtn") {
+    sunPref = !sunOn;
+    try { localStorage.setItem("gk_sun", sunPref ? "1" : "0"); } catch (err) { /* per-device convenience only */ }
+    sunApply(); return;
+  }
+  if (!b || !S) return;
   if (b.id === "followBtn") {
     userFollow = !userFollow;
     try { localStorage.setItem("gk_follow", userFollow ? "1" : "0"); } catch (err) { /* ignore */ }
@@ -1112,6 +1136,7 @@ document.querySelector(".mapctl").addEventListener("click", (e) => {
   }
   requestDraw();
 });
+sunApply();                                      // before the first frame: no flash of the night theme
 try { if (localStorage.getItem("gk_follow") === "0") { userFollow = false; view.follow = false; } } catch (err) { /* ignore */ }
 
 /* -------------------------------------------------------------- wiring */

@@ -25,6 +25,7 @@
     "demo_max_s": "Demo ends by itself after this many seconds.",
     "sound": "Game sounds on the driver page (WebAudio through the HDMI panel speakers).",
     "sound_volume": "Master volume of those sounds, 0-1.",
+    "sun_mode": "Driver page SUN theme by default: opaque black HUD with white borders, yellow active mode, contrast-boosted map photo (the 7 inch panel's backlight cannot be raised). The SUN map button toggles it per device and its last setting wins.",
     "rotate": "0 or 180. Read by install.sh only: 180 = panel mounted ports-down (kernel video= rotate + touch calibration udev rule; reboot). Kart 2 runs 0.",
     "health_period_s": "Seconds between Pi power/thermal samples (vcgencmd get_throttled + CPU temperature, 0.2-3600). The driver page shows UNDERVOLT / THROTTLED / HAD UNDERVOLT only when something is wrong; transitions are logged.",
     "health_file": "Tests/dev only: read the get_throttled text from this file instead of vcgencmd (null on a kart)."
@@ -56,6 +57,7 @@
   "demo_max_s": 180,
   "sound": true,
   "sound_volume": 0.8,
+  "sun_mode": true,
   "rotate": 0,
   "health_period_s": 10.0,
   "health_file": null

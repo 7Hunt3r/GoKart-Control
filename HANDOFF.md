@@ -425,6 +425,9 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   matters, sound bottom-right; the canvas scale bar moved above the speed card (one app.js line).
   Headless 1024x600 screenshots only (simulator: driving, no fix, no VESC, STOPPED, SLOW, race,
   finish, roulette, under-voltage); not yet deployed to kart 2 or tried with gloves in sun.
+- Kart display SUN mode (the panel's backlight cannot be raised): opaque black HUD with white edges,
+  yellow active mode/gear, contrast-boosted map photo, wider outlined track band; on by default
+  (`sun_mode`), SUN map button toggles it per device. Headless screenshots only, not yet seen in sun.
 
 ## Collaboration and delivery state
 

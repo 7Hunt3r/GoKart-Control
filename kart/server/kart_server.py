@@ -83,6 +83,7 @@ DEFAULTS = {
     "demo_max_s": 180,                  # demo ends by itself after this
     "sound": True,                      # driver page: synthesized game sounds (WebAudio, static/sound.js)
     "sound_volume": 0.8,                # master volume of those sounds, 0-1
+    "sun_mode": True,                   # driver page: opaque high-contrast SUN theme (the SUN button overrides it per device)
     "rotate": 0,                        # install.sh only: 180 = panel mounted ports-down (kernel + touch rotation)
     "health_period_s": health.PERIOD_S, # vcgencmd get_throttled + CPU temp sample period (Pi only)
     "health_file": None,                # tests/dev: read the get_throttled text from this file instead of vcgencmd
@@ -95,7 +96,7 @@ CONFIG_RULES = {
     "demo_max_s": (float, 10, 3600), "sound_volume": (float, 0, 1), "rotate": (int, 0, 180),
     "health_period_s": (float, 0.2, 3600),
 }
-CONFIG_BOOLS = ("beginner_mode", "remote_cmd", "game", "gps_correction", "demo", "sound")
+CONFIG_BOOLS = ("beginner_mode", "remote_cmd", "game", "gps_correction", "demo", "sound", "sun_mode")
 CONFIG_CHOICES = {"map_orientation": ("heading_up", "north_up"), "rotate": (0, 180)}
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
@@ -105,7 +106,7 @@ SSE_PERIOD_S = 0.2
 SSE_SKIP = ("heltec", "rx_lines", "rx_bad", "gps_lines", "kiosk")   # /api/state only (the page does not use them)
 DEMO_FINISH_LAPS = 3                    # demo mode: FINISH (P1) after this many laps
 PUBLIC_CFG = ("kart_id", "beginner_mode", "map_orientation", "follow_span_m", "follow_resume_s",
-              "mode_hold_ms", "map_fps", "game", "sound", "sound_volume", "demo")
+              "mode_hold_ms", "map_fps", "game", "sound", "sound_volume", "demo", "sun_mode")
 
 
 def _file_reader(path):
