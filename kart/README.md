@@ -594,3 +594,14 @@ Delete `sdcard/build/` after flashing; it contains secrets.
 
 Known gaps: the Pi 3 B's Wi-Fi is 2.4 GHz only, so `McLab` must offer 2.4 GHz;
 `optional: false` makes first boot wait for Wi-Fi.
+
+### Wi-Fi survives power cuts (2026-11-09)
+
+`install.sh` now writes the Wi-Fi as plain NetworkManager keyfiles (`tools/wifi_profiles.py`, the pit's
+hardening) and makes the journal persistent (`tools/journal_persist.sh`). Before this the first boot ran
+`nmcli connection modify` on the cloud-init profile, which moves it into `/etc/netplan/90-NM-*.yaml`; a
+power cut can leave that file empty and the Pi comes back with no Wi-Fi. Kart 2 lost its Wi-Fi exactly
+that way on 2026-11-09 after brown-out reboots (Pi 3 B on a weak 5 V supply). The SSID list comes from
+`/etc/gokart-kart/wifi.env` (pushed by `deploy.sh HOST --install` from `sdcard/secrets.env`, root-only,
+passwords never printed). A kart Pi that has already lost Wi-Fi needs a wire once: plug its Ethernet
+into a port with DHCP, then `kart/deploy.sh <ip> --install`.

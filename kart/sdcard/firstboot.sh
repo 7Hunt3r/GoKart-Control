@@ -14,16 +14,10 @@ echo "--- kart display app (packages, services, udev, kiosk, HDMI mode)"
 # The kiosk starts after the automatic reboot; don't light the screen mid-install.
 GOKART_NO_KIOSK_RESTART=1 bash "$APP/install.sh" "$USER_NAME" "$KART_ID" || echo "WARN: install.sh failed (see above)"
 
-echo "--- wifi preference: $PRIMARY_SSID first"
-if command -v nmcli >/dev/null; then
-  nmcli -t -f NAME,TYPE connection show | while IFS=: read -r name type; do
-    [ "$type" = "802-11-wireless" ] || continue
-    ssid="$(nmcli -g 802-11-wireless.ssid connection show "$name")"
-    prio=10; [ "$ssid" = "$PRIMARY_SSID" ] && prio=20
-    nmcli connection modify "$name" connection.autoconnect-priority "$prio" \
-      && echo "  $ssid -> priority $prio" || echo "WARN: could not set priority on $name"
-  done
-fi
+echo "--- wifi: persistent keyfiles are written by install.sh from /etc/gokart-kart/wifi.env ($PRIMARY_SSID first)"
+# Do NOT `nmcli connection modify` the netplan-generated profiles (the pit lost its Wi-Fi that way on
+# 2026-11-06, kart 2 on 2026-11-09): NetworkManager moves them into /etc/netplan/90-NM-*.yaml and a
+# power cut can leave that file empty. tools/wifi_profiles.py writes plain keyfiles instead.
 
 echo "--- tailscale (optional)"
 if [ -s /root/tailscale.key ] && [ "$(tr -d '[:space:]"' < /root/tailscale.key)" != "" ]; then

@@ -17,6 +17,13 @@ rsync -av --delete \
   --exclude '__pycache__/' --exclude '.DS_Store' \
   ./ "$U@$HOST:/opt/gokart-kart/"
 if [ "${2:-}" = "--install" ]; then
+  # Wi-Fi list for the persistent NetworkManager keyfiles (install.sh -> tools/wifi_profiles.py):
+  # only the WIFI_* lines of sdcard/secrets.env, over ssh stdin, root-only on the Pi. GOKART_NO_WIFI_PUSH=1 skips.
+  if [ "${GOKART_NO_WIFI_PUSH:-0}" != 1 ] && [ -s sdcard/secrets.env ] && grep -qE '^WIFI_SSID=.+' sdcard/secrets.env; then
+    grep -E '^(WIFI2?_(SSID|PASSWORD)|WIFI_COUNTRY)=' sdcard/secrets.env | ssh "$U@$HOST" \
+      'sudo install -d -m 700 /etc/gokart-kart && sudo sh -c "umask 077; cat > /etc/gokart-kart/wifi.env.tmp && mv /etc/gokart-kart/wifi.env.tmp /etc/gokart-kart/wifi.env"' \
+      && echo "pushed WIFI_* lines -> /etc/gokart-kart/wifi.env"
+  fi
   ssh -t "$U@$HOST" "sudo bash /opt/gokart-kart/install.sh $U"
 else
   ssh -t "$U@$HOST" "sudo systemctl restart gokart-kart gokart-kart-kiosk && systemctl --no-pager status gokart-kart | head -5"

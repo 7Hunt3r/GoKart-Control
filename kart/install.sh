@@ -19,6 +19,44 @@ warn() { echo "WARN: $*"; WARN=1; }
 id "$KART_USER" >/dev/null 2>&1 || { echo "user $KART_USER does not exist"; exit 1; }
 echo "=== gokart-kart install $(date) user=$KART_USER src=$SRC"
 
+# Network + journal first: they matter most after a bad reboot and need nothing from apt.
+echo "--- journal: persistent across reboots, capped at 200M"
+sh "$SRC/tools/journal_persist.sh" || warn "journal_persist failed"
+
+echo "--- network: persistent NetworkManager keyfiles (Wi-Fi + eth0 DHCP fallback)"
+# Same hardening as pit/install.sh. The 2026-11-06 pit failure: `nmcli connection modify` on the
+# cloud-init Wi-Fi profile moved it into /etc/netplan/90-NM-*.yaml, and power cuts left that file
+# 0 bytes, so the Pi came back with no Wi-Fi. Kart 2 lost its Wi-Fi the same way on 2026-11-09 after
+# brown-out reboots. The Wi-Fi list comes from /etc/gokart-kart/wifi.env (pushed by deploy.sh
+# --install, or written by cloud-init), GOKART_WIFI_ENV, or a copy of sdcard/secrets.env next to
+# this script. Only the WIFI_* lines are kept, root-only. Passwords are never printed.
+WIFI_ENV=/etc/gokart-kart/wifi.env
+for f in "${GOKART_WIFI_ENV:-}" "$SRC/sdcard/secrets.env"; do
+  if [ -n "$f" ] && [ -s "$f" ] && [ "$f" != "$WIFI_ENV" ] && grep -qE '^WIFI_SSID=.+' "$f"; then
+    install -d -m 700 /etc/gokart-kart
+    ( umask 077; grep -E '^(WIFI2?_(SSID|PASSWORD)|WIFI_COUNTRY)=' "$f" > "$WIFI_ENV.tmp" ) && mv "$WIFI_ENV.tmp" "$WIFI_ENV"
+    echo "wifi env: WIFI_* lines from $f -> $WIFI_ENV"
+    break
+  fi
+done
+if ! command -v nmcli >/dev/null; then
+  warn "nmcli not found: Wi-Fi profiles not written"
+elif [ -s "$WIFI_ENV" ]; then
+  chmod 600 "$WIFI_ENV"
+  python3 "$SRC/tools/wifi_profiles.py" "$WIFI_ENV" || warn "wifi_profiles.py failed (Wi-Fi profile not written)"
+else
+  echo "no $WIFI_ENV: Wi-Fi profiles left as they are (only the eth0 fallback is ensured)"
+  python3 "$SRC/tools/wifi_profiles.py" /dev/null || warn "wifi_profiles.py failed"
+fi
+# NetworkManager-written netplan files that a power cut left at 0 bytes
+for y in /etc/netplan/90-NM-*.yaml; do
+  [ -f "$y" ] && [ ! -s "$y" ] && rm -f "$y" && echo "removed empty $y"
+done
+# cloud-init must never rewrite the network config after the first boot (profiles live in keyfiles now)
+if [ -d /etc/cloud/cloud.cfg.d ]; then
+  echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-gokart-no-network-config.cfg
+fi
+
 echo "--- packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update || warn "apt-get update failed (no network?)"
