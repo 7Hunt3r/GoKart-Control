@@ -94,8 +94,12 @@ Hardware in hand (from the bench logs):
 - BOOST and the race grid hold against a live VESC (SLOW, ECO/NORMAL/SPORT caps, STOP and START were
   verified wheels-up on 2026-11-09, see History).
 - Kart 2's Pi lost its Wi-Fi after the 2026-11-09 brown-out reboots (same netplan failure as the pit on
-  2026-11-06); kart/install.sh now writes keyfiles like the pit. Needs one wired `kart/deploy.sh <ip>
-  --install` to apply, and the Pi 3 B still needs a 5 V 3 A supply (Known issues 10).
+  2026-11-06); kart/install.sh now writes keyfiles like the pit, applied to kart 2 on 2026-11-09 18:31
+  over a direct Ethernet link (its netplan yaml was 0 bytes). The Pi 3 B still needs a 5 V 3 A supply
+  (Known issues 10): the kart display's log of the Heltec's serial shows the reboot storm's resets were
+  preceded by `E BOD: Brownout detector was triggered` (36x), several right after `vesc link up` (the
+  BLE connect current spike), plus 9 task-watchdog resets and two Guru Meditation panics typical of a
+  sagging rail. Power, not firmware. `txpower 12` would ease it at ~2 dB of range.
 - Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
   Kart 2 runs 0.2.2 (OTA 2026-11-07 20:14). The `dmesg -w` USB-reset watch (750 mA peaks at 27 dBm
   off the Pi's USB) is still owed: it needs the Heltec actually cabled to the kart Pi, and on
