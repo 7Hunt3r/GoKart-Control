@@ -120,7 +120,9 @@ class EndToEnd(unittest.TestCase):
                 code, body, _ = st.request("GET", path)
                 self.assertEqual(code, 200, path)
                 for marker in (b'data-page="mobile"', b'id="stopAll"', b'id="cards"', b'id="map"',
-                               b'data-tab="log"', b'apple-mobile-web-app-capable', b"manifest.webmanifest"):
+                               b'data-tab="log"', b'data-tab="map"', b'data-tab="race"', b'id="zoneBar"',
+                               b'data-allmode="0"', b'id="sheet"', b'id="baseChip"', b'id="paceBar"',
+                               b'apple-mobile-web-app-capable', b"manifest.webmanifest"):
                     self.assertIn(marker, body, (path, marker))
             code, body, h = st.request("GET", "/static/manifest.webmanifest")
             self.assertEqual(code, 200)

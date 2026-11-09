@@ -16,28 +16,40 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="mobile" data-page="mobile">
+<!-- phone page (/m): every feature of the operator page, one-handed, portrait and landscape.
+     Portrait: header strip, fleet buttons, tab content, tab bar. Landscape: fleet buttons in a
+     left column (style.css "phone landscape"). Element ids are the ones app.js uses on / . -->
 <header class="mhead">
-  <div id="simBanner" class="banner sim hidden">SIMULATION &mdash; not real karts</div>
+  <div id="simBanner" class="banner sim hidden">SIMULATION &middot; not real karts</div>
   <div class="mstrip">
-    <span class="title">PIT</span>
-    <span id="linkChip" class="chip">T-Beam ?</span>
-    <span id="radioChip" class="chip">radio ?</span>
-    <span id="repChip" class="chip">no repeater</span>
-    <span id="corrChip" class="chip" title="pit radio fix vs the surveyed pit marker; tap to apply/stop applying">GPS corr off</span>
-    <span id="kartsChip" class="chip">karts ?</span>
-    <span id="paceChip" class="chip bad hidden"></span>
-    <span id="healthChip" class="chip hidden"></span>
-    <span id="raceChip" class="chip">race off</span>
-    <button id="gameChip" class="chip gamechip off">GAME OFF</button>
-    <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
-    <span id="clock" class="sm"></span>
+    <div class="mchips">
+      <span id="linkChip" class="chip">T-Beam ?</span>
+      <span id="kartsChip" class="chip">karts ?</span>
+      <span id="raceChip" class="chip">race off</span>
+      <span id="repChip" class="chip">no repeater</span>
+      <span id="radioChip" class="chip">radio ?</span>
+      <span id="baseChip" class="chip">base GPS ?</span>
+      <span id="corrChip" class="chip" title="pit radio fix vs the surveyed pit marker; tap to apply/stop applying">GPS corr off</span>
+      <span id="healthChip" class="chip hidden"></span>
+      <span id="paceChip" class="chip bad hidden"></span>
+    </div>
+    <div class="mpin">
+      <button id="gameChip" class="chip gamechip off">GAME OFF</button>
+      <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
+    </div>
+    <span id="clock" class="hidden"></span>
   </div>
   <div id="connBanner" class="banner bad hidden"></div>
-  <div class="mfleet">
-    <button id="stopAll" class="hold stopall">STOP ALL<small>hold 1 s</small></button>
-    <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button><button id="slowAll" class="hold slowall">SLOW ALL<small>hold 1 s</small></button><button id="boostAll" class="hold boostall">BOOST ALL<small>hold 1 s</small></button>
-  </div>
 </header>
+<div class="mfleet">
+  <button id="stopAll" class="hold stopall">STOP ALL<small>hold 1 s</small></button>
+  <button id="startAll" class="hold startall">START ALL<small>hold 1 s</small></button>
+  <button id="slowAll" class="hold slowall">SLOW<small>all &middot; hold</small></button>
+  <button id="boostAll" class="hold boostall">BOOST<small>all &middot; hold</small></button>
+  <button data-allmode="0" class="mallmode">ECO<small>all</small></button>
+  <button data-allmode="1" class="mallmode">NORMAL<small>all</small></button>
+  <button data-allmode="2" class="mallmode">SPORT<small>all</small></button>
+</div>
 <main class="mmain">
   <section id="tab-karts" class="tabpane">
     <div class="mfilters">
@@ -46,17 +58,34 @@
       <span id="hiddenNote" class="sm"></span>
     </div>
     <div id="cards" class="cards"></div>
-    <p class="note mpad">Tap a kart to show its ECO / NORMAL / SPORT / SLOW / BOOST / STOP / START buttons. Filters hide cards only; hidden karts still get fleet commands.</p>
-    <div class="panel mpanel"><h3>Laps</h3><div id="laps"></div></div>
-    <div class="panel mpanel"><h3>Race</h3><div id="race"></div></div>
+    <p class="note mpad">Tap a kart for its ECO / NORMAL / SPORT / SLOW / BOOST / STOP / START buttons and DETAILS (full telemetry).
+      Filters hide cards only; hidden karts still get fleet commands. Wheel mph is uncalibrated.</p>
   </section>
   <section id="tab-map" class="tabpane hidden">
     <div class="mapwrap">
       <canvas id="map" class="map"></canvas>
       <div class="mapctl"><button data-zoom="in">+</button><button data-zoom="out">&minus;</button><button data-zoom="fit">Fit</button></div>
     </div>
-    <div class="note mpad" id="mapNote"></div>
-    <div id="paceBar" class="pacebar mpace">
+    <div id="zoneBar" class="zonebar mdrawer hidden">
+      <div class="mdhead"><span class="mdtitle">ZONES</span><button id="zCancel" class="zcancel">CANCEL</button><button id="zSave" class="zsave">SAVE</button></div>
+      <div id="zHint" class="zhint"></div>
+      <div class="ztools mztools">
+        <div class="zgroup"><span class="zglbl">PLACE</span>
+          <button data-ztool="boost" class="zt-boost">BOOST PAD</button><button data-ztool="mud" class="zt-mud">MUD</button><button data-ztool="item" class="zt-item">ITEM BOX</button></div>
+        <div class="zgroup"><span class="zglbl">COURSE</span>
+          <button data-ztool="lapline" class="zt-lap">LAP LINE</button><button data-ztool="track" class="zt-track">TRACK</button></div>
+        <div class="zgroup"><span class="zglbl">EDIT</span>
+          <button data-ztool="select">SELECT / MOVE</button><button data-ztool="delete" class="zt-del">DELETE</button></div>
+      </div>
+      <div class="zprops">
+        <span id="zSel" class="zsel">nothing selected</span>
+        <label class="zpname">Name <input id="zName" maxlength="40" autocomplete="off"></label>
+        <label class="zprad">Radius <input id="zRadius" type="range" min="3" max="60" step="1" value="5"> <b id="zRadiusVal" class="zradval">--</b></label>
+        <span class="ztrack zgroup"><span class="zglbl">TRACK</span><button id="tUndo">UNDO POINT</button><button id="tClose">CLOSE LOOP</button><button id="tClear">CLEAR</button></span>
+        <span id="zCounts" class="note"></span>
+      </div>
+    </div>
+    <div id="paceBar" class="pacebar mpace mdrawer hidden">
       <div class="mpacehead"><span class="zglbl">PACE CAR</span>
         <select id="pcKart" aria-label="pace car kart"><option value="1">K1</option><option value="2">K2</option><option value="3">K3</option><option value="4">K4</option><option value="5">K5</option><option value="6">K6</option><option value="7">K7</option><option value="8">K8</option></select>
         <label>Width <select id="pcWidth"><option>4</option><option>5</option><option selected>6</option><option>8</option><option>10</option><option>12</option></select> m</label>
@@ -65,6 +94,15 @@
       <span id="pcStatus" class="note">drive the course with one kart: laps are detected when it returns to its start</span>
       <div id="pcLaps" class="pclaps"></div>
     </div>
+    <div class="mmaptools">
+      <button id="zoneEdit" class="zbtn">ZONES</button>
+      <button id="paceTgl" class="zbtn">PACE CAR</button>
+      <span id="mapNote" class="note"></span>
+    </div>
+  </section>
+  <section id="tab-race" class="tabpane hidden">
+    <div class="panel mpanel"><h3>Race</h3><div id="race"></div></div>
+    <div class="panel mpanel"><h3>Laps</h3><div id="laps"></div></div>
   </section>
   <section id="tab-log" class="tabpane hidden">
     <div class="panel mpanel"><h3>Command outcomes</h3><div id="outcomes"></div></div>
@@ -75,8 +113,10 @@
 <nav class="mtabs">
   <button data-tab="karts" class="sel">KARTS</button>
   <button data-tab="map">MAP</button>
+  <button data-tab="race">RACE</button>
   <button data-tab="log">LOG</button>
 </nav>
+<div id="sheet" class="sheet hidden"><div class="inner" id="sheetInner"></div></div>
 <script src="/static/watch.js"></script>
 <script src="/static/sound.js"></script>
 <script src="/static/app.js"></script>

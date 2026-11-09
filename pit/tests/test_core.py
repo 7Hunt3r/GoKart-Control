@@ -702,6 +702,46 @@ class WifiProfiles(unittest.TestCase):
                                       "WIFI2_SSID": "", "WIFI2_PASSWORD": "\"\""}), [("a", "12345678", 20)])
 
 
+class PhonePageParity(unittest.TestCase):
+    """The phone page (/m) must keep every operator-page feature: app.js finds them by element id."""
+    SHARED = ("stopAll startAll slowAll boostAll linkChip radioChip repChip corrChip baseChip paceChip healthChip "
+              "raceChip gameChip sndBtn simBanner connBanner fOnline fEntered hiddenNote cards map mapNote "
+              "zoneEdit zoneBar zHint zSel zName zRadius zRadiusVal tUndo tClose tClear zCounts zCancel zSave "
+              "paceBar pcKart pcWidth pcLapline pcRec pcStop pcClear pcStatus pcLaps "
+              "race laps outcomes log baseStat").split()
+
+    def ids(self, name):
+        import html.parser
+
+        class P(html.parser.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.ids, self.attrs = set(), []
+
+            def handle_starttag(self, tag, attrs):
+                d = dict(attrs)
+                self.attrs.append(d)
+                if d.get("id"):
+                    self.ids.add(d["id"])
+        p = P()
+        with open(os.path.join(PIT, "server", "static", name)) as f:
+            p.feed(f.read())
+        return p
+
+    def test_shared_ids_on_phone_and_operator_page(self):
+        m, op = self.ids("mobile.html"), self.ids("index.html")
+        for i in self.SHARED:
+            self.assertIn(i, op.ids, f"index.html lost #{i}")
+            self.assertIn(i, m.ids, f"mobile.html lost #{i}")
+        self.assertIn("sheet", m.ids)
+        self.assertIn("sheetInner", m.ids)
+        for name, p in (("mobile.html", m), ("index.html", op)):
+            self.assertEqual(sorted(d["data-allmode"] for d in p.attrs if "data-allmode" in d), ["0", "1", "2"], name)
+            tools = {d["data-ztool"] for d in p.attrs if "data-ztool" in d}
+            self.assertEqual(tools, {"boost", "mud", "item", "lapline", "track", "select", "delete"}, name)
+        self.assertEqual([d["data-tab"] for d in m.attrs if "data-tab" in d], ["karts", "map", "race", "log"])
+
+
 def run_js(expr):
     """Evaluate watch.js + expr with node, or JavaScriptCore (osascript) on a Mac; None if neither exists."""
     with open(os.path.join(PIT, "server", "static", "watch.js")) as f:

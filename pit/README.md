@@ -33,7 +33,7 @@ pit/
   server/health.py         Pi power/thermal health (vcgencmd get_throttled + CPU temp)
   server/pitcore.py        fleet state, staleness, derived values, command delivery (pure logic)
   server/link.py           T-Beam link: serial auto-find + reconnect, or TCP to the simulator
-  server/static/           index.html (operator), kiosk.html (1024x600 touch), app.js, watch.js, style.css, login.html
+  server/static/           index.html (operator), kiosk.html (1024x600 touch), mobile.html (phone, /m), app.js, watch.js, style.css, login.html
   tools/                   wifi_profiles.py, journal_persist.sh, gokart_check.sh, why_rebooted.sh
   server/map/              map.json + README (how to add CT ECO imagery; none bundled)
   server/config.example.json   copy to config.json (gitignored): shared password etc.
@@ -139,6 +139,17 @@ python3 -I pit/tests/test_e2e.py
   ~10 MB/hour with one kart at 2 Hz on 2026-11-06. Download the current file from the operator page or
   `GET /api/log/download`. The LOG view also shows the T-Beam's stat line (beacons skipped, command queue,
   dropped, forced, heap) and the pit's line counts.
+- **Phone page (`/m`).** Every operator-page feature, one-handed, portrait or landscape, in Safari,
+  Chrome or installed to the home screen (PWA). One-row chip strip (scrolls sideways; GAME and SOUND
+  pinned right, base GPS chip included), then STOP ALL (3/5 width, hold 1 s) + START ALL, then SLOW /
+  BOOST (hold) and ECO / NORMAL / SPORT for all karts. Tabs KARTS / MAP / RACE / LOG (remembered per
+  phone; `#karts`, `#map`, `#race`, `#log` deep-link a tab). KARTS: tap a card for its buttons and
+  DETAILS (bottom sheet with every telemetry field). MAP: the map fills the tab; ZONES opens the full
+  zone editor and PACE CAR the track recorder as drawers over the lower half of the map (right side in
+  landscape; one at a time; the pace drawer opens by itself when a recording starts). RACE: race
+  panel + leaderboard. LOG: command outcomes, session log, download / operator page / log out.
+  Landscape phones put the fleet buttons in a left column. Layout checked headless at 360x780,
+  390x844, 844x390 and 768x1024 (no horizontal overflow); not yet tried on a real iPhone or Android.
 - **HTTP.** `/` operator UI, `/kiosk`, `/m` (phone; also `/mobile`), `/login`, `/logout`, `/events` (SSE, ~4 Hz;
   at most `sse_max_clients` (24) pages at once, more get 503 and retry; a page that stops reading for 10 s is
   dropped; frames carry the zones document when its version changes and every 30 s, otherwise only
@@ -238,7 +249,7 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
   then earlier last crossing; each row also has the gap to the leader (`gap_laps`, or `gap_s` at
   the line on the same lap). Shown as a leaderboard panel (big position, kart colour, laps, last,
   best, gap) (operator side panel, kiosk RACE tab,
-  phone KARTS tab), a collapsible overlay on every map, and `P# L# best` on each kart card.
+  phone RACE tab), a collapsible overlay on every map, and `P# L# best` on each kart card.
   `/api/state` has `fleet.game`, `fleet.laps` (ranked) and `karts[].lap`. Lap state is memory only
   (server restart clears it). Moving the lap line clears practice timing; during a race (or while its
   results show) completed laps are kept and the next crossing of the new line counts against the last
@@ -268,7 +279,7 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
 Instead of tapping the course in by hand, drive it once with one kart and let the pit turn the
 path into the track. Nothing changes on the radio: the pit already gets every kart's fixes (1-2 Hz).
 
-1. Operator page -> **ZONES** -> **PACE CAR** row, or on the phone (`/m`) the **PACE CAR** panel under the
+1. Operator page -> **ZONES** -> **PACE CAR** row, or on the phone (`/m`) the **PACE CAR** drawer on the
    MAP tab (big REC / STOP / CLEAR and a USE AS TRACK button per lap, for starting laps trackside):
    pick the kart (defaults to the first online one),
    press **REC** and drive the course at a steady pace, staying on the racing line. A red **REC K2**
@@ -424,7 +435,8 @@ Before the karts go out:
    A kart that answers START with "rejected: send a mode first" rebooted: send its mode, then START.
 5. **GAME ON** only if zones are drawn: a lap line exists (RACE tab says "Waiting for the first
    crossing", not "No lap line yet"); the map shows the track and zones where they belong.
-6. Phone: log in at `http://gokart-pit.local:8080/m`, check the STOP ALL hold works from where you stand.
+6. Phone: log in at `http://gokart-pit.local:8080/m`, check the STOP ALL hold works from where you stand,
+   and that the MAP tab shows the karts (ZONES / PACE CAR drawers are there if you need to fix a zone trackside).
 7. Sound: tap SOUND once on the kiosk if it reads TAP FOR SOUND.
 
 Racing:

@@ -7,6 +7,7 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { -webkit-user-select: none; user-select: none; touch-action: manipulation; }
 button { font: inherit; font-weight: 700; border: 2px solid var(--line); border-radius: var(--radius);
   background: var(--panel); color: var(--ink); padding: 8px 12px; min-height: 48px; cursor: pointer; }
@@ -136,63 +137,6 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
 body.login form { background: var(--panel); border: 3px solid var(--line); border-radius: 12px; padding: 24px; width: 340px; display: flex; flex-direction: column; gap: 10px; }
 body.login input { font-size: 20px; padding: 10px; border: 2px solid var(--line); border-radius: 8px; }
 
-/* phone page (/m): portrait, 390 px wide and up; header + STOP ALL always visible,
-   content scrolls between it and the bottom tab bar */
-body.mobile { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column;
-  -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; font-size: 16px; }
-body.mobile .mhead { flex: none; background: #111; padding-top: env(safe-area-inset-top); }
-body.mobile .banner.sim { font-size: 15px; padding: 3px 8px; }
-body.mobile .mstrip { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 5px 8px; color: #fff; }
-body.mobile .mstrip .title { font-weight: 900; font-size: 18px; margin-right: 2px; }
-body.mobile .mstrip .chip { color: #fff; font-size: 14px; padding: 2px 7px; }
-body.mobile .mstrip #clock { margin-left: auto; font-weight: 700; }
-body.mobile .mfleet { display: grid; grid-template-columns: 3fr 2fr; gap: 6px; padding: 6px 8px 8px; background: #e3e3de; border-bottom: 3px solid var(--line); }
-body.mobile .mfleet button { min-height: 64px; min-width: 0; padding: 4px; }
-body.mobile .mfleet .stopall { font-size: 26px; }
-body.mobile .mfleet .startall { font-size: 18px; }
-body.mobile .mmain { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-body.mobile .mtabs { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-  background: #111; }
-body.mobile .mtabs button { min-height: 52px; font-size: 17px; background: #333; color: #fff; border-color: #777; }
-body.mobile .mtabs button.sel { background: #fff; color: #000; border-color: #fff; }
-body.mobile .mfilters { display: flex; gap: 6px; align-items: center; padding: 8px 8px 0; }
-body.mobile .mfilters .toggle { min-height: 48px; flex: 1; }
-body.mobile .mfilters #hiddenNote:empty { display: none; }
-body.mobile .cards { grid-template-columns: 1fr; gap: 8px; padding: 8px; }
-body.mobile .card { padding: 6px 10px; cursor: pointer; }
-body.mobile .card .hdr { min-height: 36px; }
-body.mobile .card .chip { font-size: 14px; }
-body.mobile .card .badge { font-size: 13px; }
-body.mobile .swatch { width: 40px; height: 34px; font-size: 21px; }
-body.mobile .card .row { gap: 2px 12px; line-height: 1.3; }
-body.mobile .card .row.sm { font-size: 15px; }
-body.mobile .card .big { font-size: 32px; }
-body.mobile .mvolts { font-size: 17px; font-weight: 700; }
-body.mobile .mrow { justify-content: space-between; }
-body.mobile .mmode { font-size: 16px; }
-body.mobile .chev { flex: none; width: 0; height: 0; margin-left: 4px; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 10px solid #222; }
-body.mobile .card.open .chev { transform: rotate(180deg); }
-body.mobile .kexp { display: none; margin-top: 6px; padding-top: 6px; border-top: 2px solid #bbb; }
-body.mobile .card.open .kexp { display: block; }
-body.mobile .kexp .kbtns { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
-body.mobile .kexp .kbtns button { grid-column: span 2; min-height: 56px; font-size: 16px; }
-body.mobile .kexp .kbtns .b-stop, body.mobile .kexp .kbtns .b-start { grid-column: span 3; min-height: 60px; font-size: 20px; }
-body.mobile .lastcmd { margin-top: 8px; }
-body.mobile .lastcmd .outcome { font-size: 16px; }
-body.mobile .mpad { padding: 0 10px; }
-body.mobile .mpanel { margin: 8px; }
-body.mobile .racegrid button { min-height: 52px; }
-body.mobile #tab-map:not(.hidden) { height: 100%; display: flex; flex-direction: column; }
-body.mobile #tab-map .mapwrap { flex: 1; min-height: 0; margin: 6px; border: 2px solid var(--line); border-radius: var(--radius); }
-body.mobile #tab-map .mapctl button { min-height: 48px; min-width: 52px; font-size: 20px; }
-body.mobile #tab-map .note { padding-bottom: 6px; }
-body.mobile table.cmds { font-size: 14px; }
-body.mobile .ocell { font-size: 14px; }
-body.mobile .log { max-height: 50vh; font-size: 12px; overflow-wrap: anywhere; }
-body.mobile .mlinks { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 8px 12px; }
-body.mobile .mlinks a { flex: 1; min-height: 48px; display: flex; align-items: center; justify-content: center; text-align: center;
-  border: 2px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--ink); font-weight: 700; text-decoration: none; padding: 4px 8px; }
-body.mobile .toast { bottom: calc(80px + env(safe-area-inset-bottom)); font-size: 17px; }
 body.login form { max-width: calc(100vw - 32px); }
 input, textarea { -webkit-user-select: text; user-select: text; }   /* iOS: inputs inside user-select:none are not editable */
 
@@ -235,9 +179,6 @@ table.laps td.n { text-align: right; }
 .maplaps .mlhead { min-height: 32px; width: 100%; padding: 2px 8px; border: 0; border-radius: 4px; background: #111; color: #fff; font-size: 13px; text-align: left; }
 .maplaps .mlrow { display: grid; grid-template-columns: 16px 28px 34px 1fr; gap: 4px; align-items: center; padding: 1px 6px; font-variant-numeric: tabular-nums; font-weight: 700; }
 .maplaps .mlrow .lsw { min-width: 22px; font-size: 12px; }
-body.mobile .mfleet .boostall, body.mobile .mfleet .slowall { font-size: 16px; }
-body.mobile .kexp .kbtns .b-slow, body.mobile .kexp .kbtns .b-boost { grid-column: span 3; }
-body.mobile table.laps { font-size: 16px; }
 table.laps th:nth-child(n+3) { text-align: right; }
 
 /* race start + item boxes */
@@ -277,14 +218,11 @@ button.chip { min-height: 0; padding: 0 9px; cursor: pointer; }
 .chip.sndchip { min-width: 74px; justify-content: center; }
 body.kiosk .chip, body.kiosk .chip.gamechip { height: 34px; font-size: 13px; }
 body.kiosk .topbar { gap: 6px; }
-body.mobile .mstrip .chip, body.mobile .mstrip .chip.gamechip { height: 30px; font-size: 13px; }
 .card .chip { height: 24px; font-size: 12px; padding: 0 7px; }
-body.mobile .card .chip { height: 28px; font-size: 14px; }
 
 /* badges: one size for GRID / GO / STOPPED / FAULT / SLOW / lap */
 .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 7px; border-radius: 4px; border: 2px solid;
   font-size: 12px; font-weight: 900; letter-spacing: .03em; line-height: 1; white-space: nowrap; }
-body.mobile .card .badge { height: 26px; font-size: 13px; }
 
 /* kart cards: big row (battery | speed + small "wheel" tag), then three aligned stat lines */
 .card .bigrow { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: nowrap; }
@@ -303,7 +241,6 @@ body.kiosk .card .stat { font-size: 12.5px; line-height: 1.28; }
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
   opacity: calc(var(--p) * 100); pointer-events: none; }
-body.mobile .mfleet .hold::after { width: 30px; height: 30px; margin-top: -15px; }
 
 /* race start countdown: a full-width strip (kiosk: top of the card area; operator: above the cards;
    phone: top of the scroll area), one light more each second, green at GO; GO! flashes the page */
@@ -312,7 +249,6 @@ body.mobile .mfleet .hold::after { width: 30px; height: 30px; margin-top: -15px;
 body.kiosk .main { position: relative; }
 body.kiosk .countdown { position: absolute; left: 0; right: 0; top: 0; height: 118px; }
 body.op .countdown { margin: 8px 8px 0; border-radius: 8px; }
-body.mobile .countdown { position: sticky; top: 0; gap: 10px; padding: 8px; }
 .cdlabel { font-weight: 900; font-size: 15px; letter-spacing: .1em; color: #aaa; text-align: right; line-height: 1.15; }
 .cdlights { display: flex; gap: 16px; }
 .cdl { width: 90px; height: 90px; border-radius: 50%; background: #2b0505; border: 6px solid #1c1c1c; box-shadow: inset 0 0 0 4px #3d0d0d; }
@@ -320,10 +256,6 @@ body.mobile .countdown { position: sticky; top: 0; gap: 10px; padding: 8px; }
 .countdown.go .cdl { background: #14c23a; box-shadow: inset 0 0 0 4px #8dffa8; }
 .cdtext { font-size: 44px; font-weight: 900; font-style: italic; min-width: 190px; font-variant-numeric: tabular-nums; }
 .countdown.go .cdtext { color: #14c23a; }
-body.mobile .cdl { width: 46px; height: 46px; border-width: 4px; }
-body.mobile .cdlights { gap: 8px; }
-body.mobile .cdlabel { display: none; }
-body.mobile .cdtext { font-size: 26px; min-width: 0; }
 .goflash { position: fixed; inset: 0; z-index: 70; pointer-events: none; display: flex; align-items: center; justify-content: center;
   background: rgba(20,194,58,.92); }
 .goflash span { font-size: 220px; font-weight: 900; font-style: italic; color: #000; line-height: 1; letter-spacing: -.03em; }
@@ -331,7 +263,6 @@ body.mobile .cdtext { font-size: 26px; min-width: 0; }
 .goflash.run span { animation: goPop .35s cubic-bezier(.2, 1.7, .45, 1) both; }
 @keyframes goflashA { 0% { opacity: 1; } 55% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes goPop { from { transform: scale(.3); } to { transform: scale(1); } }
-body.mobile .goflash span { font-size: 130px; }
 
 /* leaderboard: big position, colour swatch, laps / last / best / gap */
 table.laps td.pos { font-size: 26px; font-weight: 900; width: 36px; font-style: italic; }
@@ -407,18 +338,6 @@ body.op .card .hdr { white-space: nowrap; }
 .pclaps td, .pclaps th { padding: 3px 10px; border-bottom: 1px solid #ccc; text-align: left; }
 .pclaps button { min-height: 32px; padding: 2px 10px; font-size: 13px; }
 
-/* phone: pace car panel under the map (REC / STOP / USE AS TRACK from trackside) */
-body.mobile .mpace { flex: none; margin: 0 6px 6px; padding: 6px; border: 2px solid var(--line); border-radius: var(--radius); background: #f0efe9; }
-body.mobile .mpacehead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
-body.mobile .mpacehead > select { min-height: 48px; font-size: 18px; font-weight: 800; padding: 4px 8px; border: 2px solid var(--line); border-radius: 6px; }
-body.mobile .mpacebtns { display: grid; grid-template-columns: 2fr 1.4fr 1fr; gap: 6px; width: 100%; }
-body.mobile .mpacebtns button { min-height: 60px; font-size: 20px; }
-body.mobile .mpace .pclaps { width: 100%; }
-body.mobile .mpace .pclaps table { width: 100%; font-size: 16px; }
-body.mobile .mpace .pclaps button { min-height: 48px; width: 100%; }
-body.mobile #tab-map .mapwrap { min-height: 240px; }
-body.mobile .mpacebtns button.pcrec { color: #c40000; font-weight: 900; }
-body.mobile .mpacebtns button.pcrec.on { background: #c40000; color: #fff; }
 
 /* kiosk top bar: never wider than the 1024 px panel. Status chips shrink (ellipsis) before the
    right-hand controls (SOUND, filters, clock) are pushed off the edge. */
@@ -434,3 +353,194 @@ body.kiosk #tab-race #laps { margin-bottom: 10px; }
 .card .badge.warnb { padding: 0 6px; }
 .basestat { margin: 0 0 6px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .radioq { margin-top: 4px; }
+
+/* ===================== phone page (/m), 2026-11-09: every operator feature, one-handed.
+   Portrait: one-row chip strip, fleet buttons (STOP ALL biggest), tab content, tab bar.
+   Landscape phones: fleet buttons in a left column, tab bar under the content column. ========== */
+body.mobile { height: 100vh; height: 100dvh; overflow: hidden; display: grid;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "head" "fleet" "main" "tabs";
+  -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; font-size: 16px; }
+body.mobile button { -webkit-touch-callout: none; touch-action: manipulation; }
+body.mobile .mhead { grid-area: head; background: #111; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); min-width: 0; }
+body.mobile .banner.sim { font-size: 12px; line-height: 20px; height: 22px; padding: 1px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.mobile .banner.bad { font-size: 14px; padding: 4px 8px; }
+/* chip strip: scrolls sideways, never wraps; GAME + SOUND pinned at the right */
+body.mobile .mstrip { display: flex; align-items: center; height: 42px; color: #fff; min-width: 0; }
+body.mobile .mchips { flex: 1 1 auto; min-width: 0; display: flex; gap: 5px; align-items: center; height: 100%; padding: 0 8px;
+  overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; scrollbar-width: none; overscroll-behavior-x: contain; }
+body.mobile .mchips::-webkit-scrollbar { display: none; }
+body.mobile .mpin { flex: none; display: flex; gap: 5px; align-items: center; height: 100%; padding: 0 8px 0 6px;
+  box-shadow: -10px 0 10px -4px #111; background: #111; position: relative; }
+body.mobile .mstrip .chip { flex: none; height: 30px; font-size: 13px; padding: 0 8px; color: #e6e6e6; }
+body.mobile .mstrip .chip.ok, body.mobile .mstrip .chip.bad, body.mobile .mstrip .chip.stale, body.mobile .mstrip .chip.info { color: #fff; }
+body.mobile .mstrip .chip.warn, body.mobile .mstrip .chip.gamechip.on { color: #000; }
+body.mobile .mpin .chip { height: 34px; }
+body.mobile .mpin .sndchip { min-width: 58px; max-width: 72px; white-space: normal; text-align: center; line-height: 1.05; font-size: 11px; }
+/* fleet buttons: STOP ALL 3/5 + START ALL 2/5, then SLOW / BOOST / ECO / NORMAL / SPORT */
+body.mobile .mfleet { grid-area: fleet; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px;
+  padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left)); background: #e3e3de; border-bottom: 3px solid var(--line); min-width: 0; }
+body.mobile .mfleet button { min-width: 0; padding: 2px; line-height: 1.05; font-size: 13px; overflow: hidden; min-height: 46px; }
+body.mobile .mfleet button small { display: block; font-size: 10px; font-weight: 700; opacity: .85; margin-top: 2px; }
+body.mobile .mfleet .stopall { grid-column: span 3; min-height: 62px; font-size: 25px; min-width: 0; }
+body.mobile .mfleet .startall { grid-column: span 2; min-height: 62px; font-size: 17px; min-width: 0; }
+body.mobile .mfleet .stopall small, body.mobile .mfleet .startall small { font-size: 11px; }
+body.mobile .mfleet .hold::after { width: 24px; height: 24px; margin-top: -12px; right: 4px; }
+body.mobile .mfleet .stopall::after { width: 30px; height: 30px; margin-top: -15px; right: 8px; }
+body.mobile .mallmode { background: #fff; }
+/* content + tab bar */
+body.mobile .mmain { grid-area: main; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain; display: flex; flex-direction: column; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+body.mobile .mmain > .tabpane { flex: none; min-width: 0; }
+body.mobile .mtabs { grid-area: tabs; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px;
+  padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); background: #111; }
+body.mobile .mtabs button { min-height: 52px; min-width: 0; padding: 2px; font-size: 16px; background: #333; color: #fff; border-color: #777; }
+body.mobile .mtabs button.sel { background: #fff; color: #000; border-color: #fff; }
+body.mobile .countdown { position: sticky; top: 0; flex: none; gap: 10px; padding: 8px; }
+body.mobile .cdl { width: 46px; height: 46px; border-width: 4px; }
+body.mobile .cdlights { gap: 8px; }
+body.mobile .cdlabel { display: none; }
+body.mobile .cdtext { font-size: 26px; min-width: 0; }
+body.mobile .goflash span { font-size: 130px; }
+/* KARTS */
+body.mobile .mfilters { display: flex; gap: 6px; align-items: center; padding: 8px 8px 0; }
+body.mobile .mfilters .toggle { min-height: 46px; flex: 1; min-width: 0; }
+body.mobile .mfilters #hiddenNote:empty { display: none; }
+body.mobile .cards { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 8px; align-items: start; }
+body.mobile .card { padding: 6px 10px; cursor: pointer; min-width: 0; }
+body.mobile .card .hdr { min-height: 36px; }
+body.mobile .card .chip { height: 28px; font-size: 14px; }
+body.mobile .card .badge { height: 26px; font-size: 13px; }
+body.mobile .swatch { width: 40px; height: 34px; font-size: 21px; flex: none; }
+body.mobile .card .row { gap: 2px 12px; line-height: 1.3; }
+body.mobile .card .row.sm { font-size: 15px; }
+body.mobile .card .big { font-size: 32px; }
+body.mobile .mvolts { font-size: 17px; font-weight: 700; }
+body.mobile .mrow { justify-content: space-between; }
+body.mobile .mmode { font-size: 16px; }
+body.mobile .chev { flex: none; width: 0; height: 0; margin-left: 4px; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 10px solid #222; }
+body.mobile .card.open .chev { transform: rotate(180deg); }
+body.mobile .kexp { display: none; margin-top: 6px; padding-top: 6px; border-top: 2px solid #bbb; }
+body.mobile .card.open .kexp { display: block; }
+body.mobile .kbtns { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+body.mobile .kbtns button { grid-column: span 2; min-height: 56px; font-size: 16px; }
+body.mobile .kbtns .b-slow, body.mobile .kbtns .b-boost { grid-column: span 3; }
+body.mobile .kbtns .b-stop, body.mobile .kbtns .b-start { grid-column: span 3; min-height: 60px; font-size: 20px; }
+body.mobile .lastcmd { margin-top: 8px; display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+body.mobile .lastcmd .outcome { font-size: 16px; }
+body.mobile .mdetail { flex: none; min-height: 48px; padding: 4px 16px; background: #111; color: #fff; }
+body.mobile .mpad { padding: 0 10px; }
+body.mobile .mpanel { margin: 8px; min-width: 0; }
+/* MAP: the map fills the tab; ZONES / PACE CAR drawers take the lower half (the right side in landscape) */
+body.mobile #tab-map:not(.hidden) { flex: 1 0 auto; min-height: 250px; position: relative; --tb: 54px; }
+body.mobile #tab-map .mapwrap { position: absolute; left: 6px; right: 6px; top: 6px; bottom: var(--tb); border: 2px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+body.mobile #tab-map:has(.mdrawer:not(.hidden)) .mapwrap { bottom: 50%; }
+body.mobile #tab-map .mapctl button { min-height: 46px; min-width: 50px; font-size: 20px; }
+body.mobile .mmaptools { position: absolute; left: 6px; right: 6px; bottom: 0; height: var(--tb); display: flex; gap: 6px; align-items: center; }
+body.mobile .mmaptools .zbtn { flex: none; min-height: 46px; padding: 2px 14px; font-size: 15px; }
+body.mobile .mmaptools #mapNote { flex: 1; min-width: 0; font-size: 11px; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+body.mobile .mdrawer { position: absolute; left: 6px; right: 6px; bottom: var(--tb); height: calc(50% - var(--tb) - 4px); margin: 0; overflow-y: auto; overflow-x: hidden;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; background: #f0efe9; border: 2px solid var(--line); border-radius: var(--radius); padding: 0 6px 6px; z-index: 5;
+  box-shadow: 0 -4px 12px rgba(0,0,0,.25); }
+body.mobile .mdhead { position: sticky; top: 0; z-index: 2; display: flex; gap: 6px; align-items: center; background: #f0efe9; padding: 6px 0; margin-bottom: -2px; }
+body.mobile .mdtitle { flex: 1; font-weight: 900; letter-spacing: .08em; font-size: 15px; }
+body.mobile .mdhead button { min-height: 48px; min-width: 0; padding: 2px 16px; }
+body.mobile .mdhead .zsave { padding: 2px 24px; font-size: 18px; }
+body.mobile .zonebar { gap: 6px; }
+body.mobile .zhint { font-size: 14px; padding: 5px 8px; }
+body.mobile .mztools { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+body.mobile .mztools .zgroup { display: flex; width: 100%; }
+body.mobile .zgroup .zglbl { flex: none; width: 58px; padding: 0 4px; justify-content: center; font-size: 9.5px; }
+body.mobile .mztools .zgroup button { flex: 1 1 0; min-width: 0; min-height: 46px; padding: 2px 4px; font-size: 13px; line-height: 1.1; }
+body.mobile .zprops { gap: 6px; }
+body.mobile .zprops .zsel { min-width: 0; flex-basis: 100%; }
+body.mobile .zprops label { flex-basis: 100%; font-size: 14px; }
+body.mobile .zprops input:not([type]) { flex: 1; min-width: 0; width: auto; font-size: 16px; min-height: 44px; }
+body.mobile .zprops input[type=range] { flex: 1; min-width: 0; width: auto; height: 36px; }
+body.mobile .zprops .ztrack.zgroup { display: flex; flex-basis: 100%; }
+body.mobile .zprops .ztrack.zgroup button { flex: 1 1 0; min-width: 0; min-height: 44px; font-size: 12px; padding: 2px 4px; }
+body.mobile .zonebar:not(.tooltrack) .ztrack { display: none; }
+body.mobile .zprops #zCounts { flex-basis: 100%; font-size: 12px; }
+body.mobile .mpace { gap: 8px; padding-top: 6px; border-top: 2px solid var(--line); }
+body.mobile .mpacehead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+body.mobile .mpacehead > select { min-height: 48px; font-size: 18px; font-weight: 800; padding: 4px 8px; border: 2px solid var(--line); border-radius: 6px; }
+body.mobile .mpacebtns { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 6px; width: 100%; }
+body.mobile .mpacebtns button { min-height: 56px; font-size: 18px; min-width: 0; padding: 2px 4px; }
+body.mobile .mpacebtns button.pcrec { color: #c40000; font-weight: 900; }
+body.mobile .mpacebtns button.pcrec.on { background: #c40000; color: #fff; }
+body.mobile .mpace .pclaps { width: 100%; }
+body.mobile .mpace .pclaps table { width: 100%; font-size: 15px; }
+body.mobile .mpace .pclaps td, body.mobile .mpace .pclaps th { padding: 3px 4px; }
+body.mobile .mpace .pclaps button { min-height: 44px; width: 100%; font-size: 12px; padding: 2px 4px; }
+/* RACE + LOG: nothing wider than a 360 px screen */
+body.mobile .racegrid button { min-height: 52px; min-width: 0; padding: 2px; }
+body.mobile .racestart { flex-direction: column; gap: 5px; }
+body.mobile .racesecs { flex: none; }
+body.mobile .racesecs button { min-width: 0; }
+body.mobile .racestartbtn, body.mobile .racestopbtn { min-width: 0; font-size: 17px; padding: 2px 4px; }
+body.mobile table.laps { font-size: 15px; table-layout: auto; }
+body.mobile table.laps td, body.mobile table.laps th { padding: 3px 2px; }
+body.mobile table.laps td.pos { font-size: 22px; width: 26px; }
+body.mobile table.laps .lsw { min-width: 26px; }
+body.mobile table.laps td.gap { font-size: 12px; }
+body.mobile .lapsfoot { flex-wrap: wrap; }
+body.mobile table.cmds { font-size: 13px; table-layout: fixed; }
+body.mobile table.cmds td, body.mobile table.cmds th { padding: 3px 2px; overflow-wrap: anywhere; }
+body.mobile table.cmds th:nth-child(1) { width: 11%; } body.mobile table.cmds th:nth-child(2) { width: 11%; }
+body.mobile table.cmds th:nth-child(3) { width: 25%; } body.mobile table.cmds th:nth-child(4) { width: 22%; }
+body.mobile .ocell { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+body.mobile .log { max-height: 50vh; font-size: 12px; overflow-wrap: anywhere; }
+body.mobile .mlinks { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 8px 12px; }
+body.mobile .mlinks a { flex: 1 1 100px; min-height: 48px; display: flex; align-items: center; justify-content: center; text-align: center;
+  border: 2px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--ink); font-weight: 700; text-decoration: none; padding: 4px 8px; }
+body.mobile .toast { bottom: calc(76px + env(safe-area-inset-bottom)); font-size: 17px; pointer-events: none; text-align: center; }
+/* kart detail: a bottom sheet, 2-column rows, big buttons, sticky CLOSE; tap the backdrop to close */
+body.mobile .sheet { align-items: flex-end; }
+body.mobile .sheet .inner { width: 100%; max-width: 640px; max-height: 85vh; max-height: 85dvh; overflow-y: auto; overscroll-behavior: contain;
+  border-radius: 16px 16px 0 0; border-width: 4px 0 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); }
+body.mobile .sheet .inner > .hdr { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 10px 0 8px; border-bottom: 2px solid #bbb; }
+body.mobile .sheet .inner > .hdr > * { flex: none; }
+body.mobile .sheet .inner > .hdr b { white-space: nowrap; }
+body.mobile .sheet .inner > .hdr .chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+body.mobile .sheet .inner > .hdr .spacer { flex: 1 1 0; min-width: 0; }
+body.mobile .sheet [data-close] { min-height: 52px; padding: 4px 16px; font-size: 18px; background: #111; color: #fff; }
+body.mobile .sheet .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; font-size: 15px; overflow-wrap: anywhere; }
+body.mobile .sheet .kbtns button { min-height: 56px; font-size: 17px; }
+body.mobile .sheet .kbtns .b-stop, body.mobile .sheet .kbtns .b-start { min-height: 64px; font-size: 21px; }
+
+/* wide phones / small tablets in portrait: two card columns */
+@media (min-width: 700px) {
+  body.mobile .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* phone landscape: fleet buttons stacked in a left column, tab bar under the content column */
+@media (orientation: landscape) and (max-height: 500px) {
+  body.mobile { grid-template-columns: calc(116px + env(safe-area-inset-left)) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "head head" "fleet main" "fleet tabs"; }
+  body.mobile .mhead { display: flex; align-items: center; flex-wrap: wrap; }
+  body.mobile .mhead .banner.sim { flex: none; max-width: 34%; height: 26px; line-height: 24px; margin-left: 6px; border-radius: 4px; }
+  body.mobile .mstrip { flex: 1 1 0; height: 40px; }
+  body.mobile .mhead #connBanner { flex-basis: 100%; }
+  body.mobile .mfleet { display: flex; flex-direction: column; gap: 4px; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
+    border-bottom: 0; border-right: 3px solid var(--line); overflow-y: auto; scrollbar-width: none; }
+  body.mobile .mfleet::-webkit-scrollbar { display: none; }
+  body.mobile .mfleet button { flex: none; min-height: 0; }
+  body.mobile .mfleet .stopall { height: 60px; font-size: 19px; }
+  body.mobile .mfleet .startall { height: 50px; font-size: 15px; }
+  body.mobile .mfleet .slowall, body.mobile .mfleet .boostall { height: 44px; }
+  body.mobile .mfleet .mallmode { height: 36px; }
+  body.mobile .mfleet .mallmode small { display: inline; margin: 0 0 0 4px; }
+  body.mobile .mfleet .stopall small, body.mobile .mfleet .startall small { font-size: 10px; }
+  body.mobile .mfleet .stopall::after { width: 24px; height: 24px; margin-top: -12px; right: 4px; }
+  body.mobile .mmain { padding-left: 0; }
+  body.mobile .mtabs { padding: 4px max(6px, env(safe-area-inset-right)) calc(4px + env(safe-area-inset-bottom)) 6px; }
+  body.mobile .mtabs button { min-height: 40px; height: 40px; font-size: 15px; }
+  body.mobile #tab-map:not(.hidden) { --tb: 50px; }
+  body.mobile #tab-map:has(.mdrawer:not(.hidden)) .mapwrap { bottom: var(--tb); right: calc(min(380px, 52%) + 12px); }
+  body.mobile .mdrawer { left: auto; top: 6px; width: min(380px, 52%); height: auto; }
+  body.mobile .toast { bottom: calc(60px + env(safe-area-inset-bottom)); }
+  body.mobile .countdown { padding: 4px 8px; }
+  body.mobile .cdl { width: 34px; height: 34px; }
+}
+@media (orientation: landscape) and (max-height: 500px) and (min-width: 756px) {
+  body.mobile .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

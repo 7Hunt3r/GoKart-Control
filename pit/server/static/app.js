@@ -146,7 +146,8 @@ function mobileCardHtml(k) {
         <div class="row sm"><span class="val" data-f="gpsmph"></span></div>
         <div class="row sm"><span><span class="val" data-f="wheel">--</span><span class="lbl"> mph wheel (uncalibrated)</span></span></div>
         ${kartButtons(k)}
-        <div class="lastcmd"><span class="lbl">Last command</span> <span class="outcome" data-f="out"></span></div>
+        <div class="lastcmd"><span><span class="lbl">Last command</span> <span class="outcome" data-f="out"></span></span>
+          <button class="mdetail" data-sheet="${k}">DETAILS</button></div>
       </div>`;
 }
 function buildCards() {
@@ -336,7 +337,7 @@ function updateTop() {
     if (hc) { he.textContent = hc.text; he.className = "chip " + hc.cls; }
   }
   chip("raceChip", race.active ? `RACE ${MODES[race.mode]} (${race.entered.length})` : "race off", race.active ? "info" : "", KIOSK && !race.active);
-  $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
+  if ($("clock")) $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
   const cb = $("connBanner");
   if (!L.connected) { cb.textContent = "T-BEAM LINK DOWN: telemetry is frozen and commands cannot be sent"; cb.classList.remove("hidden"); }
   else cb.classList.add("hidden");
@@ -410,7 +411,7 @@ function buildRace() {
     <p class="note">START RACE sends one "race" command to all karts: each holds at zero power, then all launch
       together when the lights go out. STOP still wins during the hold; START releases a kart early.</p>
     <p class="note">RACE ON sends the selected mode + START to entered karts and STOP to karts not entered,
-      with per-kart outcomes in CMDS. RACE OFF only clears the race flag; it sends nothing.
+      with per-kart outcomes in ${MOBILE ? "LOG" : "CMDS"}. RACE OFF only clears the race flag; it sends nothing.
       Entry and filters never remove a kart from telemetry or fleet commands.</p>`;
   const startRace = () => {
     const secs = store.get("gk_racesecs", 5), laps = store.get("gk_racelaps", 0);
@@ -1025,9 +1026,29 @@ function zoneEdit(on) {
   }
   zed.on = on;
   zed.shownSel = undefined;
-  if ($("zoneBar")) $("zoneBar").classList.toggle("hidden", !on);
+  if ($("zoneBar")) { $("zoneBar").classList.toggle("hidden", !on); if (MOBILE && on) $("zoneBar").scrollTop = 0; }
   if ($("zoneEdit")) $("zoneEdit").classList.toggle("sel", on);
+  if (MOBILE && on) paceDrawer(false);         // phone: one MAP drawer at a time
   if (S) { drawMap(); updateZoneBar(); }
+}
+/* phone MAP tab: the ZONES (#zoneBar) and PACE CAR (#paceBar) drawers over the lower map, one at a
+   time. The pace drawer opens by itself when a recording starts (unless zone edits are unsaved). */
+let paceWasRec = null;
+function paceDrawer(open) {
+  const p = $("paceBar");
+  if (!MOBILE || !p) return;
+  p.classList.toggle("hidden", !open);
+  if ($("paceTgl")) $("paceTgl").classList.toggle("sel", open);
+  if (open) { p.scrollTop = 0; paceKey = ""; pollPace(); }
+}
+function updateMobileMap() {
+  if (!MOBILE || !$("paceBar") || !S) return;
+  const rec = !!(S.track_rec && S.track_rec.recording);
+  if (rec && paceWasRec !== true && $("paceBar").classList.contains("hidden") && !zed.dirty) {
+    if (zed.on) zoneEdit(false);
+    paceDrawer(true);
+  }
+  paceWasRec = rec;
 }
 const ZONE_HINT = {
   boost: "Tap the map to place a boost pad (5 m)", mud: "Tap the map to place a mud patch (6 m)",
@@ -1112,7 +1133,7 @@ function lapsTable(board, compact) {
 function lapsStatus() {
   const G = S.fleet.game || {};
   if (!G.enabled) return "Game is OFF: no lap timing. Zones are ignored by the karts.";
-  if (!G.lapline) return "No lap line yet: draw one with ZONES on the operator page.";
+  if (!G.lapline) return `No lap line yet: draw one with ZONES on the ${MOBILE ? "MAP tab" : "operator page"}.`;
   if (!(S.fleet.laps || []).length) return `Waiting for the first crossing (min lap ${G.min_lap_s} s).`;
   return "";
 }
@@ -1302,6 +1323,7 @@ function render() {
   updateZoneBar();
   updatePace();
   updateCountdown();
+  updateMobileMap();
   sndUi();
 }
 
@@ -1312,6 +1334,7 @@ document.addEventListener("click", (e) => {
   if (ds.c) sendCmd(ds.c, Number(ds.k), ds.a === undefined ? undefined : Number(ds.a));
   else if (ds.allmode !== undefined) sendCmd("mode", 255, Number(ds.allmode));
   else if (ds.close) closeSheet();
+  else if (ds.sheet) openSheet(Number(ds.sheet));     // phone: DETAILS in an expanded card
   else if (ds.zoom) {
     if (ds.zoom === "fit") view.fit = true;
     else { view.fit = false; view.scale *= ds.zoom === "in" ? 1.5 : 1 / 1.5; }
@@ -1320,6 +1343,7 @@ document.addEventListener("click", (e) => {
     document.querySelectorAll("[data-tab]").forEach((t) => t.classList.toggle("sel", t === b));
     document.querySelectorAll(".tabpane").forEach((p) => p.classList.toggle("hidden", p.id !== "tab-" + ds.tab));
     store.set(TAB_KEY, ds.tab);
+    if (MOBILE && location.hash !== "#" + ds.tab) { try { history.replaceState(null, "", "#" + ds.tab); } catch (err) { /* ignore */ } }
     if (S) render();
     refreshLog();
   } else if (ds.enter) {
@@ -1332,6 +1356,11 @@ document.addEventListener("click", (e) => {
   else if (ds.racesecs) { store.set("gk_racesecs", Number(ds.racesecs)); if (S) updateRace(); }
   else if (ds.racelaps !== undefined) { store.set("gk_racelaps", Number(ds.racelaps)); if (S) updateRace(); }
   else if (b.id === "newRace") post("/laps/reset", {}).then((j) => { if (j && j.ok) toast("Results cleared: ready for a new race"); });
+  else if (b.id === "paceTgl") {
+    const open = $("paceBar").classList.contains("hidden");
+    if (open && zed.on) { if (zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(false); }
+    paceDrawer(open);
+  }
   else if (b.id === "zoneEdit") { if (zed.on && zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(!zed.on); }
   else if (b.id === "zSave") saveZones();
   else if (b.id === "tUndo" || b.id === "tClose" || b.id === "tClear") {
@@ -1414,12 +1443,15 @@ holdButton($("startAll"), 1000, () => sendCmd("start", 255));
 if ($("boostAll")) holdButton($("boostAll"), 1000, () => sendCmd("boost", 255, 100));
 setupZoneEditor();
 const TAB_KEY = MOBILE ? "gk_mtab" : "gk_tab";
+// phone: a #karts / #map / #race / #log hash (deep link, home-screen shortcut) beats the stored tab
+const hashTab = () => { const h = location.hash.slice(1); return /^[a-z]+$/.test(h) && document.querySelector(`[data-tab="${h}"]`) ? h : null; };
 if (KIOSK || MOBILE) {
   const first = KIOSK ? "map" : "karts";
-  const tab = store.get(TAB_KEY, first);
+  const tab = (MOBILE && hashTab()) || store.get(TAB_KEY, first);
   const btn = document.querySelector(`[data-tab="${tab}"]`);
-  if (btn && tab !== first) btn.click();
+  if (btn && (tab !== first || MOBILE)) btn.click();
 }
+if (MOBILE) window.addEventListener("hashchange", () => { const t = hashTab(); if (t) document.querySelector(`[data-tab="${t}"]`).click(); });
 window.addEventListener("resize", () => { if (S) drawMap(); });
 setInterval(watchdog, 1000);
 // smooth kart dots between fixes: 20 fps on the operator page and phone, 10 fps on the Pi kiosk

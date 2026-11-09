@@ -411,6 +411,14 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   kart 2 and could not tell ECO from SPORT (decision 7); firmware host tests check the pit / kart /
   simulator copies of the mode table; all 213 offline tests pass; image built, not flashed.
 
+**2026-11-09**
+- Phone page (`/m`) reworked so it does everything the operator page does: one-row chip strip
+  (+ base GPS chip), STOP ALL / START ALL + SLOW / BOOST / ALL ECO / NORMAL / SPORT in about 190 px,
+  tabs KARTS / MAP / RACE / LOG with `#tab` deep links, kart DETAILS bottom sheet, full ZONES editor
+  and PACE CAR recorder as drawers on a full-height map, landscape layout with the fleet buttons in a
+  left column. Kiosk and operator page unchanged. Headless screenshots only (simulator); not yet
+  tried on a real phone. New unit test keeps the phone and operator pages' shared element ids in step.
+
 ## Collaboration and delivery state
 
 Repository: `git@github.com:colinfost3r/GoKart-Control.git`. The owner requests ongoing pushes
