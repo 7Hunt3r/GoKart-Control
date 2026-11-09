@@ -6,10 +6,14 @@ messages and changes no USB contract. Enabled by `GK_M5_UART=1` in the Heltec BL
 Heltec -> M5:
 - `self` / `fleet`: unchanged output of `GoKartProtocol::gkTelemetryToJson`; `self` retains its
   USB extras. M5 ignores unknown additional fields. A zero sensor reading without the relevant
-  `vesc_link` / `fix` flag is unavailable. Own data expires after 1.5 s; valid GPS after 3 s;
-  map ghosts expire after 15 s. The base's RSSI zero sentinel is not used to infer connectivity:
+  `vesc_link` / `fix` flag is unavailable. Own data expires after 1.5 s; valid GPS after 3 s of reported fix age;
+  map ghosts expire after 15 s of reported fix age. Receipt does not reset the GPS age clock.
+  Own `fix_age_ms` takes precedence when present; otherwise `gps_age_s` has one-second
+  quantization, so exact physical fix age can be up to one second greater than reported. The base's RSSI zero sentinel is not used to infer connectivity:
   metadata's `pit` uses the actual time of the last beacon.
-- `display`: emitted after every own report (5 Hz), format below. Metadata expires after 700 ms.
+- `display`: emitted after every own report (2 Hz / 500 ms), and immediately when a token
+  rotates because of expiry, readiness or VESC link-session changes. Format below. Metadata
+  expires after 700 ms. Display redraw is 5 Hz; that does not change the source report rate.
 
 ```json
 {"t":"display","v":1,"kart":1,"boot":1234,"token":5678,"mode_ready":true,
@@ -22,7 +26,9 @@ Values above are illustrative. `modes` and `speed_cal` are read from the Heltec 
 M5 performs no wheel-RPM conversion and has no duplicated calibration. `mph:0` means uncapped
 within the VESC's own limits. `boot` is a nonzero random 32-bit boot identifier. `token` is a
 nonzero random, single-use token replaced at least once per second; zero means unavailable.
-Readiness/VESC link-session changes also invalidate tokens. Expiry never changes driving state.
+Readiness/VESC link-session changes also invalidate tokens and publish updated metadata.
+A frame already in flight at expiry, or lost to UART backpressure, can still time out as unknown;
+it is not automatically retried. Expiry never changes driving state.
 
 `request` is the last recognized M5 request ID; `result` uses existing GoKartProtocol codes:
 0 none, 1 accepted/pending, 2 VESC acknowledged and read-back verified, 3 no VESC, 4 rejected,

@@ -644,13 +644,17 @@ static bool m5ModeReady() {
   return writeAllowed() && vescUuid.length() == 24 && !stopActive && !raceHold &&
          wState == W_IDLE && rampIdx < 0 && !otaInProgress && !baselineSuspect;
 }
+static void m5Report();
 static void serviceM5() {
 #if GK_M5_UART
   uint32_t now = millis();
   bool ready = m5ModeReady();
-  if (m5Gate.expired(now) || ready != m5WasReady || m5LinkSession != vescLinkUpMs)
-    m5Gate.rotate(esp_random(), now);
+  bool rotated = m5Gate.expired(now) || ready != m5WasReady || m5LinkSession != vescLinkUpMs;
+  if (rotated) m5Gate.rotate(esp_random(), now);
   m5WasReady = ready; m5LinkSession = vescLinkUpMs;
+  // Publish the replacement now, not up to 500 ms later at the next USB report.
+  // Backpressure still drops whole lines; a lost/in-flight request remains unknown, never retried.
+  if (rotated) m5Report();
   // Bounded input work, and only CRC-checked, fresh single-use mode requests are understood.
   unsigned budget = 128;
   while (budget-- && Serial2.available()) {

@@ -40,7 +40,8 @@ References: [Pi 3 B](https://www.raspberrypi.com/products/raspberry-pi-3-model-b
 
 ## M5 v1.5 option (2026-11-09)
 
-Existing M5 app targets Core2 (320x240). Proposed wiring is Core2 PORT.A G33 RX to Heltec G47
+Owner confirmed M5Stack Core2 v1.3 / K010-V13 (320x240) on 2026-11-09
+([product](https://shop.m5stack.com/products/m5stack-core2-esp32-iot-development-kit-v1-3)). Proposed wiring is Core2 PORT.A G33 RX to Heltec G47
 TX, G32 TX to Heltec G48 RX, shared ground, 3.3 V UART logic at 230400 baud. Exact unit/pinout,
 power supply/backfeed and sustained UART load are not yet checked. Keep Heltec power independent
 of the display. [M5 wiring/build guide](../firmware/m5-core2/README.md). No hardware was changed.

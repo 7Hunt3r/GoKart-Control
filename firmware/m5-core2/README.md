@@ -1,6 +1,7 @@
 # M5 Core2 v1.5
 
 Branch **`v1.5/m5-core2`**, based on Eamon's `8d9c41c` (2026-11-09).
+Owner confirmed the display is **Core2 v1.3 / K010-V13** on 2026-11-09.
 An alternative driver display for the existing Heltec + pit stack. The Pi v2 display remains
 available. This milestone implements telemetry, mode requests, base-station status and a simple
 north-up map. **Source/build work only: neither board has been flashed or wired for M5 testing.**
@@ -27,8 +28,9 @@ one new UART-only `display` metadata line. See [SERIAL_PROTOCOL](SERIAL_PROTOCOL
 All eight IDs work; Colin remains 1, Eamon remains 2. Do not assign a new ID based on display type.
 PIT OK means a recent pit beacon was heard; it does not prove the pit received this kart.
 Both display types use the same pit. Local display refresh targets 5 Hz; fleet updates remain
-at the configured LoRa rate (currently 2 Hz direct / 1 Hz with a repeater). No eight-kart UART
-or RF load test is claimed.
+at the configured LoRa rate (currently 2 Hz direct / 1 Hz with a repeater). No physical
+eight-kart UART or RF load test is claimed. Current Heltec `self` telemetry arrives at 2 Hz (500 ms);
+5 Hz is the screen redraw rate, not a promise of 5 new telemetry samples per second.
 
 ## What the display does
 
@@ -55,7 +57,7 @@ existing Wi-Fi OTA path remains as upstream; this branch does not add or authori
 ## Proposed wiring (verify on the actual boards before connecting)
 
 Use the Core2's exposed **PORT.A / Grove** (G32/G33), not the USB connector. GPIO numbers are
-for Core2 and Heltec HTIT-WB32LAF V4.3; check the exact unit and connector orientation.
+for Core2 v1.3 and Heltec HTIT-WB32LAF V4.3; check the exact unit and connector orientation.
 
 | Connection | Core2 | Heltec |
 | --- | --- | --- |
@@ -64,7 +66,8 @@ for Core2 and Heltec HTIT-WB32LAF V4.3; check the exact unit and connector orien
 | Ground | GND (black) | GND |
 | Power | Regulated supply to Core2 | Independently adequate regulated supply to Heltec |
 
-UART signals are **3.3 V logic**, 230400 baud, 8N1. Grove red is 5 V power, not a data line.
+UART signals are **3.3 V logic**, 230400 baud, 8N1. For the initial USB-powered bench setup, leave the red 5 V wire disconnected and insulated.
+The Heltec pads labeled TX/RX are GPIO43/44; use the pads marked **47/48** for this link.
 Do not tie independently powered 5 V outputs together or feed a signal pin from 5 V. The Heltec
 must remain powered when the screen loses power. Power budgeting/backfeed and connector pinout
 are unverified on this assembly. The earlier Pi-powered Heltec had brownouts; a display's
@@ -74,7 +77,7 @@ Heltec UART2 pins 47/48 are free in the BLE build. `GK_M5_UART` plus `VESC_TRANS
 compile-time error: those builds would contend for UART2. USB-C remains available for the
 Heltec's existing console/provisioning. GPS UART1 and LoRa pins remain unchanged.
 
-References: [Core2 pin map](https://docs.m5stack.com/en/core/Core2),
+References: [Core2 pin map](https://docs.m5stack.com/en/core/Core2_v1.3),
 [Heltec V4](https://heltec.org/project/wifi-lora-32-v4/), existing `kart-heltec-v4/config.h`.
 
 ## Build
@@ -132,7 +135,8 @@ only geographic geometry, never Wi-Fi credentials or motor limits.
 - Eamon's existing write/OTA policy differs from Colin's older integration safeguards. This
   branch does not merge PR #4 or declare those outstanding integration questions resolved.
 
-First physical sequence, still pending:
+The [first-session guide](BRINGUP.md) has a wiring table, expected screens, troubleshooting
+and a results checklist for the planned 2026-11-10 bench. First physical sequence, still pending:
 1. Inspect the Core2/Heltec pinout and power arrangement; retain rollback images.
 2. Flash `m5-demo` to check display/touch independently when the owner authorizes deployment.
 3. Use `m5` + `kart-m5-readonly`; verify ID 1, volts/current/ESC values, GPS fix, UART drops and
@@ -147,8 +151,11 @@ First physical sequence, still pending:
 ## Verification
 
 Host tests exercise the real shared telemetry encoder, JSON parser, expiry/CRC/single-use gate,
-request outcomes, boot/link loss, timestamp rollover, map freshness and course export. They need
-C++17 plus ArduinoJson's installed header directory:
+request outcomes, boot/link loss, timestamp rollover, map freshness and course export. A second
+native test simulates 600 seconds of eight-kart traffic, losses, corrupt frames and restart
+recovery; old GPS samples keep their source age instead of becoming fresh upon arrival.
+The printed UART utilization is ideal serialization arithmetic, not measured hardware throughput.
+These tests need C++17 plus ArduinoJson's installed header directory:
 
 ```sh
 export ARDUINOJSON_DIR='/path/to/Arduino/libraries/ArduinoJson/src'

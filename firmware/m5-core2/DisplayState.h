@@ -92,12 +92,17 @@ public:
     if(k.mode<0||k.mode>2)k.mode=-1;
     k.volts=value(doc["volts"]);k.battA=value(doc["batt_a"]);k.motorA=value(doc["motor_a"]);k.escC=value(doc["esc_c"]);k.scale=value(doc["scale"]);
     k.fault=doc["fault"].is<int>()?doc["fault"].as<int>():-1;k.sats=doc["sats"]|0;k.slow=doc["slow_mph"]|0;
-    k.fix=(doc["fix"]|false)&&number(doc["lat"])&&number(doc["lon"])&&(doc["gps_age_s"]|255)<=2;
-    if(own && doc["fix_age_ms"].is<unsigned>() && doc["fix_age_ms"].as<unsigned>()>3000)k.fix=false;
+    bool ageValid=doc["gps_age_s"].is<unsigned>() && doc["gps_age_s"].as<unsigned>()<=2;
+    uint32_t ageMs=ageValid?doc["gps_age_s"].as<unsigned>()*1000U:0;
+    if(own && !doc["fix_age_ms"].isNull()) {
+      ageValid=doc["fix_age_ms"].is<unsigned>() && doc["fix_age_ms"].as<unsigned>()<=3000;
+      ageMs=ageValid?doc["fix_age_ms"].as<unsigned>():0;
+    }
+    k.fix=(doc["fix"]|false)&&number(doc["lat"])&&number(doc["lon"])&&ageValid;
     if(k.fix) {
       double a=doc["lat"],b=doc["lon"];
       if(!location(a,b))k.fix=false;
-      else {k.lat=a;k.lon=b;k.hasPosition=true;k.fixReceived=now;}
+      else {k.lat=a;k.lon=b;k.hasPosition=true;k.fixReceived=now-ageMs;}
     }
     k.gpsKph=k.fix?value(doc["gps_kph"]):NAN;
     return true;

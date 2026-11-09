@@ -138,7 +138,7 @@
   "display_variants": {
     "m5_v1_5": {
       "branch": "v1.5/m5-core2",
-      "hardware": "M5Stack Core2",
+      "hardware": "M5Stack Core2 v1.3 (K010-V13)",
       "resolution": [
         320,
         240

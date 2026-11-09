@@ -4,8 +4,8 @@
 
 **Branch:** `v1.5/m5-core2`, based on Eamon's `8d9c41c` (including his 0.2.3 speed
 calibration, Pi changes and new Pi-only FREEPLAY feature). Worktree is `.worktrees/m5-v1.5`
-in Colin's canonical project; his integration checkout and untracked CAD work are untouched. This milestone
-adds the display option requested by the owner; it does not merge or deploy either branch.
+in Colin's canonical project; his integration checkout and untracked CAD work are untouched.
+This milestone adds the display option requested by the owner; it does not merge or deploy either branch.
 
 **Implemented:** `firmware/m5-core2` has a 320x240 Core2 dashboard, GPS MPH, electrical/ESC
 telemetry, mode requests with pending/confirmed/unknown outcomes, and a simple eight-kart
@@ -22,9 +22,28 @@ STOP/GRID/busy/OTA/baseline-suspect requests are rejected, not deferred. CRC, sh
 single-use tokens and bounded line processing protect the local request path. These tokens
 expire requests only; they never alter the running VESC on communication loss.
 
-**Validation:** all seven offline suites pass after the FREEPLAY integration (235 tests, zero
-skipped), including four M5 checks with 162 native C++ assertions under address/undefined-behavior sanitizers. All six
-affected targets compile with ESP32 core 3.3.8: `m5`, `m5-demo`, `kart-m5`,
+**Bench preparation (2026-11-09):** owner confirmed **Core2 v1.3 / K010-V13** and plans wiring
+on **2026-11-10**. [First-session guide](firmware/m5-core2/BRINGUP.md) covers the exact cable,
+build targets, expected results, identity checks and a troubleshooting/results checklist.
+An eight-point shop outline is exported locally to ignored `firmware/build/m5-bringup/course.json`
+for an SD test; it is not Manresa course data. The exporter reproduces it from the shared pit track.
+
+**Pre-bench fixes:** Heltec publishes new mode-token metadata immediately after rotation or a
+readiness/link-session change, avoiding the old wait until the next periodic report. An expired
+in-flight frame can still become unknown; requests are never replayed. The display preserves
+reported GPS age instead of renewing an old fix on receipt (including own precise millisecond age).
+Periodic telemetry/metadata is **2 Hz**, screen redraw **5 Hz**; no radio or VESC polling rate changed.
+
+**Host simulation:** 600 virtual seconds, eight karts, 11,170 frames / 5,224,444 bytes, including
+cable/GPS/peer loss, corrupt lines, late acknowledgements and restart recovery. Peak scheduled
+burst 4,582 bytes per 500 ms is 39.8% of ideal 230400-baud 8N1 capacity. This is encoding/parser
+and state validation, not physical latency/buffering evidence: a fully simultaneous burst exceeds
+the Heltec's 4096-byte TX ring, so hardware burst/drop behavior remains part of commissioning.
+
+**Validation:** all seven offline suites pass (236 tests, zero skipped), including five M5 host
+checks with the original 162 C++ assertions plus stream/recovery/GPS-age scenarios under
+address/undefined-behavior sanitizers. All six affected targets compile with ESP32 core 3.3.8:
+`m5`, `m5-demo`, `kart-m5`,
 `kart-m5-readonly`, `kart`, `kart-uart`. `git diff --check` passes. These are host/build
 results; physical acceptance is still pending.
 **Hardware:** no M5, Heltec, VESC, pit or repeater has been flashed, commanded or rewired in

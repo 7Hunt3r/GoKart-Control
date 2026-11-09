@@ -14,7 +14,7 @@ exporter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(exporter)
 
 class M5Tests(unittest.TestCase):
-    def test_native_state_protocol(self):
+    def run_native(self, source):
         compiler = shutil.which('c++')
         self.assertIsNotNone(compiler, 'C++ compiler required for M5 regression checks')
         candidates = [Path(os.environ.get('ARDUINOJSON_DIR', '/nonexistent')),
@@ -27,8 +27,14 @@ class M5Tests(unittest.TestCase):
             subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                             '-g', '-I'+str(include), '-I'+str(ROOT/'firmware/libraries/M5DisplayLink'),
                             '-I'+str(ROOT/'firmware/libraries/GoKartProtocol'), '-I'+str(ROOT/'firmware/m5-core2'),
-                            str(ROOT/'firmware/m5-core2/tests/core_test.cpp'), '-o', str(exe)], check=True)
+                            str(ROOT/'firmware/m5-core2/tests'/source), '-o', str(exe)], check=True)
             subprocess.run([str(exe)], check=True, timeout=30)
+
+    def test_native_state_protocol(self):
+        self.run_native('core_test.cpp')
+
+    def test_eight_kart_stream_and_recovery(self):
+        self.run_native('stream_test.cpp')
 
     def test_course_from_pit_contract(self):
         zones = json.loads((ROOT/'pit/server/map/zones.json').read_text())
