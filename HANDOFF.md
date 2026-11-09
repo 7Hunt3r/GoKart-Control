@@ -91,7 +91,8 @@ Hardware in hand (from the bench logs):
 
 ### Open (not started or not yet tried)
 
-- SLOW, BOOST and the race grid hold against a live VESC; wheels-up throttle check under STOP.
+- BOOST and the race grid hold against a live VESC (SLOW, ECO/NORMAL/SPORT caps, STOP and START were
+  verified wheels-up on 2026-11-09, see History).
 - Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
   Kart 2 runs 0.2.2 (OTA 2026-11-07 20:14). The `dmesg -w` USB-reset watch (750 mA peaks at 27 dBm
   off the Pi's USB) is still owed: it needs the Heltec actually cabled to the kart Pi, and on
@@ -428,6 +429,22 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
 - Kart display SUN mode (the panel's backlight cannot be raised): opaque black HUD with white edges,
   yellow active mode/gear, contrast-boosted map photo, wider outlined track band; on by default
   (`sun_mode`), SUN map button toggles it per device. Headless screenshots only, not yet seen in sun.
+
+- 2026-11-09 (late afternoon, Eamon + Claude): kart 2's first outdoor drive with the whole stack, and the
+  wheels-up test that 0.2.2 was waiting for. Wheels off the ground, VESC on, commands from the pit API
+  with the throttle held: SPORT uncapped (41,100 ERPM at duty 0.94), ECO plateau ~6,024 ERPM (cap 6,115 =
+  15 mph), SLOW 5 mph ~2,137 (cap 2,038), NORMAL seen earlier at ~10,080 with duty backed off to 0.44
+  (cap 10,191 = 25 mph); STOP -> scale 0 / stopped, START restores; every command acked and confirmed by
+  read-back. SLOW stays through mode changes until START (as designed). Before that, the Heltec rebooted
+  60 times in an hour (every 15-130 s, controller link flapping, GPS cold-starting): it stopped the moment
+  the kart's power was redone, and 0 reboots followed in 25+ min with the controller linked, so it was
+  the Pi's 5 V (Known issues 10), not firmware. The charge-only USB-C cable in the hood bay was the reason
+  the kart Pi never saw the Heltec (hub ports showed power, no connect; the flash cable fixed it). Drive:
+  ~100 m from the pit before RSSI hit -84 dBm / SNR 7 (about 30 dB worse than open air: the pit T-Beam
+  sits inside the shop next to the Pi 4), 7 packets lost of ~1,500. Range plan in order: pit antenna
+  outside on a mast (3-6 dBi omni, short low-loss coax), kart whip vertical on the hood turret, repeater
+  mid-course, then SF8/BW250 at 1 Hz (slot plan decision). Pit Pi lost power at 16:45 and rebooted
+  (journal ends abruptly). Kart display: full-screen map HUD + SUN mode shipped and deployed the same day.
 
 ## Collaboration and delivery state
 
