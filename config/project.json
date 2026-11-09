@@ -134,5 +134,27 @@
     "controller_id": 69,
     "firmware_name": "no_hw_limits",
     "motor_temp_sensors_wired": false
+  },
+  "display_variants": {
+    "m5_v1_5": {
+      "branch": "v1.5/m5-core2",
+      "hardware": "M5Stack Core2",
+      "resolution": [
+        320,
+        240
+      ],
+      "heltec_transport": "3.3 V UART 230400 8N1",
+      "scope": [
+        "telemetry",
+        "mode_requests",
+        "pit_status",
+        "simple_fleet_map"
+      ],
+      "hardware_verified": false
+    },
+    "pi_v2": {
+      "hardware": "Pi 3 B + LESOWN L7",
+      "heltec_transport": "USB serial"
+    }
   }
 }

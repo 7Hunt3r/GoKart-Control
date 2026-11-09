@@ -1,5 +1,56 @@
 # Collaborator handoff
 
+## M5 v1.5 milestone — 2026-11-09
+
+**Branch:** `v1.5/m5-core2`, based on Eamon's `8d9c41c` (including his 0.2.3 speed
+calibration, Pi changes and new Pi-only FREEPLAY feature). Worktree is `.worktrees/m5-v1.5`
+in Colin's canonical project; his integration checkout and untracked CAD work are untouched. This milestone
+adds the display option requested by the owner; it does not merge or deploy either branch.
+
+**Implemented:** `firmware/m5-core2` has a 320x240 Core2 dashboard, GPS MPH, electrical/ESC
+telemetry, mode requests with pending/confirmed/unknown outcomes, and a simple eight-kart
+north-up map. Optional SD course outlines export from the existing pit `zones.json`.
+The normal M5 build has no BLE/VESC client. `m5-demo` generates labeled synthetic data and
+never initializes the control UART. Full details: [M5 README](firmware/m5-core2/README.md).
+
+**Compatibility:** opt-in `kart-m5` / `kart-m5-readonly` builds add a dedicated 230400-baud
+UART2 bridge on Heltec G47 TX / G48 RX. Normal Pi firmware paths are unchanged. No LoRa
+wire format, slots/rates, base firmware, pit API, motor profiles, calibration or field-
+weakening values were changed. Metadata supplies caps/calibration from the Heltec at runtime.
+M5 requests use driver source 0xFE, so they do not release pit SLOW. A pinned UUID is required;
+STOP/GRID/busy/OTA/baseline-suspect requests are rejected, not deferred. CRC, short-lived
+single-use tokens and bounded line processing protect the local request path. These tokens
+expire requests only; they never alter the running VESC on communication loss.
+
+**Validation:** all seven offline suites pass after the FREEPLAY integration (235 tests, zero
+skipped), including four M5 checks with 162 native C++ assertions under address/undefined-behavior sanitizers. All six
+affected targets compile with ESP32 core 3.3.8: `m5`, `m5-demo`, `kart-m5`,
+`kart-m5-readonly`, `kart`, `kart-uart`. `git diff --check` passes. These are host/build
+results; physical acceptance is still pending.
+**Hardware:** no M5, Heltec, VESC, pit or repeater has been flashed, commanded or rewired in
+this milestone. Wiring/power, actual UART throughput, screen/touch/SD behavior, real radio
+interoperability and mode readback remain pending. The first hardware path is M5 demo,
+then `m5` + `kart-m5-readonly`; see the ordered checklist in the M5 guide.
+
+**Collaboration:** changes concentrate in `firmware/m5-core2`, `M5DisplayLink`, an optional
+adapter in the shared kart sketch, build targets and tests. Integrate this focused diff into
+Eamon's active branch through its draft PR; no changes are pushed directly onto his branch.
+Older handoff sections below include historical/reported state and unresolved document drift.
+In particular, they do not prove Colin's installed read-only telemetry image was upgraded.
+Colin's PR #4 integration safeguards and Eamon's current write/OTA policy still need separate
+reconciliation; M5 source compatibility is not field validation of those policies.
+
+**Future tuning direction (owner, 2026-11-09):** the karts felt slow before field weakening
+was introduced (owner observation, not a new measurement). Prefer calibrated RPM limits for
+ECO/NORMAL while retaining strong acceleration; retain field weakening for a possible boost
+mode. This is a tuning direction, not approved new values or permission to change settings.
+Captured maximum field-weakening current remains 95 A. Eamon's present BOOST is a temporary
+current-scale/speed-cap override, not a newly implemented field-weakening boost. No such
+change is included in v1.5. Validate drivetrain calibration and per-kart caps before tuning.
+
+---
+
+
 Updated 2026-11-06 (night), branch `eamon/firmware-lora-starter`. Read this, then
 [README.md](README.md) for the architecture and quick starts. Each component has its own
 README with full detail: [firmware](firmware/README.md), [pit](pit/README.md),

@@ -138,3 +138,14 @@ static const float STOP_RAMP[] = { 0.5f, 0.2f, 0.0f };
 #define GPS_DETECT_STEP_MS 4000
 #define FLEET_STALE_MS     5000
 #define WDT_TIMEOUT_S      20
+
+// Optional v1.5 Core2 display. Off in normal Pi builds; Serial2 is free when VESC uses BLE.
+#ifndef GK_M5_UART
+#define GK_M5_UART 0
+#endif
+#if GK_M5_UART && VESC_TRANSPORT_UART
+#error "M5 display and wired VESC cannot share UART2; use BLE VESC with the M5 target"
+#endif
+#define M5_UART_RX_PIN 48
+#define M5_UART_TX_PIN 47
+#define M5_UART_BAUD 230400

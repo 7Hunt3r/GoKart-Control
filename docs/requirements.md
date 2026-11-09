@@ -6,6 +6,22 @@ requirements from proposed implementation and unresolved details. See the
 [measured baseline](../hardware/vesc/baseline-kart/2026-11-05/README.md) and
 [handoff](../HANDOFF.md) for inspection findings and current implementation status.
 
+## M5 v1.5 owner decision — 2026-11-09
+
+- Add an M5Stack Core2 display option on distinct branch `v1.5/m5-core2`, sharing the current
+  Heltec kart supervisor and Eamon's existing base/pit protocol. Pi/LESOWN remains v2.
+- Initial scope: telemetry, ECO/NORMAL/SPORT requests, base-station connection/status and a
+  simple map of the kart and other heard karts. Heltec retains exclusive VESC/BLE ownership.
+- Preserve reliability-first behavior: loss/reconnection of the display does not change active
+  VESC settings, replay a request, or restore a saved/default mode. Keep actual and requested
+  modes distinct. No firmware deployment or motor test is implied by implementation/pushing.
+- Defer M5 game zones, aerial imagery and full Pi feature parity. SD course outlines are a
+  first implementation choice; course survey and hardware verification remain open.
+- Future tuning: owner reports the karts felt slow before field weakening was introduced.
+  Investigate RPM limits alone for ECO/NORMAL while preserving torque, retaining field weakening
+  for a possible boost mode. No final new cap, current or field-weakening values are approved.
+  Existing 95 A maximum field-weakening setting is baseline evidence, not a recommendation.
+
 ## Confirmed requirements
 
 - Category: 50 Day. Canonical project: ~/Projects/50 Day/GoKart Control/.

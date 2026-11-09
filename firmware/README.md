@@ -279,3 +279,9 @@ before anything is trusted:
   PPS-kart edge derivation and schedule-based command placement (2026-11-06 night quality pass:
   compiled and host-tested only), the VESC UART transport, the brake script on any kart,
   BOOST/RACE against a live VESC, power draw, range.
+
+## M5 Core2 v1.5 display option
+
+[Build, wiring and acceptance guide](m5-core2/README.md). Opt-in targets `m5`, `m5-demo`,
+`kart-m5-readonly` and `kart-m5` add the small display to the same fleet protocol. Normal Pi
+builds retain the original USB interface. This branch has not deployed these targets.

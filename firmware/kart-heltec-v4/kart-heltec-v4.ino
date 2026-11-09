@@ -56,6 +56,7 @@
 #include <VescLink.h>
 #include "config.h"
 #include "cmd_types.h"
+#include <M5DisplayLink.h>
 #if !VESC_TRANSPORT_UART
 #include <NimBLEDevice.h>
 #endif
@@ -216,6 +217,26 @@ uint32_t oledMs = 0, usbReportMs = 0, wifiRetryMs = 0;
 bool     wifiStarted = false, otaStarted = false, otaInProgress = false;
 char     usbLine[200];
 uint8_t  usbLen = 0; bool usbOverflow = false;
+
+// Optional display transport, isolated from USB provisioning and the radio protocol.
+#if GK_M5_UART
+m5link::Gate m5Gate;
+m5link::Lines<80> m5Lines;
+uint32_t m5Boot = 0, m5Drops = 0, m5Request = 0;
+CmdRef m5Owner = NO_OWNER;
+uint8_t m5Result = GK_RES_NONE;
+bool m5WasReady = false; uint32_t m5LinkSession = 0;
+#endif
+static void m5Emit(const char* line) {
+#if GK_M5_UART
+  size_t n = strlen(line);
+  // Whole-line drop under backpressure. Never wait for a missing/slow display or block LoRa slots.
+  if (n + 1 > (size_t)Serial2.availableForWrite()) { ++m5Drops; return; }
+  Serial2.write((const uint8_t*)line, n); Serial2.write('\n');
+#else
+  (void)line;
+#endif
+}
 
 // ---------------------------------------------------------------- helpers
 static void logf(const char* fmt, ...) {
@@ -616,6 +637,53 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
   cmdCur = NO_OWNER;
 }
 
+// ---------------------------------------------------------------- M5 display UART
+static bool m5ModeReady() {
+  // No deferred driver selections under STOP/GRID, no overlapping writes. Require a UUID pin
+  // even where the legacy USB path permits address-only binding. Driver MODE never releases SLOW.
+  return writeAllowed() && vescUuid.length() == 24 && !stopActive && !raceHold &&
+         wState == W_IDLE && rampIdx < 0 && !otaInProgress && !baselineSuspect;
+}
+static void serviceM5() {
+#if GK_M5_UART
+  uint32_t now = millis();
+  bool ready = m5ModeReady();
+  if (m5Gate.expired(now) || ready != m5WasReady || m5LinkSession != vescLinkUpMs)
+    m5Gate.rotate(esp_random(), now);
+  m5WasReady = ready; m5LinkSession = vescLinkUpMs;
+  // Bounded input work, and only CRC-checked, fresh single-use mode requests are understood.
+  unsigned budget = 128;
+  while (budget-- && Serial2.available()) {
+    const char* line = m5Lines.feed((char)Serial2.read(), millis());
+    if (!line) continue;
+    m5link::Request r;
+    if (!m5link::decode(line, r) || !m5Gate.accept(r, millis())) continue;
+    m5Request = r.id; m5Owner = NO_OWNER; m5Result = GK_RES_REJECTED;
+    if (!m5ModeReady()) continue;
+    handleCommand(0xFE, ++usbSeq, GK_CMD_SET_MODE, r.mode, 0, 0); // SAME driver source as Pi USB
+    int8_t idx = cmdLastIdx[1];
+    if (idx >= 0) { CmdEnt& e = cmdHist[1][idx]; m5Owner = {1, idx, e.seq, e.ms}; m5Result = e.result; }
+  }
+#endif
+}
+static void m5Report() {
+#if GK_M5_UART
+  CmdEnt* e = cmdEnt(m5Owner);
+  uint8_t result = e ? e->result : (m5Owner.src >= 0 ? GK_RES_UNKNOWN : m5Result);
+  char b[640];
+  int n = snprintf(b, sizeof b,
+    "{\"t\":\"display\",\"v\":1,\"kart\":%u,\"boot\":%lu,\"token\":%lu,\"mode_ready\":%s,"
+    "\"request\":%lu,\"result\":%u,\"radio\":%s,\"pit\":%s,\"base_rssi\":%d,\"rate\":%u,"
+    "\"speed_cal\":%.3f,\"drops\":%lu,\"modes\":[{\"mph\":%u,\"scale\":%.3f},{\"mph\":%u,\"scale\":%.3f},{\"mph\":%u,\"scale\":%.3f}]}",
+    kartId, (unsigned long)m5Boot, (unsigned long)(m5Gate.consumed ? 0 : m5Gate.token), gkBool(m5ModeReady()),
+    (unsigned long)m5Request, result, gkBool(radioOk), gkBool(baseHeardMs && millis()-baseHeardMs < 30000),
+    (int)baseRssi, reportRate, speedCal, (unsigned long)m5Drops,
+    MODES[0].topMph, MODES[0].currentMaxScale, MODES[1].topMph, MODES[1].currentMaxScale,
+    MODES[2].topMph, MODES[2].currentMaxScale);
+  if (n > 0 && n < (int)sizeof b) m5Emit(b);
+#endif
+}
+
 // ---------------------------------------------------------------- vesc link
 #if !VESC_TRANSPORT_UART
 static void onNotify(NimBLERemoteCharacteristic*, uint8_t* d, size_t n, bool) { bleStream.push(d, n); }
@@ -854,6 +922,7 @@ static void emitFleet(uint8_t id, float rssi, float snr) {
   char buf[640];
   gkTelemetryToJson(buf, sizeof buf, fleet[id], "fleet", rssi, snr, millis());
   Serial.println(buf);
+  m5Emit(buf);
 }
 
 static void serviceLoraRxOne();
@@ -1000,6 +1069,7 @@ static void usbReport() {
              gps.hdop.isValid() ? gps.hdop.hdop() : 99.0, lastFixMs ? (unsigned long)(now - lastFixMs) : 999999UL, gpsConfigured ? 5 : 1, bl, bo, ba, rp ? racePos : 0, rp ? raceState : 0);
   }
   Serial.println(buf);
+  m5Emit(buf);
 }
 
 static void usbStatus() {
@@ -1136,7 +1206,7 @@ static void serviceUsb() {
     }
     if (usbLen < sizeof(usbLine) - 1) usbLine[usbLen++] = c; else usbOverflow = true;
   }
-  if (millis() - usbReportMs >= USB_SELF_REPORT_MS) { usbReportMs = millis(); usbReport(); }
+  if (millis() - usbReportMs >= USB_SELF_REPORT_MS) { usbReportMs = millis(); usbReport(); m5Report(); }
 }
 
 // ---------------------------------------------------------------- oled
@@ -1244,6 +1314,12 @@ void setup() {
   NimBLEDevice::setPower(9);
 #endif
 
+#if GK_M5_UART
+  Serial2.setRxBufferSize(256); Serial2.setTxBufferSize(4096);
+  Serial2.begin(M5_UART_BAUD, SERIAL_8N1, M5_UART_RX_PIN, M5_UART_TX_PIN);
+  m5Boot = esp_random(); if (!m5Boot) m5Boot = 1;
+  m5Gate.rotate(esp_random(), millis());
+#endif
   wifiStart();
 
   esp_task_wdt_config_t wdt = { .timeout_ms = WDT_TIMEOUT_S * 1000, .idle_core_mask = 0, .trigger_panic = true };
@@ -1257,6 +1333,7 @@ void setup() {
 
 void loop() {
   if (!otaInProgress) esp_task_wdt_reset();
+  serviceM5();
   serviceUsb();
   serviceVesc();
   serviceWrites();

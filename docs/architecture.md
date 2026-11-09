@@ -7,7 +7,8 @@ choices remain open pending hardware checks.
 flowchart LR
   D[Hardwired driver inputs] --> V[VESC]
   V <-->|BLE preferred| H[Heltec V4.3 with GPS]
-  H <-->|USB serial: telemetry and UI requests| K[Kart Pi 3 B: display]
+  H <-->|USB serial: telemetry and UI requests| K[Kart Pi 3 B: v2 display]
+  H <-->|Optional UART: telemetry and mode requests| M[M5 Core2: v1.5 display]
   K <-->|HDMI video + USB touch| T[LESOWN L7 1024x600]
   H <-->|LoRa| B[Pit base radio]
   B <-->|Serial| P[Pi 4 pit server]
@@ -15,8 +16,17 @@ flowchart LR
 ```
 
 The diagram shows one kart; repeat it up to eight times. Kart-to-kart position
-sharing can use direct reception or a pit fleet summary; choose after airtime
-and coverage measurements. Neither path is currently implemented.
+sharing uses direct/repeater reception in Eamon's current firmware. The M5 consumes those
+fleet reports through the Heltec; no new pit fleet broadcast is required. Coverage and
+eight-kart load measurements remain pending for the M5 assembly.
+
+## M5 v1.5 alternative (2026-11-09)
+
+The Core2 replaces the Pi/display assembly on a v1.5 kart. It does not replace the Heltec or
+share BLE ownership. Firmware reuses the same radio protocol and motor policy; the optional
+UART adapter and [display contract](../firmware/m5-core2/SERIAL_PROTOCOL.md) isolate local UI
+requests. Both display versions can participate in the same eight-kart fleet. Local map
+outlines are display data, not geofence enforcement. Hardware acceptance remains pending.
 
 ## Boundaries
 

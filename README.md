@@ -1,5 +1,10 @@
 # GoKart Control
 
+**M5 v1.5 branch:** `v1.5/m5-core2` adds a Core2 display option alongside the Pi v2.
+Telemetry, driver mode requests and a simple fleet map share Eamon's Heltec/base protocol.
+Start with the [M5 guide](firmware/m5-core2/README.md) and [handoff](HANDOFF.md).
+This is source/build work, not a hardware deployment.
+
 Fleet system for eight electric karts at Manresa Island, Connecticut: a supervisor
 board on every kart, a shared LoRa radio network, a pit station with touch kiosk and
 shared web control, a driver display on every kart, and an optional "Mario Kart" game
@@ -42,6 +47,7 @@ Details, evidence and open decisions: [HANDOFF.md](HANDOFF.md).
 | Repeater | second T-Beam S3 Core | [firmware/repeater-tbeam-s3](firmware/repeater-tbeam-s3) | Re-sends every packet once, 25 ms later inside the same slot, relay bit 0x80 set; heartbeat every 5 s shown as a pit chip |
 | Pit station | Raspberry Pi 4 + HDMI touch panel | [pit/](pit/README.md) | Fleet state, command delivery with per-kart outcomes, race/laps, zones editor, session logs; touch kiosk, password-protected operator page, phone page at `/m` |
 | Kart display | Raspberry Pi 3 B + LESOWN L7 7" 1024x600 | [kart/](kart/README.md) | Display only (never talks to the VESC): speed, mode, banners, map from the pit, own geofence engine for the game, sounds |
+| M5 v1.5 display (alternative) | M5Stack Core2 320x240 | [firmware/m5-core2](firmware/m5-core2/README.md) | Telemetry, guarded mode requests and fleet/course outline over an optional Heltec UART; host/build checks passed, hardware testing pending |
 | On-VESC script (optional) | VESC LispBM | [firmware/vesc-lisp](firmware/vesc-lisp/README.md) | Regen on STOP; not loaded on any kart (owner decision pending) |
 
 **Game layer** (off by default; contract [pit/server/map/ZONES.md](pit/server/map/ZONES.md)).

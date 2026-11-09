@@ -141,3 +141,13 @@ Configuration changes, firmware changes and motor tests are separate, documented
 - The pit server arbitrates writes from multiple browsers; browsers never own serial ports.
 - Scope control changes to verified hardware and a documented test plan.
 - Reuse the pinned 6.00 schema only when the controller signature matches.
+
+## M5 v1.5 coordination
+
+Branch `v1.5/m5-core2` is based on Eamon's `8d9c41c`. Keep the shared radio contract and motor
+policy with the Heltec; M5 UI code lives in `firmware/m5-core2`. The branch's draft PR targets
+`eamon/firmware-lora-starter` so the M5 diff can be reviewed independently of main integration.
+The implementing agent maintains the focused PR and handoff; merge/deployment remains separate.
+For all tests on this branch, install ArduinoJson 7.4.3 and set `ARDUINOJSON_DIR` to its `src`
+directory (see M5 README). M5 host checks use C++17 plus address/undefined-behavior sanitizers.
+Compile affected targets `m5`, `m5-demo`, `kart-m5`, `kart-m5-readonly`, `kart`, `kart-uart`.
