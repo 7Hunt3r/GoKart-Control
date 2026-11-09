@@ -64,6 +64,18 @@ The pit draws the image by placing its four bounds in local metres
 few hundred metres across; it is not a reprojection. The image must already
 be in (or warped to) plain WGS84 lat/lon (EPSG:4326) with north up.
 
+## Contrast-enhanced copies (`*_hc.jpg`, 2026-11-09)
+
+The CT ECO orthos are low-contrast as exported (the shop box uses luma 31..228 of 255, Manresa
+37..151), which read as grey mush on the kart's sunlit 7" screen. `pit/tools/enhance_map.py`
+(a Mac dev tool: Pillow + numpy, never run on a Pi) makes the `_hc` copies the presets now point
+at: percentile level stretch (1..99.5 %), gamma 0.85, a large-radius local-contrast pass, a
+small-radius sharpen, mild saturation, and for the Manresa images a grey-world white balance
+(the raw Manresa ortho goes magenta when stretched). Exact arguments are in the tool's header.
+`course_shop_cteco_hc.jpg` and `course_hc.jpg` are CC0 derivatives and tracked;
+`course_skyfi_hc.jpg` is licensed like its source and gitignored. The originals stay next to
+them; flipping a preset's `image` back and bumping `version` undoes it on every kart.
+
 ## Adding CT ECO imagery later (proposed procedure, not yet done)
 
 1. Download the 2023 3-inch orthoimagery tile(s) covering Manresa Island from

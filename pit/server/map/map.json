@@ -1,7 +1,7 @@
 {
   "_comment": "Bench preset around the shop at 50 Day St, Norwalk (box cut around nearby 165 Water St; covers both). course_shop.jpg is local-only (license).",
-  "version": 6,
-  "image": "course_shop_cteco.jpg",
+  "version": 7,
+  "image": "course_shop_cteco_hc.jpg",
   "bounds": {
     "north": 41.0989218,
     "south": 41.085921799999994,

@@ -1,7 +1,7 @@
 {
   "_comment": "Manresa Island preset. Copy to map.json at the track (then restart gokart-pit so the fallback origin updates).",
-  "version": 2,
-  "image": "course_skyfi.jpg",
+  "version": 3,
+  "image": "course_skyfi_hc.jpg",
   "bounds": {
     "north": 41.0815,
     "south": 41.068,

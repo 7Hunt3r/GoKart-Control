@@ -37,6 +37,7 @@ session-*.jsonl
 # Licensed imagery: SkyFi satellite cuts are local-only and must never be committed.
 # (course.jpg and course_shop_cteco.jpg are public CT ECO orthoimagery and are tracked.)
 course_skyfi.jpg
+course_skyfi_hc.jpg
 course_shop.jpg
 *skyfi*
 

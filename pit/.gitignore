@@ -9,6 +9,7 @@ __pycache__/
 .DS_Store
 # licensed imagery, local only
 server/map/course_skyfi.jpg
+server/map/course_skyfi_hc.jpg
 server/map/course_shop.jpg
 # pace car recordings (runtime data, keep only the folder)
 server/map/recordings/*
