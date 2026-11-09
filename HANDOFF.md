@@ -418,6 +418,13 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   and PACE CAR recorder as drawers on a full-height map, landscape layout with the fleet buttons in a
   left column. Kiosk and operator page unchanged. Headless screenshots only (simulator); not yet
   tried on a real phone. New unit test keeps the phone and operator pages' shared element ids in step.
+- Kart driver display: full-bleed map with a HUD (owner: "I want the map to be bigger", speed and mode
+  small or over the map). The 380 px dash column is gone; chips + lap panel top-left, map buttons
+  top-right, a 252 x 156 translucent speed card (arc, gear badge, one battery line) bottom-left, the
+  ECO / NORMAL / SPORT strip (160 x 64 buttons) bottom-centre with the boost meter shown only while it
+  matters, sound bottom-right; the canvas scale bar moved above the speed card (one app.js line).
+  Headless 1024x600 screenshots only (simulator: driving, no fix, no VESC, STOPPED, SLOW, race,
+  finish, roulette, under-voltage); not yet deployed to kart 2 or tried with gloves in sun.
 
 ## Collaboration and delivery state
 

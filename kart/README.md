@@ -286,15 +286,27 @@ with a fix, plus a 4 Hz tick):
   game effect; validated (2-200 points, a bad track is ignored and the zones
   still work) and sent to the page as `game.track`.
 
-**Driver page.** Dark racing dash (polish pass 2026-11-06): near-black panels, light-grey labels,
-pure white only for the numbers, solid state colours, no glow. Black speedometer card (0-30 mph arc, GPS mph; wheel mph,
+**Driver page.** Full-bleed map with a HUD on top (2026-11-09, the owner: "I want the map to be
+bigger"): the map fills all 1024 px under the banner row, and the old 380 px dash column is gone.
+HUD panels are black at >= 0.6 alpha, pure white only for the numbers, solid state colours, no glow,
+no border under 2 px. Zones (CSS px in the map area, which shrinks by 64 px under an alert banner;
+everything bottom-anchored stays put): chips on a translucent pill top-left (8, 8); the lap panel /
+GAME OFF chip / P badge / FINISHED chip under it (8, 52); the map buttons top-right as before, the
+item roulette top, right 84; the speed card bottom-left (left 8, bottom 22, 252 x 156, the map drags
+through it); the canvas scale bar just above it, and "follow in N s" above that; the mode column
+bottom-centre (x 266-758, bottom 22): ECO / NORMAL / SPORT buttons 160 x 64 each, over them one or
+two 14 px note lines (mode read-back, last command), the boost meter (only while boost / mud / grid /
+stopped) and the red VESC fault pill; sound controls bottom-right (at most 248 px, TEST SOUND wraps
+above); NO GPS FIX YET in the middle of the map; the map note footer along the bottom edge. The
+LAST | BEST strip and the speed / battery notes stay in the page (app.js fills them) but are not shown.
+The speed card: 0-30 mph arc, GPS mph (~58 px italic; wheel mph,
 labelled WHEEL, only when there is no GPS fix), the mode as a gear badge (E / N / S,
 dashed blue while a request is pending), a BOOST meter (the live VESC current
 `scale` against the requested mode's scale, marked: amber "BOOST!" above it, brown
 "MUD" below it, with the seconds left), a lap panel on the map (lap N, current,
 last, best) or a small GAME OFF chip, zones on the map (boost = amber with
 chevrons, mud = brown with dots, lap line = checkered; greyed when the game is
-off), a thin LAST | BEST strip under the speedometer while the game is on, the PIT chip
+off), one battery line (% , volts, 6 px bar) under the gauge, the PIT chip
 coloured by how well the kart hears the pit (`base_rssi` > -90 green, > -105 amber, else red),
 and a short full-screen flash (the text pops in) + synthesized sound on boost, mud and each
 lap; the BOOST meter pulses while boosting.
@@ -457,7 +469,7 @@ Hostname `gokart-kart-N` (`gokart-kart-N.local`), user `kart`, app in
   to the session log and the journal (`health ok -> undervolt throttled=0x50005 ...`). The driver
   page shows a chip after GPS only when something is wrong: red UNDERVOLT (under-voltage now), amber
   THROTTLED (frequency capped / throttled / soft temperature limit now), dim HAD UNDERVOLT (only the
-  since-boot bit); while it shows, the chip row shrinks to 12 px so it still fits the 380 px column.
+  since-boot bit). The HUD chip row has ~740 px, so it no longer compacts (`.chips.crowded` has no style).
   Off a Pi (Mac, tests) the status is "unavailable" and there is no chip. The kart Pi needs a
   5 V 3 A supply; the Pi 3 B on the bench browned out with the panel alone, 2026-11-07.
 

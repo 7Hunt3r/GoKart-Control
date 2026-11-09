@@ -18,7 +18,11 @@
   </div>
 </div>
 <div class="main">
-  <section class="dash">
+  <section class="mapwrap">
+    <canvas id="map"></canvas>
+    <div id="mapMsg" class="mapmsg hidden"></div>
+    <!-- HUD over the full-bleed map (2026-11-09): chips + lap cluster top-left, map buttons top-right,
+         speed card bottom-left, mode strip bottom-centre, sound bottom-right -->
     <div id="chips" class="chips">
       <span id="kartChip" class="chip id">KART ?</span>
       <span id="linkChip" class="chip bad hidden">USB</span>
@@ -27,39 +31,6 @@
       <span id="gpsChip" class="chip">GPS ?</span>
       <span id="healthChip" class="chip hidden"></span>
     </div>
-    <div id="speedo" class="speedo">
-      <svg id="speedoSvg" viewBox="0 0 360 196" preserveAspectRatio="xMidYMid meet" aria-label="speed">
-        <path id="arcBg" class="arcbg" d=""/>
-        <path id="arcFg" class="arcfg" d=""/>
-        <g id="ticks"></g>
-        <text id="mph" class="mphnum" x="180" y="152" text-anchor="middle">--</text>
-        <text id="mphUnit" class="mphunit" x="180" y="180" text-anchor="middle">MPH <tspan id="mphSrc">GPS</tspan></text>
-      </svg>
-      <div id="gear" class="gear"><b id="gearLetter">-</b><span id="modeNow">--</span></div>
-    </div>
-    <div id="lapStrip" class="lapstrip hidden"><span>LAST <b id="lsLast">--</b></span><span>BEST <b id="lsBest">--</b></span></div>
-    <div id="mphNote" class="note"></div>
-    <div id="boostMeter" class="meter unknown">
-      <div class="btrack"><div id="bBase"></div><div id="bFill"></div><div id="bMark"></div></div>
-      <span id="boostLabel" class="blabel">--</span>
-    </div>
-    <div class="batt">
-      <div class="battrow"><span class="lbl">BATT</span><span id="battPct" class="mid">--</span><span id="battV" class="volts">-- V</span></div>
-      <div class="bar"><div id="battBar"></div></div>
-      <div id="battNote" class="note battnote"></div>
-    </div>
-    <div id="modeNote" class="note"></div>
-    <div id="faultBox" class="fault hidden"></div>
-    <div class="modebtns">
-      <button class="mbtn" data-mode="0"><small>E</small>ECO<span class="cap"></span></button>
-      <button class="mbtn" data-mode="1"><small>N</small>NORMAL<span class="cap"></span></button>
-      <button class="mbtn" data-mode="2"><small>S</small>SPORT<span class="cap"></span></button>
-    </div>
-    <div id="cmdNote" class="note cmd"></div>
-  </section>
-  <section class="mapwrap">
-    <canvas id="map"></canvas>
-    <div id="mapMsg" class="mapmsg hidden"></div>
     <div class="tl">
       <div id="lapPanel" class="lappanel hidden">
         <div class="lapflag"></div>
@@ -80,6 +51,36 @@
       <button data-zoom="all">ALL</button>
     </div>
     <div id="resumeNote" class="resume hidden"></div>
+    <div id="speedo" class="speedo">
+      <svg id="speedoSvg" viewBox="0 0 360 196" preserveAspectRatio="xMidYMid meet" aria-label="speed">
+        <path id="arcBg" class="arcbg" d=""/>
+        <path id="arcFg" class="arcfg" d=""/>
+        <g id="ticks"></g>
+        <text id="mph" class="mphnum" x="180" y="152" text-anchor="middle">--</text>
+        <text id="mphUnit" class="mphunit" x="180" y="180" text-anchor="middle">MPH <tspan id="mphSrc">GPS</tspan></text>
+      </svg>
+      <div id="gear" class="gear"><b id="gearLetter">-</b><span id="modeNow">--</span></div>
+      <div class="batt">
+        <div class="battrow"><span class="lbl">BATT</span><span id="battPct" class="mid">--</span><span id="battV" class="volts">-- V</span></div>
+        <div class="bar"><div id="battBar"></div></div>
+        <div id="battNote" class="note battnote"></div>
+      </div>
+      <div id="mphNote" class="note"></div>
+    </div>
+    <div id="lapStrip" class="lapstrip hidden"><span>LAST <b id="lsLast">--</b></span><span>BEST <b id="lsBest">--</b></span></div>
+    <div class="modehud">
+      <div id="faultBox" class="fault hidden"></div>
+      <div id="boostMeter" class="meter unknown">
+        <div class="btrack"><div id="bBase"></div><div id="bFill"></div><div id="bMark"></div></div>
+        <span id="boostLabel" class="blabel">--</span>
+      </div>
+      <div class="hudnotes"><div id="modeNote" class="note"></div><div id="cmdNote" class="note cmd"></div></div>
+      <div class="modebtns">
+        <button class="mbtn" data-mode="0"><small>E</small>ECO<span class="cap"></span></button>
+        <button class="mbtn" data-mode="1"><small>N</small>NORMAL<span class="cap"></span></button>
+        <button class="mbtn" data-mode="2"><small>S</small>SPORT<span class="cap"></span></button>
+      </div>
+    </div>
     <div class="sndwrap"><button id="sndTest" class="sndtest hidden">TEST SOUND</button><span id="sndHint" class="sndhint hidden">TAP TO ENABLE SOUND</span><button id="sndBtn" class="sndbtn" aria-label="sound"></button></div>
     <div id="mapNote" class="mapnote foot"></div>
   </section>

@@ -49,6 +49,7 @@ class Stack:
         with open(os.path.join(t, "pitmap", m["image"]), "wb") as f:
             f.write(JPEG)
         self.image = m["image"]
+        self.version = m["version"]
         if zones is not None:                                   # fake_pit serves zones.json next to map.json
             with open(os.path.join(t, "pitmap", "zones.json"), "w") as f:
                 json.dump(zones, f)
@@ -145,7 +146,7 @@ class EndToEnd(unittest.TestCase):
             s = st.wait(lambda s: s["map"]["package"] is not None, what="map package")
             pkg = s["map"]["package"]
             self.assertEqual(pkg["image"], "/map/" + st.image)
-            self.assertEqual(pkg["version"], 6)
+            self.assertEqual(pkg["version"], st.version)              # the shop preset's (6 -> 7 on 2026-11-09)
             code, data = st.request("GET", pkg["image"])
             self.assertEqual((code, data), (200, JPEG))
             self.assertEqual(st.request("GET", "/map/package.json")[0], 200)

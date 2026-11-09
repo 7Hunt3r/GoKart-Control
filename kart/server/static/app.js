@@ -887,11 +887,11 @@ function drawMap() {
   else if (!meFresh) { txt("mapMsg", me.link === "online" ? "NO GPS FIX" : "POSITION FROZEN"); show("mapMsg", true); }
   else show("mapMsg", false);
 
-  // scale bar + north arrow
-  const step = niceStep(90 / view.scale), len = step * view.scale;
-  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(6, H - 46, len + 70, 26);
-  ctx.strokeStyle = "#e6e6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(12, H - 28); ctx.lineTo(12 + len, H - 28); ctx.stroke();
-  ctx.fillStyle = "#e6e6e6"; ctx.font = "bold 14px sans-serif"; ctx.fillText(`${step} m`, 18 + len, H - 24);
+  // scale bar (bottom-left, just above the HUD speed card: style.css .speedo is bottom 22 + 156 tall) + north arrow
+  const step = niceStep(90 / view.scale), len = step * view.scale, sb = H - 208;
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(8, sb, len + 70, 26);
+  ctx.strokeStyle = "#e6e6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(14, sb + 18); ctx.lineTo(14 + len, sb + 18); ctx.stroke();
+  ctx.fillStyle = "#e6e6e6"; ctx.font = "bold 14px sans-serif"; ctx.fillText(`${step} m`, 20 + len, sb + 22);
   // north compass: top-right, under the map buttons, 1.5x the old size (r 30)
   const [ccx, ccy] = compassPos(W);
   ctx.save(); ctx.translate(ccx, ccy); ctx.rotate(-view.rot);

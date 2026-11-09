@@ -1,7 +1,9 @@
-/* GoKart kart driver display, 1024x600 touch. Dark racing dash: near-black panels, light-grey
-   labels, pure white only for the numbers (speed, battery, lap times), solid state colours, no
-   glow. Game layer (ZONES.md): speedometer card, boost meter, lap strip + panel, item roulette,
-   flashes and the full-screen race start. The safety banners (STOPPED, SLOW, GRID, connection,
+/* GoKart kart driver display, 1024x600 touch. Full-bleed map with a HUD on top (2026-11-09): chips +
+   lap cluster top-left, map buttons top-right, a compact speed card bottom-left, the mode strip
+   bottom-centre, sound bottom-right. HUD panels are black at >= .6 alpha, pure white only for the
+   numbers (speed, battery, lap times), solid state colours, no glow, no border under 2 px. Game layer
+   (ZONES.md): speedometer card, boost meter, lap panel, item roulette, flashes and the full-screen
+   race start. The safety banners (STOPPED, SLOW, GRID, connection,
    SIMULATION) stay above everything, including the race start takeover. */
 :root {
   --bg: #0b0c0e; --panel: #15171a; --card: #000; --ink: #d6d6d6; --num: #fff; --muted: #8d9096; --line: #3b3f45;
@@ -32,10 +34,8 @@ button { font: inherit; font-weight: 800; border: 2px solid var(--line); border-
 .banner.grid span { background: #000; padding: 0 18px; border-radius: 6px; }
 .chip.id { touch-action: none; position: relative; overflow: hidden; }
 .chip.id.holding::after { content: ""; position: absolute; left: 0; bottom: 0; height: 4px; width: calc(var(--hp, 0) * 100%); background: var(--boost); }
-/* with an alert banner showing, the dashboard gives up some height so the mode buttons stay on screen */
-body.alerting .mid { font-size: 34px; }
-body.alerting .mbtn { height: 62px; }
-body.alerting .battnote { display: none; }
+/* with an alert banner showing the map gets 64 px shorter; the HUD is anchored to the map's edges, so
+   nothing else changes (the old dash column had to shrink here) */
 .banner.bad { background: #1a0000; color: #fff; font-size: 22px; border-bottom: 4px solid var(--bad); }
 .banner.sim { background: repeating-linear-gradient(45deg, #ffd400 0 16px, #111 16px 32px); color: #fff; font-size: 15px; padding: 2px;
   white-space: nowrap; overflow: hidden; }
@@ -43,12 +43,12 @@ body.alerting .battnote { display: none; }
 .banner.sim span { background: #000; padding: 0 12px; border-radius: 4px; }
 .banner.sim.demo { font-size: 17px; }
 
-.main { flex: 1; display: grid; grid-template-columns: 380px 1fr; min-height: 0; }
+.main { flex: 1; position: relative; min-height: 0; }
 
-/* left: driver dashboard */
-.dash { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; background: var(--panel); border-right: 3px solid #000;
-  min-height: 0; overflow: hidden; }
-.chips { display: flex; gap: 5px; flex-wrap: nowrap; overflow: hidden; }
+/* HUD top-left: the status chips on a translucent pill (the chips keep their solid state colours) */
+.chips { position: absolute; top: 8px; left: 8px; z-index: 4; display: flex; gap: 5px; flex-wrap: nowrap; overflow: hidden;
+  max-width: 740px; padding: 4px; border-radius: 9px; background: rgba(0,0,0,.6); pointer-events: none; }
+.chips .chip.id { pointer-events: auto; }
 .chip { display: inline-flex; align-items: center; height: 30px; padding: 0 8px; border-radius: 6px; font-weight: 900; font-size: 16px;
   border: 2px solid var(--stale); color: #e8e8e8; background: var(--stale); white-space: nowrap; }
 .chip.ok { background: var(--ok); border-color: var(--ok); }
@@ -60,19 +60,20 @@ body.alerting .battnote { display: none; }
 .chip.link { flex: 1; justify-content: center; }
 body.pulse .chip.link.warn { opacity: .7; }
 /* Pi power health chip (same states/colours as the pit pages): red UNDERVOLT, amber THROTTLED, dim
-   HAD UNDERVOLT. While it shows, the chip row compacts so all of it still fits the 380 px dash column
-   (the row never wraps or widens the page; the health chip is the one that never gets cut).
-   Measured in DejaVu Sans Bold: KART 2 / PIT -72 / VESC / GPS 11 5Hz / UNDERVOLT fits 361 px at 12 px. */
+   HAD UNDERVOLT. The full-width map leaves the row ~740 px, so it no longer compacts: app.js still
+   sets .chips.crowded with the health chip, which now has no style. */
 .chip.health { flex-shrink: 0; }
 .chip.health.warn { background: #ffb000; border-color: #ffb000; color: #000; }
 .chip.health.stale { background: var(--stale); border-color: #8a8a8a; color: #e8e8e8; }
-.chips.crowded { gap: 3px; }
-.chips.crowded .chip { font-size: 12px; padding: 0 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.chips.crowded .chip.health { overflow: visible; }
 
-/* speedometer: black card, arc 0-30 mph, big italic number, gear badge */
-.speedo { position: relative; flex: 1 1 0; min-height: 112px; background: var(--card); border: 2px solid #26292e; border-radius: 12px; overflow: hidden; }
-.speedo svg { position: absolute; inset: 2px 0 0 0; width: 100%; height: calc(100% - 2px); }
+/* HUD bottom-left: speed card 252 x 156 (arc 0-30 mph, italic number ~58 px, gear badge on the right,
+   one battery line under the gauge). The map drags through it. The SVG is drawn in viewBox units by
+   app.js; it is just placed at 0.61 scale, pushed 22 px left / 4 px up so the arc (x 49-311, y 11-196 of the
+   viewBox) sits ~8 px in, with the battery line under it. */
+.speedo { position: absolute; left: 8px; bottom: 22px; width: 252px; height: 156px; z-index: 3; pointer-events: none;
+  background: rgba(0,0,0,.6); border: 2px solid rgba(255,255,255,.35); border-radius: 12px; overflow: hidden; }
+.speedo svg { position: absolute; left: -22px; top: -4px; width: 220px; height: 120px; }
+.speedo .ticklbl { font-size: 22px; }
 .arcbg { fill: none; stroke: #2a2d31; stroke-width: 22; stroke-linecap: butt; }
 .arcfg { fill: none; stroke: #ececec; stroke-width: 22; stroke-linecap: butt; }
 .speedo.boost .arcfg { stroke: var(--boost); }
@@ -85,15 +86,16 @@ body.pulse .chip.link.warn { opacity: .7; }
 .mphnum.na { fill: #8a8a8a; font-size: 46px; font-style: normal; letter-spacing: 0; }
 .mphunit { fill: #c4c4c4; font-size: 20px; font-weight: 900; letter-spacing: 2px; }
 .mphunit tspan { fill: #8a8a8a; font-size: 14px; }
-.gear { position: absolute; right: 6px; bottom: 6px; width: 70px; display: flex; flex-direction: column; align-items: center;
-  background: #dcdcdc; color: #000; border: 3px solid #dcdcdc; border-radius: 9px; padding: 0 0 2px; line-height: 1; }
+.gear { position: absolute; right: 8px; top: 10px; width: 60px; display: flex; flex-direction: column; align-items: center;
+  background: #dcdcdc; color: #000; border: 3px solid #dcdcdc; border-radius: 9px; padding: 0 0 3px; line-height: 1; overflow: hidden; }
 .gear b { font-size: 40px; font-weight: 900; font-style: italic; }
-.gear span { font-size: 11px; font-weight: 900; letter-spacing: .02em; white-space: nowrap; }
+.gear span { font-size: 10px; font-weight: 900; letter-spacing: 0; white-space: nowrap; }
 .gear.req { border-style: dashed; border-color: var(--info); background: #c9d8f2; }
 .gear.stale { background: #6a6a6a; border-color: #6a6a6a; }
 .gear.g2 { background: var(--boost); border-color: var(--boost); }
 
-/* lap strip under the speedometer (game on): LAST | BEST */
+/* lap strip (LAST | BEST): redundant with the lap panel on the HUD; kept for app.js, never shown */
+#lapStrip { display: none !important; }
 .lapstrip { display: flex; height: 26px; flex: none; border-radius: 6px; overflow: hidden; background: #000; border: 2px solid #26292e;
   font-size: 13px; font-weight: 800; color: var(--muted); letter-spacing: .04em; font-variant-numeric: tabular-nums; }
 .lapstrip span { flex: 1; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; }
@@ -101,8 +103,19 @@ body.pulse .chip.link.warn { opacity: .7; }
 .lapstrip b { color: var(--num); font-size: 17px; font-style: italic; letter-spacing: 0; }
 .lapstrip b.best { color: #5dff86; }
 
-/* boost meter: live current scale vs the mode's scale (mark); above = BOOST, below = MUD */
-.meter { display: flex; align-items: center; gap: 8px; height: 34px; flex: none; }
+/* HUD bottom-centre: the mode column, 492 px wide, centred, bottom 22 px (clear of the map note footer),
+   from the bottom: mode strip, mode/command notes, boost meter, fault pill. Only the buttons take touches. */
+.modehud { position: absolute; bottom: 22px; left: calc(50% - 246px); width: 492px; z-index: 3; display: flex; flex-direction: column;
+  align-items: stretch; gap: 6px; pointer-events: none; }
+.hudnotes { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.hudnotes .note { max-width: 100%; font-size: 14px; min-height: 0; line-height: 20px; padding: 0 10px; border-radius: 6px;
+  background: rgba(0,0,0,.6); color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hudnotes .note:empty { display: none; }
+
+/* boost meter: live current scale vs the mode's scale (mark); above = BOOST, below = MUD. On the HUD it
+   only shows while it matters (boost, mud, grid, stopped) */
+.meter { display: flex; align-items: center; gap: 8px; height: 34px; flex: none; padding: 2px 4px; border-radius: 8px; background: rgba(0,0,0,.6); }
+.meter.unknown, .meter.normal { display: none; }
 .btrack { position: relative; flex: 1; height: 26px; border: 2px solid var(--line); border-radius: 6px; overflow: hidden;
   background: repeating-linear-gradient(-60deg, #1b1d21 0 10px, #23262b 10px 20px); }
 .btrack > div { position: absolute; top: 0; bottom: 0; }
@@ -124,25 +137,32 @@ body.pulse .meter.boost .btrack { border-color: #fff2b8; }
 .note { font-size: 15px; font-weight: 700; color: var(--muted); min-height: 18px; }
 .note.cmd { font-size: 16px; color: var(--ink); }
 
-.batt { border-top: 2px solid var(--line); padding-top: 2px; }
-.battrow { display: flex; align-items: baseline; gap: 12px; }
-.mid { font-size: 40px; font-weight: 900; font-variant-numeric: tabular-nums; line-height: 1.05; color: var(--num); }
-.volts { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--ink); }
-.bar { height: 14px; border: 2px solid var(--line); border-radius: 4px; margin-top: 2px; background: #000; }
+/* battery: one line at the bottom of the speed card, 6 px bar */
+.batt { position: absolute; left: 10px; right: 10px; bottom: 6px; }
+.battrow { display: flex; align-items: baseline; gap: 10px; line-height: 1; }
+.mid { font-size: 20px; font-weight: 900; font-variant-numeric: tabular-nums; line-height: 1; color: var(--num); }
+.volts { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--ink); }
+.bar { height: 6px; border-radius: 3px; margin-top: 3px; background: #000; overflow: hidden; }
+/* the notes under speed and battery stay in the page (app.js fills them) but the card has no room */
+.speedo .note { display: none; }
 .bar > div { height: 100%; width: 0; background: var(--ok); }
 .stale .mid, .stale .volts, .stale .modenow { color: #6d7076; }
 
-.lbl { font-size: 18px; font-weight: 900; color: var(--muted); }
+.lbl { font-size: 14px; font-weight: 900; color: var(--muted); }
 /* footer lines (battery note, map note): one 12 px muted style */
 .foot, .note.battnote { font-size: 12px; font-weight: 700; color: var(--muted); min-height: 14px; letter-spacing: .01em; }
 
 .fault { background: var(--bad); color: #fff; font-weight: 900; font-size: 18px; padding: 3px 8px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.modebtns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: auto; }
-.mbtn { height: 76px; font-size: 20px; padding: 0 2px; position: relative; overflow: hidden; --p: 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1; }
-.mbtn small { font-size: 26px; font-style: italic; font-weight: 900; }
-.mbtn .cap { font-size: 12px; font-weight: 400; opacity: .75; margin-top: 3px; }   /* the mode's speed cap (app.js MODE_TOP_MPH) */
+/* three 160 x 64 buttons: big letter on the left, name over the speed cap on the right (the name is a
+   bare text node, auto-placed into the free grid cell) */
+.modebtns { display: grid; grid-template-columns: repeat(3, 160px); gap: 6px; }
+.mbtn { height: 64px; font-size: 20px; padding: 0 4px; position: relative; overflow: hidden; --p: 0; pointer-events: auto;
+  background: rgba(0,0,0,.6); color: #fff; border-color: rgba(255,255,255,.45);
+  display: grid; grid-template-columns: auto auto; grid-template-rows: auto auto; column-gap: 10px; row-gap: 3px;
+  align-content: center; justify-content: center; align-items: center; justify-items: start; line-height: 1; }
+.mbtn small { grid-column: 1; grid-row: 1 / 3; font-size: 34px; font-style: italic; font-weight: 900; }
+.mbtn .cap { grid-column: 2; grid-row: 2; font-size: 13px; font-weight: 700; opacity: .8; }   /* the mode's speed cap (app.js MODE_TOP_MPH) */
 .mbtn.actual { background: #dcdcdc; color: #000; border-color: #dcdcdc; }
 .mbtn.req:not(.actual) { border-style: dashed; border-color: var(--info); color: #8fb6ff; }
 .mbtn:disabled { opacity: .35; }
@@ -153,8 +173,8 @@ body.pulse .meter.boost .btrack { border-color: #fff2b8; }
   mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
   opacity: calc(var(--p) * 100); pointer-events: none; }
 
-/* right: map */
-.mapwrap { position: relative; min-width: 0; min-height: 0; background: #33363a; }
+/* the map: the whole area under the banners */
+.mapwrap { position: absolute; inset: 0; background: #33363a; }
 #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 /* slim, see-through map buttons so they do not eat the map */
 /* touch targets >= 56 px (gloved hands, bumpy track) */
@@ -163,13 +183,18 @@ body.pulse .meter.boost .btrack { border-color: #fff2b8; }
   text-shadow: 0 1px 2px #000; }
 .mapctl #followBtn { font-size: 14px; letter-spacing: .02em; }
 .mapctl button.sel { background: rgba(230,230,230,.82); color: #000; border-color: rgba(255,255,255,.9); text-shadow: none; }
-.mapmsg { position: absolute; left: 50%; bottom: 76px; transform: translateX(-50%); background: rgba(0,0,0,.85); color: #eee;
+.mapmsg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; background: rgba(0,0,0,.85); color: #eee;
   font-size: 28px; font-weight: 900; padding: 10px 18px; border-radius: 10px; text-align: center; pointer-events: none; }
-.resume { position: absolute; bottom: 52px; left: 8px; background: #000; color: #eee; font-weight: 800; font-size: 16px; padding: 4px 10px; border-radius: 6px; }
+/* above the speed card and the canvas scale bar (app.js draws that at H-208..H-182) */
+.resume { position: absolute; bottom: 214px; left: 8px; z-index: 3; background: #000; color: #eee; font-weight: 800; font-size: 16px; padding: 4px 10px; border-radius: 6px; }
 .mapnote { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.62); padding: 1px 6px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-/* sound: mute toggle bottom-right of the map, "tap to enable" chip until audio is unlocked */
-.sndwrap { position: absolute; right: 8px; bottom: 22px; display: flex; align-items: center; gap: 6px; }
+/* sound: mute toggle bottom-right of the map, "tap to enable" chip until audio is unlocked. At most 248 px
+   wide so it clears the mode strip (ends at x 758): TEST SOUND (demo) wraps to a row above. */
+.sndwrap { position: absolute; right: 8px; bottom: 22px; z-index: 3; max-width: 248px; display: flex; flex-direction: row-reverse;
+  flex-wrap: wrap-reverse; justify-content: flex-start; align-items: center; gap: 6px; }
+/* row-reverse: the mute button rightmost, then the hint, then TEST SOUND */
+.sndbtn { order: -2; } .sndhint { order: -1; }
 .sndbtn { width: 56px; height: 56px; padding: 0; background: rgba(0,0,0,.42); border: 2px solid rgba(255,255,255,.55); color: #fff;
   display: flex; align-items: center; justify-content: center; }
 .sndbtn svg { width: 30px; height: 30px; }
@@ -180,7 +205,7 @@ body.pulse .meter.boost .btrack { border-color: #fff2b8; }
 
 /* lap panel (top-left of the map) and the GAME OFF chip */
 /* top-left of the map: lap panel (or GAME OFF chip) and the P badge side by side */
-.tl { position: absolute; top: 8px; left: 8px; display: flex; align-items: flex-start; gap: 10px; pointer-events: none; z-index: 4; }
+.tl { position: absolute; top: 52px; left: 8px; display: flex; align-items: flex-start; gap: 10px; pointer-events: none; z-index: 4; }
 .lappanel { position: relative; min-width: 196px; background: rgba(0,0,0,.86); color: var(--ink);
   border-radius: 10px; padding: 0 12px 6px; font-variant-numeric: tabular-nums; pointer-events: none; overflow: hidden; }
 .lapflag { height: 10px; margin: 0 -12px 4px; background: repeating-conic-gradient(#e8e8e8 0 25%, #000 0 50%) 0 0 / 10px 10px; }
