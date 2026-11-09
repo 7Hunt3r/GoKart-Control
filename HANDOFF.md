@@ -462,6 +462,15 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   take it out of slow"); the driver's own mode buttons do not. The proper fix is the si_* values in VESC
   Tool (Colin), after which speedcal goes back to 1.0.
 
+- 2026-11-09 (night): kart display FREEPLAY (owner: random boxes to drive onto, boosts and slow-downs, "runs
+  without the pit"). `kartcore.FreeplayGame` records one lap of the kart's own GPS as the course, keeps 3
+  item boxes on it (respawn 3 s after pickup, >= 20 m away, new id) and feeds the normal game engine, so the
+  item roll / roulette / safety rules are the existing ones; the pit's own game (enabled with zones) pauses
+  it. FREEPLAY map button (tap on/off, hold 2 s new course), `#freeChip`, `POST /api/freeplay`, config
+  `freeplay` / `freeplay_boxes`, state in `cache/freeplay.json`. Simulator + headless screenshots only; not
+  deployed. Open for the owner: freeplay keeps running when the pit's game is switched OFF (the brief), so
+  the pit master switch no longer silences a kart whose driver turned freeplay on.
+
 ## Collaboration and delivery state
 
 Repository: `git@github.com:colinfost3r/GoKart-Control.git`. The owner requests ongoing pushes

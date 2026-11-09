@@ -102,3 +102,13 @@ STOP RACE before GO is ABORT START: the pit sends STOP to all karts instead and 
 crossings during the grid hold never count. After a
 finish the pit freezes lap timing (final results) until the next race start or lap reset, and the
 kart display shows the checkered FINISH takeover and stops counting laps until the next countdown.
+
+## Freeplay (kart-local, 2026-11-09)
+
+A kart can run its own item-box game with no pit (kart/README.md "Freeplay"). The kart generates a
+zones document in this same format (`"version": "freeplay-N"`, `"enabled": true`, `"source": "freeplay"`,
+`type: "item"` circles of 4 m with `cooldown_s` 15, plus a closed `track` recorded from one lap of its own
+GPS) and runs it through the same engine, so the item contract above applies unchanged (same roll, same
+`boost` lines, scale never above 1.0, nothing while STOPPED or in grid hold). The pit's own game wins: a
+pit `zones.json` with `enabled: true` and at least one zone or lap line pauses freeplay on every kart.
+The pit never sees freeplay boxes, and freeplay documents are never written to `zones.json`.

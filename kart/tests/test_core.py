@@ -1209,5 +1209,293 @@ console.log(JSON.stringify([{available:true,status:'undervolt'},{available:true,
         self.assertEqual(out[3:], [None, None, None])
 
 
+# --- freeplay: kart-local item boxes, no pit (README "Freeplay") --------------------------------
+def fp_pos(e, n, t, kph=18.0, usable=True, reset=False):
+    lat, lon = ll(e, n)
+    return {"lat": lat, "lon": lon, "kph": kph, "usable": usable, "reset": reset, "mono": t, "quality": "good"}
+
+
+def rect_path(w=60.0, h=40.0, step=2.0, x0=-30.0, y0=-20.0):
+    """Closed rectangle loop (w x h m, 200 m by default) as (e, n) points every `step` m, anticlockwise."""
+    corners = [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h), (x0, y0)]
+    out = []
+    for (ax, ay), (bx, by) in zip(corners, corners[1:]):
+        L = math.hypot(bx - ax, by - ay)
+        k = int(round(L / step))
+        out += [(ax + (bx - ax) * i / k, ay + (by - ay) * i / k) for i in range(k)]
+    return out
+
+
+def fp_course(**kw):
+    return kc.course_from_lap([ll(e, n) for e, n in rect_path(**kw)])
+
+
+class Freeplay(unittest.TestCase):
+    def ready(self, seed=1, boxes=3, kart=(-30.0, -20.0), t=1.0):
+        fp = kc.FreeplayGame(boxes=boxes, rng=__import__("random").Random(seed))
+        fp.set_on(True, 0.0)
+        if kart is not None:
+            fp.on_pos(fp_pos(*kart, t - 0.5), t - 0.5)
+        fp.set_course(fp_course(), "recorded", t, [])
+        fp.select(None, t)
+        recs = fp.tick(t)
+        fp.select(None, t)
+        return fp, recs
+
+    def test_loop_closure_from_a_driven_path(self):
+        fp = kc.FreeplayGame(rng=__import__("random").Random(3))
+        fp.set_on(True, 0.0)
+        self.assertEqual(fp.select(None, 0.0)[0]["zones"], [])
+        self.assertEqual(fp.phase, "no_gps")                          # no fix yet
+        path = rect_path(step=2.0)
+        t, recs = 1.0, []
+        for i, (e, n) in enumerate(path + path[:20]):
+            recs += fp.on_pos(fp_pos(e, n, t), t)
+            fp.select(None, t)
+            if i == 3:
+                self.assertEqual(fp.phase, "recording")
+                self.assertAlmostEqual(fp.snapshot(t)["record"]["distance_m"], 6.0, delta=0.1)
+            if i == 40:                                               # a 60 m GPS jump is rejected
+                recs += fp.on_pos(fp_pos(e + 60, n, t + 0.05), t + 0.05)
+            t += 0.4                                                  # 2 m every 0.4 s = 18 km/h
+            if fp.course:
+                break
+        self.assertEqual(fp.rec, None)
+        c = fp.course
+        self.assertTrue(c["closed"])
+        self.assertEqual(c["source"], "recorded")
+        self.assertAlmostEqual(c["length_m"], 200.0, delta=4.0)       # closed at the nearest approach
+        self.assertLessEqual(len(c["points"]), kc.TRACK_MAX_POINTS)
+        self.assertLessEqual(len(c["points"]), 8)                     # a rectangle simplifies to its corners
+        self.assertEqual(c["width_m"], 6.0)
+        self.assertEqual(len(evs(recs, "freeplay_course")), 1)
+        self.assertTrue(all(r["source"] == "freeplay" for r in recs))
+        fp.select(None, t)
+        self.assertEqual(fp.phase, "ready")
+        self.assertEqual(fp.doc()["track"]["points"], c["points"])
+
+    def test_recorder_needs_60_m_and_spacing(self):
+        r = kc.LoopRecorder()
+        for i in range(10):                                           # a 10 m wiggle never closes
+            self.assertIsNone(r.feed(*ll(i % 2, 0), 18.0, i * 0.4))
+        self.assertLessEqual(len(r.points), 1)                        # 1 m apart < 1.5 m spacing
+        self.assertEqual(len(kc.simplify_track([ll(i, 0) for i in range(500)] + [ll(499, 20)])), 3)
+
+    def test_box_placement_rules(self):
+        for seed in range(25):
+            kart = (-30.0, -20.0 + seed)
+            fp, recs = self.ready(seed=seed, kart=kart)
+            bs = fp.boxes
+            self.assertEqual(len(bs), 3, seed)
+            self.assertEqual(sorted(b["name"] for b in bs), ["Box 1", "Box 2", "Box 3"])
+            self.assertEqual(len({b["id"] for b in bs}), 3)
+            for i, a in enumerate(bs):
+                self.assertLess(fp.loop.dist_m(a["lat"], a["lon"]), 0.05)               # on the loop
+                self.assertGreaterEqual(kc._dist_m(ll(*kart), (a["lat"], a["lon"])), 10.0)   # clear of the kart
+                for b in bs[i + 1:]:
+                    self.assertGreaterEqual(fp.loop.arc(a["s"], b["s"]), 15.0)           # spacing along the loop
+            zs = fp.doc()["zones"]
+            self.assertEqual({(z["type"], z["shape"], z["r_m"], z["cooldown_s"]) for z in zs}, {("item", "circle", 4.0, 15.0)})
+            self.assertEqual(len(evs(recs, "freeplay_spawn")), 3)
+        fp, _ = self.ready(boxes=6)
+        self.assertEqual(len(fp.boxes), 6)
+        fp = kc.FreeplayGame(boxes=6, rng=__import__("random").Random(1))
+        fp.set_on(True, 0.0)
+        fp.set_course(fp_course(w=20, h=10), "recorded", 1.0, [])      # 60 m loop: at most 4 boxes 15 m apart
+        fp.select(None, 1.0)
+        fp.tick(1.0)
+        self.assertLessEqual(len(fp.boxes), 4)
+        self.assertGreaterEqual(len(fp.boxes), 1)
+        self.assertEqual(kc.FreeplayGame(boxes=99).n_boxes, 6)
+
+    def drive(self, fp, g, path, t, laps=1.0, dt=0.2, mps=6.0, pit=None):
+        """The server's loop: gps sample -> engine -> freeplay on_pos/on_game; ticker every 0.25 s."""
+        P = sim_heltec.PolyPath([ll(e, n) for e, n in path])
+        recs, s, next_tick = [], 0.0, t
+        while s < P.length * laps:
+            lat, lon, hd = P.at(s)
+            r = g.on_gps({"t": "gps", "lat": lat, "lon": lon, "kph": mps * 3.6, "heading": hd, "hdop": 1.0, "sats": 10}, t)
+            r += fp.on_pos(g.pos, t) + fp.on_game(r, t)
+            recs += r
+            while next_tick <= t:
+                _, rr = fp.select(pit, next_tick)
+                rr += fp.tick(next_tick)
+                doc, more = fp.select(pit, next_tick)
+                recs += rr + more + g.set_zones(doc, next_tick) + g.tick(next_tick)
+                next_tick += 0.25
+            t += dt
+            s += mps * dt
+        return recs, t
+
+    def test_collect_remove_respawn_with_new_id(self):
+        fp, _ = self.ready(seed=4)
+        g = kc.GameEngine(rng=FixedRng(0.1))                           # every roll = BOOST
+        g.set_zones(fp.select(None, 1.0)[0], 1.0)
+        first = [dict(b) for b in fp.boxes]
+        first_ids = {b["id"] for b in first}
+        recs, t = self.drive(fp, g, rect_path(), 1.0, laps=1.0)
+        got = evs(recs, "freeplay_collected")
+        self.assertGreaterEqual(len(got), 3, [r for r in recs if r["ev"].startswith("freeplay")])
+        self.assertEqual(fp.collected, len(got))
+        items = evs(recs, "item")
+        self.assertTrue(items and all(r["source"] == "freeplay" for r in items))
+        self.assertTrue(set(lines(recs)) <= {"boost 5 1.00"}, lines(recs))      # only the item effect, never above 1.0
+        self.assertTrue(all(r["source"] == "freeplay" for r in recs if r["ev"] == "cmd"))
+        spawns = [r for r in evs(recs, "freeplay_spawn") if r.get("respawn")]
+        self.assertGreaterEqual(len(spawns), 2)
+        for c in got:                                                  # removed at once, back 3 s later elsewhere
+            ci = recs.index(c)
+            sp = next(r for r in recs[ci:] if r in spawns and r["name"] == c["name"])
+            issued_before = {r["zone"] for r in recs[:recs.index(sp)] if r["ev"] == "freeplay_spawn"} | first_ids
+            self.assertNotIn(sp["zone"], issued_before)                # a NEW zone id
+            gone = next(r for r in evs(recs, "freeplay_spawn") if r["zone"] == c["zone"]) if c["zone"] not in first_ids \
+                else {"lat": next(b for b in first if b["id"] == c["zone"])["lat"],
+                      "lon": next(b for b in first if b["id"] == c["zone"])["lon"]}
+            self.assertGreaterEqual(kc._dist_m((gone["lat"], gone["lon"]), (sp["lat"], sp["lon"])), 20.0)
+        exits = [r for r in evs(recs, "zone_exit") if r.get("why") == "zones changed"]
+        self.assertTrue({c["zone"] for c in got} <= {r["zone"] for r in exits})
+        for c in got:                                                  # the engine forgot the old box's state
+            self.assertNotIn(c["zone"], g.zst)
+
+    def test_respawn_timing(self):
+        fp, _ = self.ready(seed=2)
+        b = fp.boxes[0]
+        r = fp.on_game([{"ev": "item", "zone": b["id"], "item": "mud"}], 10.0)
+        self.assertEqual(r[0]["collected"], 1)
+        self.assertNotIn(b["id"], [z["id"] for z in fp.select(None, 10.0)[0]["zones"]])
+        self.assertEqual(evs(fp.tick(12.9), "freeplay_spawn"), [])
+        sp = evs(fp.tick(13.0), "freeplay_spawn")
+        self.assertEqual((len(sp), sp[0]["name"], sp[0]["respawn"]), (1, b["name"], True))
+        self.assertNotEqual(sp[0]["zone"], b["id"])
+        self.assertGreaterEqual(kc._dist_m((b["lat"], b["lon"]), (sp[0]["lat"], sp[0]["lon"])), 20.0)
+        self.assertEqual(fp.on_game([{"ev": "item", "zone": "someone-else"}], 14.0), [])
+
+    def test_stopped_or_grid_kart_does_not_collect(self):
+        fp, _ = self.ready(seed=5)
+        g = kc.GameEngine(rng=FixedRng(0.1))
+        g.set_zones(fp.select(None, 1.0)[0], 1.0)
+        b = fp.boxes[0]
+        e, n = kc.local_en(b["lat"], b["lon"], O)
+        r = g.on_self(fix(e, n, stopped=True), 2.0)
+        self.assertEqual(fp.on_game(r, 2.0), [])
+        self.assertEqual(lines(r), [])
+        self.assertEqual(len(fp.boxes), 3)
+
+    def test_precedence_with_the_pit(self):
+        fp, _ = self.ready(seed=6)
+        pit_on = zones_doc(boost_zone())
+        doc, recs = fp.select(pit_on, 2.0)
+        self.assertIs(doc, pit_on)
+        self.assertEqual((fp.phase, fp.pause_reason), ("paused_pit", "pit game on"))
+        self.assertEqual(evs(recs, "freeplay_phase")[0]["phase"], "paused_pit")
+        self.assertEqual(fp.tick(2.0), [])
+        lap_only = zones_doc(lap_zone())
+        self.assertIs(fp.select(lap_only, 2.1)[0], lap_only)            # a lap line alone is a pit game
+        for pit in (None, zones_doc(boost_zone(), enabled=False), zones_doc(),
+                    dict(zones_doc(), track=square_track()), {"garbage": 1}):
+            doc, _ = fp.select(pit, 3.0)
+            self.assertEqual(doc["source"], "freeplay", pit)
+            self.assertEqual(fp.phase, "ready")
+            self.assertEqual(len(doc["zones"]), 3)
+        g = kc.GameEngine()
+        g.set_zones(fp.select(None, 3.0)[0], 3.0)
+        self.assertTrue(g.active())
+        self.assertEqual(g.snapshot(3.0)["source"], "freeplay")
+        g.set_zones(fp.select(pit_on, 4.0)[0], 4.0)                      # pit game comes back: its zones run
+        self.assertEqual([z.id for z in g.areas], ["b1"])
+        self.assertIsNone(g.source)
+        fp.select(None, 5.0)
+        fp.set_on(False, 5.0)
+        doc, _ = fp.select(zones_doc(boost_zone(), enabled=False), 5.0)
+        self.assertEqual(doc["enabled"], False)                          # off: the pit document is restored
+        self.assertEqual(fp.phase, "off")
+        fp.set_on(True, 6.0)
+        self.assertEqual(fp.select(None, 6.0, demo=True)[0], None)        # demo: freeplay off
+        self.assertEqual((fp.phase, fp.pause_reason), ("off", "demo"))
+        off = kc.FreeplayGame(allowed=False)
+        with self.assertRaises(kc.CommandError):
+            off.set_on(True, 0.0)
+        self.assertEqual(off.select(None, 0.0)[0], None)
+
+    def test_adopts_a_nearby_pit_track_unless_reset(self):
+        pit = dict(zones_doc(), track=square_track())                     # game off, closed 200 m track
+        fp = kc.FreeplayGame(rng=__import__("random").Random(1))
+        fp.set_on(True, 0.0)
+        fp.select(pit, 0.0)
+        fp.on_pos(fp_pos(500, 500, 0.5), 0.5)                            # far away: record instead
+        fp.select(pit, 0.6)
+        self.assertIsNone(fp.course)
+        fp.on_pos(fp_pos(-30, -18, 1.0), 1.0)
+        self.assertEqual(fp.course["source"], "pit")
+        self.assertEqual(fp.course["points"], kc.parse_track(pit)["points"])
+        fp.reset_course(2.0)
+        fp.select(pit, 2.0)
+        fp.on_pos(fp_pos(-30, -16, 2.5), 2.5)
+        self.assertIsNone(fp.course)                                     # after a reset: drive a lap
+        self.assertEqual(fp.phase, "recording")
+
+    def test_persistence_round_trip(self):
+        fp, _ = self.ready(seed=7)
+        fp.on_game([{"ev": "item", "zone": fp.boxes[0]["id"], "item": "boost"}], 2.0)
+        self.assertTrue(fp.changed)
+        saved = json.loads(json.dumps(fp.export()))
+        self.assertFalse(fp.changed)
+        fp2 = kc.FreeplayGame(rng=__import__("random").Random(8))
+        recs = fp2.load(saved, 0.0)
+        self.assertEqual(evs(recs, "freeplay_restored")[0]["on"], True)
+        self.assertTrue(fp2.on)
+        self.assertEqual(fp2.collected, 1)
+        self.assertEqual(fp2.course["points"], fp.course["points"])
+        self.assertEqual(fp2.course["source"], "recorded")
+        fp2.select(None, 1.0)
+        fp2.tick(1.0)
+        self.assertEqual((fp2.phase, len(fp2.boxes)), ("ready", 3))      # resumes with fresh boxes
+        fresh = kc.FreeplayGame()
+        for bad in (None, {"v": 2}, "x", {"v": 1, "on": True, "course": {"points": [[1, 2]]}}):
+            fresh = kc.FreeplayGame()
+            fresh.load(bad, 0.0)
+            self.assertIsNone(fresh.course)
+        self.assertTrue(fresh.on)                                         # on, but no course: records
+        self.assertIsNotNone(fresh.rec)
+        locked = kc.FreeplayGame(allowed=False)
+        locked.load(saved, 0.0)
+        self.assertFalse(locked.on)                                       # config off wins over the file
+
+    def test_state_block_shape(self):
+        fp, _ = self.ready(seed=9)
+        s = fp.snapshot(2.0)
+        self.assertEqual(set(s), {"allowed", "on", "phase", "pause_reason", "boxes_target", "course", "boxes",
+                                  "respawning", "collected", "record"})
+        self.assertIn(s["phase"], kc.FP_PHASES)
+        self.assertEqual(set(s["course"]), {"points", "length_m", "source"})
+        self.assertEqual(set(s["boxes"][0]), {"id", "name", "lat", "lon", "r_m"})
+        self.assertIsNone(s["record"])
+        json.dumps(s)
+        fp.reset_course(3.0)
+        fp.select(None, 3.0)
+        s = fp.snapshot(3.0)
+        self.assertEqual((s["course"], s["boxes"], s["record"]["distance_m"]), (None, [], 0.0))
+        self.assertEqual(s["phase"], "recording")                         # kart fix 1.5 s old
+        fp.select(None, 9.0)
+        self.assertEqual(fp.snapshot(9.0)["phase"], "no_gps")
+
+    def test_js_chip_text(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not installed")
+        prog = js_function("freeChip") + js_function("freeRunning") + """
+console.log(JSON.stringify([
+  freeChip({on:true,phase:'ready',boxes:[1,2,3],collected:7}), freeChip({on:true,phase:'ready',boxes:[1],collected:0}),
+  freeChip({on:true,phase:'recording',record:{distance_m:45.4}}), freeChip({on:true,phase:'no_gps'}),
+  freeChip({on:true,phase:'paused_pit'}), freeChip({on:false,phase:'off'}), freeChip(null),
+  freeRunning({on:true,phase:'ready'}), freeRunning({on:true,phase:'paused_pit'})]));"""
+        out = json.loads(subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20).stdout)
+        self.assertEqual([o and o["text"] for o in out[:7]], [
+            "FREEPLAY · 3 boxes · 7 collected", "FREEPLAY · 1 box · 0 collected",
+            "FREEPLAY: drive one lap to set the course · 45 m", "FREEPLAY: waiting for GPS",
+            "FREEPLAY PAUSED (pit game on)", None, None])
+        self.assertEqual(out[7:], [True, False])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

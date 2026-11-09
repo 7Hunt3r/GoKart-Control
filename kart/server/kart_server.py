@@ -18,6 +18,8 @@ HTTP (default 0.0.0.0:8081; the kiosk uses 127.0.0.1):
                 (from 127.0.0.1 only unless config "remote_cmd": true)
   POST /api/map/refresh   poll the pit for a new map now
   POST /api/demo  {"on": true|false} or {"toggle": true}: demo mode (localhost only, config "demo")
+  POST /api/freeplay  {"on": true|false} | {"toggle": true} | {"reset": true}: freeplay, the kart-local
+                item-box game that needs no pit (localhost only, config "freeplay"; README "Freeplay")
   /map/<file>   cached course imagery;  /map/package.json  the cached package
   /map/zones.json  the cached game zones (pit/server/map/ZONES.md), 404 when none
   /healthz      "ok"
@@ -31,6 +33,10 @@ Game layer (pit/server/map/ZONES.md): the zones file arrives with the map packag
 kartcore.GameEngine evaluates it against this kart's own fixes and the server sends
 the resulting `boost SECS SCALE` lines to the Heltec. Nothing else is ever sent by
 the game (no STOP/START/mode), and nothing above scale 1.0.
+
+Freeplay (kartcore.FreeplayGame): with no pit game running, the kart records one lap of its
+own path and keeps random item boxes on it; its zones document goes through the same engine.
+The pit's own game always wins (freeplay pauses). State in freeplay.json next to game-state.json.
 """
 from __future__ import annotations
 
@@ -84,6 +90,8 @@ DEFAULTS = {
     "sound": True,                      # driver page: synthesized game sounds (WebAudio, static/sound.js)
     "sound_volume": 0.8,                # master volume of those sounds, 0-1
     "sun_mode": True,                   # driver page: opaque high-contrast SUN theme (the SUN button overrides it per device)
+    "freeplay": True,                   # allow freeplay (FREEPLAY map button / POST /api/freeplay): kart-local item boxes, no pit
+    "freeplay_boxes": 3,                # item boxes kept on the freeplay course (1-6)
     "rotate": 0,                        # install.sh only: 180 = panel mounted ports-down (kernel + touch rotation)
     "health_period_s": health.PERIOD_S, # vcgencmd get_throttled + CPU temp sample period (Pi only)
     "health_file": None,                # tests/dev: read the get_throttled text from this file instead of vcgencmd
@@ -94,9 +102,9 @@ CONFIG_RULES = {
     "follow_resume_s": (float, 1, 600), "mode_hold_ms": (int, 0, 5000), "map_fps": (int, 1, 30),
     "http_port": (int, 1, 65535), "status_poll_s": (float, 5, 3600), "max_log_mb": (float, 10, 100000),
     "demo_max_s": (float, 10, 3600), "sound_volume": (float, 0, 1), "rotate": (int, 0, 180),
-    "health_period_s": (float, 0.2, 3600),
+    "health_period_s": (float, 0.2, 3600), "freeplay_boxes": (int, 1, 6),
 }
-CONFIG_BOOLS = ("beginner_mode", "remote_cmd", "game", "gps_correction", "demo", "sound", "sun_mode")
+CONFIG_BOOLS = ("beginner_mode", "remote_cmd", "game", "gps_correction", "demo", "sound", "sun_mode", "freeplay")
 CONFIG_CHOICES = {"map_orientation": ("heading_up", "north_up"), "rotate": (0, 180)}
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json",
@@ -106,7 +114,8 @@ SSE_PERIOD_S = 0.2
 SSE_SKIP = ("heltec", "rx_lines", "rx_bad", "gps_lines", "kiosk")   # /api/state only (the page does not use them)
 DEMO_FINISH_LAPS = 3                    # demo mode: FINISH (P1) after this many laps
 PUBLIC_CFG = ("kart_id", "beginner_mode", "map_orientation", "follow_span_m", "follow_resume_s",
-              "mode_hold_ms", "map_fps", "game", "sound", "sound_volume", "demo", "sun_mode")
+              "mode_hold_ms", "map_fps", "game", "sound", "sound_volume", "demo", "sun_mode", "freeplay",
+              "freeplay_boxes")
 
 
 def _file_reader(path):
@@ -269,6 +278,13 @@ class App:
         self.game_state_path = os.path.join(os.path.dirname(os.path.normpath(cache_dir)), "game-state.json")
         self._game_saved = None
         self._game_pending = self._load_game_state()
+        # freeplay (kart-local item game): on/off, course and the collected count survive restarts
+        self.freeplay_path = os.path.join(os.path.dirname(os.path.normpath(cache_dir)), "freeplay.json")
+        fp_ok = bool(cfg.get("freeplay", True)) and bool(cfg.get("game", True))
+        self.freeplay = kartcore.FreeplayGame(
+            boxes=int(cfg.get("freeplay_boxes", kartcore.FREEPLAY_BOXES)), allowed=fp_ok,
+            why_not="off in this kart's config" + ("" if cfg.get("game", True) else " (game: false)"))
+        self._fp_load_recs = self.freeplay.load(self._load_json(self.freeplay_path), time.monotonic())
         self._real_game = None             # the real kart's game timing, parked while demoing
         self._mismatch_logged = False
         self._reboots_seen = 0
@@ -294,6 +310,8 @@ class App:
         self.log.write("event", what="server_start", version=VERSION, pid=os.getpid(), health=self.health.available,
                        source=cfg.get("tcp") or cfg.get("serial_port") or "auto",
                        config={k: cfg.get(k) for k in PUBLIC_CFG + ("pit_urls",)})
+        for r in self._fp_load_recs:
+            self.log.write("game", **r)
 
     def _fresh_state(self):
         """New display/command/game state (start, and on entering/leaving demo mode)."""
@@ -448,6 +466,10 @@ class App:
                 game = self.game.on_gps(msg, now)
             elif t == "race":
                 game = self.game.on_race(msg, now, wall)
+            if not demo and t in ("self", "gps"):
+                # freeplay: the engine's filtered position (course recording, the 10 m rule) and its
+                # item rolls (a roll on a freeplay box = collected)
+                game = game + self.freeplay.on_pos(self.game.pos, now) + self.freeplay.on_game(game, now)
             d = self.demo
             demo_finish = (demo and d is not None and not self.game.race["finished"]
                            and any(r.get("ev") == "lap" and r.get("lap", 0) >= DEMO_FINISH_LAPS for r in game))
@@ -496,7 +518,9 @@ class App:
                 self.log.write("game", **r, sent=bool(sent))
             else:
                 self.log.write("game", **r)
-                if r["ev"] in ("game_on", "game_off", "lap", "boost", "zones_updated", "lap_reset"):
+                if r["ev"] in ("game_on", "game_off", "lap", "boost", "lap_reset") or (
+                        r["ev"].startswith("freeplay_") and r["ev"] != "freeplay_spawn") or (
+                        r["ev"] == "zones_updated" and r.get("source") != "freeplay"):   # every respawn bumps it
                     print(f"{wall_iso()} game: {r}", flush=True)
         if recs:
             self._state_cache = (0.0, b"{}")
@@ -535,12 +559,17 @@ class App:
             if d is not None and d.expired(now):
                 self.demo_stop("timer", why=f"{self.cfg.get('demo_max_s', 180)} s limit")
                 d = None
-            zones = d.zones if d is not None else self.maps.zones()
+            pit_zones = self.maps.zones()
             pkg = self.maps.package
             with self.lock:
                 self.cmds.tick(now)
                 self.game.set_pit(pkg.get("pit") if pkg else None)
-                game = self.game.set_zones(zones, now)
+                # freeplay decides which document runs: the pit's game wins; else freeplay's while on
+                # (select, then respawns, then select again so a box placed this tick is in the document)
+                _, game = self.freeplay.select(pit_zones, now, demo=d is not None)
+                game += self.freeplay.tick(now)
+                zones, more = self.freeplay.select(pit_zones, now, demo=d is not None)
+                game += more + self.game.set_zones(d.zones if d is not None else zones, now)
                 if self._game_pending is not None and d is None:
                     game += self.game.import_state(self._game_pending, now)
                     self._game_pending = None
@@ -549,18 +578,57 @@ class App:
                 if due:
                     self._status_due = now + float(self.cfg["status_poll_s"])
             self._game_out(game)
+            if self.freeplay.changed:
+                self._save_freeplay()
             if due:
                 self._send_text("status", wait=False)
             self.log.flush()
 
     # -- game timing across restarts -------------------------------------------
     def _load_game_state(self):
+        return self._load_json(self.game_state_path)
+
+    @staticmethod
+    def _load_json(path):
         try:
-            with open(self.game_state_path) as f:
+            with open(path) as f:
                 doc = json.load(f)
             return doc if isinstance(doc, dict) else None
         except (OSError, ValueError):
             return None
+
+    def _save_freeplay(self):
+        with self.lock:
+            doc = self.freeplay.export()
+        tmp = self.freeplay_path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.freeplay_path) or ".", exist_ok=True)
+            with open(tmp, "w") as f:
+                json.dump(doc, f, separators=(",", ":"))
+            os.replace(tmp, self.freeplay_path)
+        except OSError as e:
+            self.log.write("event", what="freeplay_save_failed", error=str(e))
+
+    def freeplay_cmd(self, body, who):
+        """POST /api/freeplay: {"on": bool} | {"toggle": true} | {"reset": true} (course reset)."""
+        now = time.monotonic()
+        with self.lock:
+            fp = self.freeplay
+            if body.get("reset"):
+                if not fp.allowed:
+                    raise kartcore.CommandError(f"freeplay is {fp.why_not}")
+                recs = fp.reset_course(now)
+            else:
+                on = (not fp.on) if body.get("toggle") else body.get("on")
+                if not isinstance(on, bool):
+                    raise ValueError('expected {"on": true|false}, {"toggle": true} or {"reset": true}')
+                recs = fp.set_on(on, now)
+            recs += fp.select(self.maps.zones(), now, demo=self.demo is not None)[1]   # phase for the reply
+        self.log.write("op", who=who, action="freeplay", request=body)
+        self._game_out(recs)
+        self._save_freeplay()
+        with self.lock:
+            return self.freeplay.snapshot(now)
 
     def _save_game_state(self):
         with self.lock:
@@ -583,10 +651,14 @@ class App:
             d = self.disp.snapshot(now)
             cmds = self.cmds.snapshot(now)
             game = self.game.snapshot(now)
+            fp = self.freeplay.snapshot(now)
+            fp_doc = self.freeplay.doc() if self.freeplay.running() else None
         dm = self.demo
         mp = self.maps.snapshot()
         if dm is not None:
             mp["zones"] = dm.zones
+        elif fp_doc is not None:
+            mp["zones"] = fp_doc                     # the map draws the freeplay boxes (the pit's file is untouched)
         if game.get("track") and isinstance(mp.get("zones"), dict):
             mp["zones"] = {k: v for k, v in mp["zones"].items() if k != "track"}    # sent once, as game.track
         lsnap = self.link.snapshot() if hasattr(self.link, "snapshot") else {}
@@ -611,6 +683,7 @@ class App:
             "commands": cmds,
             "map": mp,
             "game": game,
+            "freeplay": fp,
         })
         return d
 
@@ -786,6 +859,19 @@ class Handler(BaseHTTPRequestHandler):
             except kartcore.CommandError as e:
                 return self._json(409, {"ok": False, "error": str(e)})
             return self._json(200, {"ok": True, "demo": info})
+        if p == "/api/freeplay":
+            if not self._local() and not app.cfg.get("remote_cmd"):
+                return self._json(403, {"ok": False, "error": "freeplay only from the kart's own screen"})
+            try:
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("expected a JSON object")
+                info = app.freeplay_cmd(body, who)
+            except ValueError as e:
+                return self._json(400, {"ok": False, "error": f"bad request: {e}"})
+            except kartcore.CommandError as e:
+                return self._json(409, {"ok": False, "error": str(e)})
+            return self._json(200, {"ok": True, "freeplay": info})
         if p != "/cmd":
             return self._json(404, {"ok": False, "error": "not found"})
         if not self._local() and not app.cfg.get("remote_cmd"):

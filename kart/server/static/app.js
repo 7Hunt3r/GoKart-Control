@@ -251,10 +251,10 @@ function renderGame(game, fresh, st) {
   txt("boostLabel", kind === "boost" ? "BOOST!" + left : kind === "mud" ? "MUD" + left
     : kind === "stopped" ? "STOP" : kind === "grid" ? "GRID" : kind === "normal" ? `POWER ${Math.round(sc * 100)}%` : "POWER --");
 
-  // lap panel or the GAME OFF chip
-  const on = game.on === true;
-  show("lapPanel", on);
-  show("gameChip", !on);
+  // lap panel or the GAME OFF chip (freeplay running: its own chip instead; it has no lap line)
+  const on = game.on === true, fpRun = freeRunning(S.freeplay);
+  show("lapPanel", on && !fpRun);
+  show("gameChip", !on && !fpRun);
   show("lapStrip", on);
   if (!on) txt("gameChip", "GAME OFF");
   else {
@@ -270,7 +270,28 @@ function renderGame(game, fresh, st) {
     $("lsBest").classList.toggle("best", !nul(lap.best_s));
   }
   renderPosition((game && game.race) || {});
+  renderFree(S.freeplay);
   gameEvents(game);
+}
+
+/* freeplay (kart-local item boxes, no pit): chip next to GAME, FREEPLAY button state */
+function freeRunning(f) { return !!f && f.on && (f.phase === "ready" || f.phase === "recording" || f.phase === "no_gps"); }
+function freeChip(f) {                       // -> null (hidden) or {text, cls}
+  if (!f || !f.on) return null;
+  const n = (f.boxes || []).length;
+  if (f.phase === "paused_pit") return { text: "FREEPLAY PAUSED (pit game on)", cls: "paused" };
+  if (f.phase === "no_gps") return { text: "FREEPLAY: waiting for GPS", cls: "rec" };
+  if (f.phase === "recording") return { text: `FREEPLAY: drive one lap to set the course \u00b7 ${Math.round((f.record && f.record.distance_m) || 0)} m`, cls: "rec" };
+  if (f.phase === "ready") return { text: `FREEPLAY \u00b7 ${n} box${n === 1 ? "" : "es"} \u00b7 ${f.collected || 0} collected`, cls: "" };
+  return null;
+}
+function renderFree(f) {
+  const c = freeChip(f);
+  if (c) setChip("freeChip", c.text, "freechip " + c.cls);
+  show("freeChip", !!c);
+  const b = $("freeBtn");
+  show("freeBtn", !!f && f.allowed !== false);
+  b.classList.toggle("sel", !!f && !!f.on);
 }
 
 /* running position (pit beacon): big "P3" badge next to the lap panel, hidden at 0 */
@@ -734,6 +755,35 @@ document.querySelectorAll(".mbtn").forEach((btn) => {
   ["pointerup", "pointercancel", "lostpointercapture"].forEach((ev) => chip.addEventListener(ev, () => { if (raf) reset(); }));
 })();
 
+/* FREEPLAY button: tap = on/off, hold 2 s = forget the course and record a new one */
+(function setupFreeButton() {
+  const b = $("freeBtn");
+  let raf = null, t0 = 0;
+  const reset = () => { if (raf) cancelAnimationFrame(raf); raf = null; b.classList.remove("holding"); b.style.setProperty("--hp", 0); };
+  b.addEventListener("pointerdown", (e) => {
+    if (!S) return;
+    try { b.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    t0 = performance.now(); b.classList.add("holding");
+    const tick = () => {
+      const p = Math.min(1, (performance.now() - t0) / 2000);
+      b.style.setProperty("--hp", p);
+      if (p >= 1) {
+        reset();
+        post("/api/freeplay", { reset: true }).then((j) => {
+          if (j.ok) { flash("NEW COURSE", "lap"); Snd.play("lap"); } else txt("cmdNote", `freeplay: ${j.error}`);
+        });
+      } else raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+  });
+  b.addEventListener("pointerup", () => {
+    if (!raf) return;                          // the hold already fired
+    reset();
+    post("/api/freeplay", { toggle: true }).then((j) => { if (!j.ok) txt("cmdNote", `freeplay: ${j.error}`); });
+  });
+  ["pointercancel", "lostpointercapture"].forEach((ev) => b.addEventListener(ev, () => { if (raf) reset(); }));
+})();
+
 /* ------------------------------------------------------------------ map */
 const R_EARTH = 6371000;
 const view = { follow: true, pausedUntil: 0, all: false, scale: null, cx: 0, cy: 0, rot: 0 };
@@ -1117,6 +1167,7 @@ function touched() {
 
 document.querySelector(".mapctl").addEventListener("click", (e) => {
   const b = e.target.closest("button");
+  if (b && b.id === "freeBtn") return;           // its own pointer handlers (tap / hold)
   if (b && b.id === "sunBtn") {
     sunPref = !sunOn;
     try { localStorage.setItem("gk_sun", sunPref ? "1" : "0"); } catch (err) { /* per-device convenience only */ }

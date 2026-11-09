@@ -1020,6 +1020,7 @@ class GameEngine:
         self.seq = 0
         self.cmds_sent = 0
         self.last_result = None     # {"result", "result_name", "mono"} of the last boost echo
+        self.source = None          # the zones document's "source" (e.g. "freeplay"), tagged on its records
         self._reset_lap()
 
     # -- state ------------------------------------------------------------------
@@ -1045,6 +1046,8 @@ class GameEngine:
     def _rec(self, recs, ev, now, **kw):
         self.seq += 1
         r = {"ev": ev, "seq": self.seq, **kw}
+        if self.source and ("zone" in kw or "version" in kw):
+            r["source"] = self.source
         recs.append(r)
         if ev != "cmd":
             self.events.append(dict(r, mono=now))
@@ -1068,6 +1071,8 @@ class GameEngine:
         was_active = self.active()
         self.doc = doc
         self.version = doc.get("version") if isinstance(doc, dict) else None
+        src = doc.get("source") if isinstance(doc, dict) else None
+        self.source = src if isinstance(src, str) and src else None
         self.enabled, self.areas, self.lapline, self.ignored = parse_zones(doc)
         self.track = parse_track(doc)
         if isinstance(doc, dict) and doc.get("track") is not None and self.track is None:
@@ -1490,6 +1495,7 @@ class GameEngine:
             "events": [{k: v for k, v in e.items() if k != "mono"} | {"age_s": _age(e["mono"], now)}
                        for e in list(self.events)[-8:]],
             "cmds_sent": self.cmds_sent,
+            "source": self.source,
             "race": self.race_snapshot(now),
             "track": self.track,
             "pos": ({k: v for k, v in self.pos.items() if k != "mono"} | {"age_s": _age(self.pos["mono"], now)})
@@ -1502,3 +1508,431 @@ class GameEngine:
             "last_result": ({k: v for k, v in self.last_result.items() if k != "mono"}
                             | {"age_s": _age(self.last_result["mono"], now)}) if self.last_result else None,
         }
+
+
+# --- Freeplay: a kart-local item game that needs no pit (README "Freeplay") ---------------------
+# FreeplayGame produces a zones document in the shape mapsync delivers ({"version": "freeplay-N",
+# "enabled": true, "source": "freeplay", "zones": [item boxes], "track": {...}}); the server hands it
+# to the same GameEngine.set_zones, so collection, rolls, effects, cooldowns, the HUD roulette and
+# every safety rule (nothing while STOPPED or in grid hold, mud wins, scale <= 1.0) are the existing
+# code. Freeplay itself never produces a command line. The course is one lap of this kart's own
+# filtered GPS positions (the loop-closing logic is a port of pit/server/pitcore.TrackRecorder).
+FREEPLAY_BOXES = 3           # config freeplay_boxes, 1-6
+FREEPLAY_BOXES_MAX = 6
+FP_BOX_R_M = 4.0             # ZONES.md item default
+FP_BOX_COOLDOWN_S = 15.0
+FP_BOX_SPACING_M = 15.0      # boxes at least this far apart ALONG the loop
+FP_KART_CLEAR_M = 10.0       # a box is never placed within this of the kart's current position
+FP_RESPAWN_S = 3.0           # a collected box comes back this long after, elsewhere on the loop
+FP_RESPAWN_AWAY_M = 20.0     # ... at least this far (straight line) from where it was collected
+FP_PLACE_TRIES = 300
+FP_FILL_RETRY_S = 2.0        # a box that did not fit (short loop) is retried this often
+FP_TRACK_WIDTH_M = 6.0
+FP_REC_MIN_SPACING_M = 1.5   # pitcore REC_* values
+FP_REC_JUMP_SLACK_M = 15.0
+FP_REC_START_RADIUS_M = 12.0
+FP_REC_MIN_LAP_M = 60.0
+FP_REC_MAX_POINTS = 6000     # a "lap" this long never closed: start the recording again
+FP_SIMPLIFY_TOL_M = 1.0
+FP_FIX_FRESH_S = 3.0         # recording needs a usable fix at least this recent, else "no_gps"
+FP_KART_FRESH_S = 10.0       # the kart position used for the 10 m placement rule
+FP_ADOPT_NEAR_M = 30.0       # the pit's closed track is adopted as the course only if the kart is this close
+FP_PHASES = ("recording", "ready", "paused_pit", "off", "no_gps")
+
+
+def douglas_peucker(pts, tol_m):
+    """Simplify [[lat, lon], ...] keeping both ends; perpendicular tolerance in metres (pitcore copy)."""
+    if len(pts) < 3:
+        return [list(p[:2]) for p in pts]
+    ref = (pts[0][0], pts[0][1])
+    xy = [local_en(p[0], p[1], ref) for p in pts]
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, ay), (bx, by) = xy[i], xy[j]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        best, bi = -1.0, None
+        for k in range(i + 1, j):
+            px, py = xy[k]
+            d = abs(dy * (px - ax) - dx * (py - ay)) / L if L > 1e-9 else math.hypot(px - ax, py - ay)
+            if d > best:
+                best, bi = d, k
+        if bi is not None and best > tol_m:
+            keep[bi] = True
+            stack += [(i, bi), (bi, j)]
+    return [list(pts[k][:2]) for k in range(len(pts)) if keep[k]]
+
+
+def simplify_track(pts, tol_m=FP_SIMPLIFY_TOL_M, max_points=TRACK_MAX_POINTS):
+    """Douglas-Peucker with tol_m, raised x1.5 until the result fits in max_points (pitcore copy)."""
+    tol = max(0.05, float(tol_m))
+    out = douglas_peucker(pts, tol)
+    while len(out) > max_points:
+        tol *= 1.5
+        out = douglas_peucker(pts, tol)
+    return out
+
+
+def pit_game_on(doc):
+    """The pit's own game is running: enabled with at least one usable zone or a lap line."""
+    en, areas, lap, _ = parse_zones(doc)
+    return bool(en and (areas or lap is not None))
+
+
+class LoopRecorder:
+    """One lap of this kart's path (port of pitcore.TrackRecorder, single lap): points at least
+    1.5 m apart, jumps further than speed * dt + 15 m rejected; the lap closes when the path comes
+    back within 12 m of its start after at least 60 m travelled, at the nearest approach."""
+
+    def __init__(self):
+        self.points = []             # [lat, lon, mono, kph]
+        self.travel = 0.0
+        self.close = None            # (index, distance) best approach to the start inside the radius
+        self.rejected = 0
+
+    def feed(self, lat, lon, kph, now):
+        """Offer one usable fix. Returns the closed lap [[lat, lon], ...] once, else None."""
+        kph = float(kph) if _num(kph) else 0.0
+        p = [float(lat), float(lon), now, kph]
+        if self.points:
+            last = self.points[-1]
+            d = _dist_m(last, p)
+            v = max(kph, last[3]) / 3.6
+            if d > v * max(0.0, now - last[2]) + FP_REC_JUMP_SLACK_M:
+                self.rejected += 1
+                return None                          # GPS jump
+            if d < FP_REC_MIN_SPACING_M:
+                return None
+            self.travel += d
+        if len(self.points) >= FP_REC_MAX_POINTS:
+            self.__init__()
+        self.points.append(p)
+        return self._check()
+
+    def _check(self):
+        if self.travel < FP_REC_MIN_LAP_M:
+            return None
+        i = len(self.points) - 1
+        d = _dist_m(self.points[0], self.points[i])
+        if self.close is None:
+            if d <= FP_REC_START_RADIUS_M:
+                self.close = (i, d)
+            return None
+        if d < self.close[1] and d <= FP_REC_START_RADIUS_M:
+            self.close = (i, d)
+            return None
+        return [p[:2] for p in self.points[:self.close[0] + 1]]
+
+
+def course_from_lap(pts):
+    """A closed lap [[lat, lon], ...] -> parse_track() course (simplified to ~1 m, <= 200 points,
+    closed, 6 m wide) or None."""
+    out = simplify_track(pts)
+    if len(out) > 3 and _dist_m(out[0], out[-1]) < 2.0:
+        out = out[:-1]                               # the closing segment joins the last point to the first
+    return parse_track({"track": {"points": [[round(p[0], 7), round(p[1], 7)] for p in out],
+                                  "closed": True, "width_m": FP_TRACK_WIDTH_M}})
+
+
+class _Loop:
+    """Arc-length positions on a closed course (local metres around its first point)."""
+
+    def __init__(self, points):
+        self.ref = (points[0][0], points[0][1])
+        en = [local_en(p[0], p[1], self.ref) for p in points]
+        self.en = en + [en[0]]
+        self.cum = [0.0]
+        for a, b in zip(self.en, self.en[1:]):
+            self.cum.append(self.cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        self.L = self.cum[-1]
+
+    def at(self, s):
+        s = s % self.L if self.L > 0 else 0.0
+        for i in range(1, len(self.cum)):
+            if s <= self.cum[i]:
+                seg = self.cum[i] - self.cum[i - 1]
+                f = (s - self.cum[i - 1]) / seg if seg > 0 else 0.0
+                a, b = self.en[i - 1], self.en[i]
+                return en_to_ll(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, self.ref)
+        return en_to_ll(self.en[-1][0], self.en[-1][1], self.ref)
+
+    def arc(self, a, b):
+        d = abs(a - b) % self.L if self.L > 0 else 0.0
+        return min(d, self.L - d)
+
+    def dist_m(self, lat, lon):
+        p = local_en(lat, lon, self.ref)
+        return min(dist_point_segment(p, a, b) for a, b in zip(self.en, self.en[1:]))
+
+
+class FreeplayGame:
+    """Freeplay state machine. Callers hold the app lock; every method that changes something returns
+    records ({"ev": "freeplay_...", "source": "freeplay", ...}) for the session log.
+
+    Precedence (select()): the pit's own game (enabled, >= 1 zone or lap line) wins and freeplay
+    pauses; otherwise, while on, freeplay's document is the one the engine runs. Demo mode turns it
+    off for the demo. Off restores the pit document."""
+
+    def __init__(self, boxes=FREEPLAY_BOXES, rng=None, allowed=True, why_not=None):
+        self.allowed = bool(allowed)
+        self.why_not = why_not or "off in this kart's config"
+        self.n_boxes = int(max(1, min(FREEPLAY_BOXES_MAX, int(boxes))))
+        self.rng = rng or random.Random()
+        self.on = False
+        self.course = None           # parse_track() dict + "source" ("recorded" | "pit")
+        self.loop = None
+        self.boxes = []              # {"id", "name", "slot", "s", "lat", "lon", "r_m"}
+        self.pending = []            # {"slot", "due", "from": (lat, lon)}
+        self.collected = 0
+        self.rec = None              # LoopRecorder while the course is being driven
+        self.no_adopt = False        # after a course reset: record, never adopt the pit's track
+        self.kart = None             # (lat, lon, mono) last usable position
+        self.phase = "off"
+        self.pause_reason = None
+        self.pit_track = None
+        self._pit_seen = object()
+        self._pit_on = False
+        self._last_mono = None
+        self._gen = 0
+        self._ver = 0
+        self._doc = None
+        self._fill_at = 0.0
+        self.changed = True          # persistence: the server saves export() when this is set
+
+    @staticmethod
+    def _rec(recs, ev, **kw):
+        r = {"ev": ev, "source": "freeplay", **kw}
+        recs.append(r)
+        return r
+
+    def _touch(self, persist=False):
+        self._doc = None
+        if persist:
+            self.changed = True
+
+    # -- control ------------------------------------------------------------------------
+    def set_on(self, on, now):
+        recs = []
+        on = bool(on)
+        if on and not self.allowed:
+            raise CommandError(f"freeplay is {self.why_not}")
+        if on == self.on:
+            return recs
+        self.on = on
+        self.boxes, self.pending = [], []
+        self.rec = LoopRecorder() if on and self.course is None else None
+        self._fill_at = 0.0
+        self._touch(persist=True)
+        self._rec(recs, "freeplay_on" if on else "freeplay_off", course_m=self.course["length_m"] if self.course else None)
+        return recs
+
+    def reset_course(self, now):
+        recs = []
+        self.course, self.loop = None, None
+        self.boxes, self.pending = [], []
+        self.no_adopt = True
+        self.rec = LoopRecorder() if self.on else None
+        self._touch(persist=True)
+        self._rec(recs, "freeplay_course_reset")
+        return recs
+
+    def set_course(self, course, source, now, recs):
+        self.course = dict(course, source=source)
+        self.loop = _Loop(course["points"])
+        self.rec = None
+        self.no_adopt = False
+        self.boxes, self.pending = [], []
+        self._fill_at = 0.0
+        self._touch(persist=True)
+        self._rec(recs, "freeplay_course", course_from=source, points=len(course["points"]),
+                  length_m=course["length_m"])
+
+    # -- inputs ---------------------------------------------------------------------------
+    def on_pos(self, pos, now):
+        """The game engine's latest filtered sample (GameEngine.pos) after each fix."""
+        recs = []
+        if not pos or pos.get("mono") == self._last_mono:
+            return recs
+        self._last_mono = pos.get("mono")
+        if not pos.get("usable") or not _num(pos.get("lat")) or not _num(pos.get("lon")):
+            return recs
+        lat, lon = float(pos["lat"]), float(pos["lon"])
+        self.kart = (lat, lon, now)
+        if not self.on or self.course is not None or self.phase not in ("recording", "no_gps"):
+            return recs
+        if not self.no_adopt and self.pit_track is not None:
+            lp = _Loop(self.pit_track["points"])
+            if lp.dist_m(lat, lon) <= FP_ADOPT_NEAR_M:
+                self.set_course(self.pit_track, "pit", now, recs)
+                return recs
+        if self.rec is None:
+            self.rec = LoopRecorder()
+        if pos.get("reset"):
+            self.rec = LoopRecorder()                # the GPS filter accepted a jump: start the lap again
+        lap = self.rec.feed(lat, lon, pos.get("kph"), now)
+        if lap is not None:
+            course = course_from_lap(lap)
+            if course is None:
+                self.rec = LoopRecorder()
+                self._rec(recs, "freeplay_lap_rejected", points=len(lap))
+            else:
+                self.set_course(course, "recorded", now, recs)
+        return recs
+
+    def on_game(self, game_recs, now):
+        """GameEngine records: an "item" roll on one of our boxes = collected."""
+        recs = []
+        ids = {b["id"]: b for b in self.boxes}
+        for r in game_recs:
+            if r.get("ev") != "item" or r.get("zone") not in ids:
+                continue
+            b = ids.pop(r["zone"])
+            self.boxes = [x for x in self.boxes if x["id"] != b["id"]]
+            self.pending.append({"slot": b["slot"], "due": now + FP_RESPAWN_S, "from": (b["lat"], b["lon"])})
+            self.collected += 1
+            self._touch(persist=True)
+            self._rec(recs, "freeplay_collected", zone=b["id"], name=b["name"], item=r.get("item"),
+                      collected=self.collected)
+        return recs
+
+    # -- placement --------------------------------------------------------------------------
+    def _kart_now(self, now):
+        k = self.kart
+        return k if k is not None and now - k[2] <= FP_KART_FRESH_S else None
+
+    def _place(self, slot, now, away_from=None):
+        L = self.loop.L
+        if L <= 0:
+            return None
+        kart = self._kart_now(now)
+        for _ in range(FP_PLACE_TRIES):
+            s = self.rng.random() * L
+            if any(self.loop.arc(s, b["s"]) < FP_BOX_SPACING_M for b in self.boxes):
+                continue
+            lat, lon = self.loop.at(s)
+            if kart is not None and _dist_m(kart, (lat, lon)) < FP_KART_CLEAR_M:
+                continue
+            if away_from is not None and _dist_m(away_from, (lat, lon)) < FP_RESPAWN_AWAY_M:
+                continue
+            self._gen += 1
+            b = {"id": f"fp{self._gen}", "name": f"Box {slot}", "slot": slot, "s": round(s, 2),
+                 "lat": round(lat, 7), "lon": round(lon, 7), "r_m": FP_BOX_R_M}
+            self.boxes.append(b)
+            self._touch()
+            return b
+        return None
+
+    def tick(self, now):
+        """Respawns (3 s after a collection) and the initial fill once a course exists."""
+        recs = []
+        if not self.on or self.loop is None or self.phase != "ready":
+            return recs
+        for p in sorted(self.pending, key=lambda x: x["due"]):
+            if now < p["due"]:
+                continue
+            b = self._place(p["slot"], now, away_from=p["from"])
+            if b is None:
+                p["due"] = now + FP_FILL_RETRY_S
+                continue
+            self.pending.remove(p)
+            self._rec(recs, "freeplay_spawn", zone=b["id"], name=b["name"], lat=b["lat"], lon=b["lon"], respawn=True)
+        if now >= self._fill_at:
+            used = {b["slot"] for b in self.boxes} | {p["slot"] for p in self.pending}
+            for slot in range(1, self.n_boxes + 1):
+                if slot in used:
+                    continue
+                b = self._place(slot, now)
+                if b is None:
+                    self._fill_at = now + FP_FILL_RETRY_S
+                    break
+                self._rec(recs, "freeplay_spawn", zone=b["id"], name=b["name"], lat=b["lat"], lon=b["lon"])
+        return recs
+
+    # -- which document the engine runs -------------------------------------------------------
+    def select(self, pit_doc, now, demo=False):
+        """-> (zones document for GameEngine.set_zones, records). Updates phase/pause_reason."""
+        recs = []
+        if pit_doc is not self._pit_seen:
+            self._pit_seen = pit_doc
+            self._pit_on = pit_game_on(pit_doc)
+            t = parse_track(pit_doc)
+            self.pit_track = t if t is not None and t["closed"] else None
+        reason = None
+        if not self.allowed:
+            phase, reason = "off", self.why_not
+        elif not self.on:
+            phase = "off"
+        elif demo:
+            phase, reason = "off", "demo"
+        elif self._pit_on:
+            phase, reason = "paused_pit", "pit game on"
+        elif self.course is not None:
+            phase = "ready"
+        else:
+            k = self.kart
+            phase = "recording" if k is not None and now - k[2] <= FP_FIX_FRESH_S else "no_gps"
+        if (phase, reason) != (self.phase, self.pause_reason):
+            self._rec(recs, "freeplay_phase", phase=phase, prev=self.phase, why=reason)
+            self.phase, self.pause_reason = phase, reason
+        return (self.doc() if phase in ("recording", "no_gps", "ready") else pit_doc), recs
+
+    def running(self):
+        return self.phase in ("recording", "no_gps", "ready")
+
+    def doc(self):
+        if self._doc is None:
+            self._ver += 1
+            d = {"version": f"freeplay-{self._ver}", "enabled": True, "source": "freeplay",
+                 "zones": [{"id": b["id"], "type": "item", "name": b["name"], "shape": "circle",
+                            "lat": b["lat"], "lon": b["lon"], "r_m": b["r_m"], "cooldown_s": FP_BOX_COOLDOWN_S}
+                           for b in self.boxes]}
+            if self.course is not None:
+                d["track"] = {"points": [list(p) for p in self.course["points"]], "closed": True,
+                              "width_m": self.course["width_m"]}
+            self._doc = d
+        return self._doc
+
+    # -- persistence + display ------------------------------------------------------------------
+    def export(self):
+        c = self.course
+        self.changed = False
+        return {"v": 1, "on": self.on, "collected": self.collected,
+                "course": {"points": c["points"], "length_m": c["length_m"], "width_m": c["width_m"],
+                           "source": c.get("source")} if c else None}
+
+    def load(self, doc, now):
+        """Restore export(). A bad file is ignored (freeplay starts off, no course)."""
+        recs = []
+        if not isinstance(doc, dict) or doc.get("v") != 1:
+            return recs
+        c = doc.get("course")
+        if isinstance(c, dict):
+            t = parse_track({"track": {"points": c.get("points"), "closed": True, "width_m": c.get("width_m")}})
+            if t is not None and t["closed"]:
+                self.course = dict(t, source=c.get("source") if c.get("source") in ("recorded", "pit") else "recorded")
+                self.loop = _Loop(t["points"])
+        if _num(doc.get("collected")) and doc["collected"] >= 0:
+            self.collected = int(doc["collected"])
+        if doc.get("on") is True and self.allowed:
+            self.on = True
+            self.rec = LoopRecorder() if self.course is None else None
+        self._touch()
+        self.changed = False
+        self._rec(recs, "freeplay_restored", on=self.on, course_m=self.course["length_m"] if self.course else None,
+                  collected=self.collected)
+        return recs
+
+    def snapshot(self, now):
+        c, r = self.course, self.rec
+        return {"allowed": self.allowed, "on": self.on, "phase": self.phase, "pause_reason": self.pause_reason,
+                "boxes_target": self.n_boxes,
+                "course": {"points": len(c["points"]), "length_m": c["length_m"], "source": c.get("source")} if c else None,
+                "boxes": [{"id": b["id"], "name": b["name"], "lat": b["lat"], "lon": b["lon"], "r_m": b["r_m"]}
+                          for b in self.boxes],
+                "respawning": len(self.pending),
+                "collected": self.collected,
+                "record": {"distance_m": round(r.travel, 1), "points": len(r.points)}
+                          if r is not None and self.course is None and self.on else None}

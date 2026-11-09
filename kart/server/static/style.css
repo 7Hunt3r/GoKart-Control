@@ -218,6 +218,11 @@ body.pulse .meter.boost .btrack { border-color: #fff2b8; }
 .laprow.best b { color: #5dff86; }
 .lappanel.idle .lapcur { color: #8a8a8a; font-size: 26px; }
 .gamechip { font-size: 14px; background: rgba(0,0,0,.7); color: #bbb; border-color: #777; }
+/* freeplay chip (kart-local item game): item-box blue while the boxes are out, yellow on black while the
+   course is being recorded, grey while the pit's game has paused it */
+.freechip { font-size: 16px; background: #1e5bd8; color: #fff; border-color: #fff; }
+.freechip.rec { background: #000; color: #ffd400; border-color: #ffd400; }
+.freechip.paused { font-size: 14px; background: rgba(0,0,0,.7); color: #bbb; border-color: #777; }
 
 /* boost / mud / lap flash: covers the page for ~0.8 s, below the safety banners; text pops in */
 .flash { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; pointer-events: none; }
@@ -305,6 +310,12 @@ body.racing .fault { position: fixed; left: 0; right: 0; bottom: 0; z-index: 31;
 /* SUN button (map controls, under ALL): sun glyph over "SUN"; .sel while sun mode is on */
 .mapctl .sunbtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; font-size: 11px; letter-spacing: .04em; }
 .sunbtn svg { width: 24px; height: 24px; }
+/* FREEPLAY button (under SUN): item-box glyph over "FREEPLAY"; .sel while freeplay is on; holding it
+   fills a bar along the bottom (2 s = new course) */
+.mapctl .freebtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; font-size: 10px;
+  letter-spacing: 0; position: relative; overflow: hidden; touch-action: none; }
+.freebtn svg { width: 24px; height: 24px; }
+.freebtn.holding::after { content: ""; position: absolute; left: 0; bottom: 0; height: 5px; width: calc(var(--hp, 0) * 100%); background: var(--boost); }
 
 /* SUN mode (body.sun, default on: config sun_mode, SUN button per device): the 7" panel's backlight
    cannot be raised, so every HUD surface is opaque #000 with a 3 px white edge, text pure white, the
@@ -315,6 +326,8 @@ body.sun .chips, body.sun .lappanel, body.sun .hudnotes .note, body.sun .meter, 
   background: #000; color: #fff; box-shadow: inset 0 0 0 3px #fff; }
 body.sun .hudnotes .note { color: #fff; }
 body.sun .gamechip { background: #000; color: #fff; border-color: #fff; }
+body.sun .freechip { box-shadow: inset 0 0 0 1px currentColor; }
+body.sun .freechip.paused { background: #000; color: #fff; border-color: #fff; }
 body.sun .speedo, body.sun .mbtn, body.sun .mapctl button, body.sun .sndbtn, body.sun .sndtest {
   background: #000; color: #fff; border-color: #fff; box-shadow: inset 0 0 0 1px #fff; text-shadow: none; }
 body.sun .sndtest { border-color: var(--boost); box-shadow: inset 0 0 0 1px var(--boost); }

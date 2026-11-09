@@ -424,6 +424,64 @@ NORMAL -> uncapped), which is the point, so place pads on straights. The race di
 sending within one poll, 30 s, or at once after a `POST /api/map/refresh`); a pit
 STOP is always immediate. GPS is a few metres off: zones under ~10 m feel random.
 
+## Freeplay (kart-local item boxes, no pit)
+
+Added 2026-11-09 (owner: "a freeplay mode where random boxes show up you gotta drive onto that will give
+you boosts, slow speeds etc., that runs without the pit"). SIMULATION-tested only (unit tests, the e2e
+stack, headless screenshots); not yet driven on kart 2.
+
+**What it is.** `kartcore.FreeplayGame` builds a zones document in the same shape mapsync delivers
+(`{"version": "freeplay-N", "enabled": true, "source": "freeplay", "zones": [item boxes], "track": {...}}`)
+and the server hands it to the normal `GameEngine.set_zones`. Everything after that is the existing game
+layer: the item roll (45 % BOOST `boost 5 1.0`, 15 % SUPER `boost 8 1.0`, 25 % MUD `boost 3 0.5`, 15 %
+empty), the roulette, sounds, cooldown/hysteresis, nothing while STOPPED or in a grid hold, mud wins,
+scale never above 1.0. Freeplay itself never sends anything to the Heltec (no mode/start/stop/slow); the
+only line is the engine's timed `boost`. Engine records from a freeplay document carry
+`"source": "freeplay"` in the session log, as do freeplay's own records (`freeplay_on/off`,
+`freeplay_phase`, `freeplay_course`, `freeplay_spawn`, `freeplay_collected`, `freeplay_course_reset`).
+
+**Drive a lap.** Turned on with no saved course, it records this kart's own filtered GPS positions (the
+engine's sample, so poor/outlier fixes never count): points 1.5 m apart, jumps further than speed x dt +
+15 m rejected, and the lap closes when the path comes back within 12 m of where it started after at least
+60 m, at the nearest approach (a port of the pit's pace-car `TrackRecorder`). The lap is simplified to
+~1 m (at most 200 points) and becomes the course: drawn as the normal track band with chevrons, 6 m wide.
+HUD while recording: `FREEPLAY: drive one lap to set the course · 45 m`; with no usable fix: `FREEPLAY:
+waiting for GPS`. If the pit's zones carry a closed track and the kart is within 30 m of it, freeplay
+adopts that track instead of recording (not after a course reset).
+
+**Boxes.** `freeplay_boxes` (default 3) item boxes ("Box 1".."Box N", 4 m radius, cooldown 15 s) sit at
+random points ON the course centreline: at least 15 m apart along the loop and never within 10 m of the
+kart when placed. A collected box (the engine's item roll on it) disappears at once and a replacement
+appears 3 s later elsewhere on the loop, at least 20 m from where it was collected, with a NEW zone id (no
+cooldown or "inside" state carries over). A loop too short for all of them gets as many as fit.
+
+**Controls.** The FREEPLAY map button (under SUN): tap = on/off (`.sel` while on); hold 2 s = forget the
+course and record a new one ("NEW COURSE" flash). Same from the kart itself:
+`POST /api/freeplay {"on": true|false}` / `{"toggle": true}` / `{"reset": true}` (localhost only like
+`/api/demo`; `remote_cmd` allows others). The `#freeChip` next to the GAME chip reads
+`FREEPLAY · 3 boxes · 7 collected`, the recording/GPS lines above, or `FREEPLAY PAUSED (pit game on)`;
+hidden when off. While freeplay runs, the lap panel and GAME OFF chip are hidden (freeplay has no lap line).
+
+**Precedence.** The pit's own game wins: when the pit's zones document is `enabled: true` with at least one
+usable zone or a lap line, freeplay pauses (its boxes vanish, the engine runs the pit's zones, laps and race
+as before). When the pit is unreachable, has no zones, or its game is switched off, freeplay's document is
+the one the engine runs. Turning freeplay off restores the pit document. A pit STOP still stops the kart
+(the firmware clears any boost) and boxes are not collected while STOPPED; a pit race with no zones keeps
+freeplay running, and its grid hold suppresses collection. Note: the pit's master switch (`enabled: false`)
+no longer silences a kart whose driver has freeplay on. Demo mode (hold KART) keeps working; freeplay is
+off for the demo and comes back after it.
+
+**`/api/state` `freeplay`:** `{"allowed", "on", "phase": "recording"|"ready"|"paused_pit"|"off"|"no_gps",
+"pause_reason", "boxes_target", "course": {"points", "length_m", "source": "recorded"|"pit"} | null,
+"boxes": [{"id", "name", "lat", "lon", "r_m"}], "respawning", "collected", "record": {"distance_m",
+"points"} | null}`. While freeplay runs, `map.zones` is its document (the HUD draws the boxes) and
+`game.source` is `"freeplay"`; `/map/zones.json` stays the pit's file. The pit never sees freeplay boxes.
+
+**Config + files.** `freeplay` (default true = allowed; false hides the button and refuses the API; it
+also needs `game: true`) and `freeplay_boxes` (1-6, default 3). On/off, the course and the collected count
+are kept in `cache/freeplay.json` (next to `game-state.json`), so a restart resumes with fresh boxes on the
+same course. Freeplay starts OFF on a new kart: the driver turns it on.
+
 ## How the map arrives from the pit
 
 The pit serves `GET /map/package.json` and `/map/<image>` with no login
@@ -551,6 +609,7 @@ by the default and reported in the journal (`CONFIG: ...`), the session log and 
 | `demo` / `demo_max_s` | true / 180 | demo mode allowed; its length |
 | `sound` / `sound_volume` | true / 0.8 | page sounds |
 | `sun_mode` | true | SUN theme by default (the SUN button overrides it per device) |
+| `freeplay` / `freeplay_boxes` | true / 3 | FREEPLAY allowed (kart-local item boxes, see Freeplay); boxes on the course (1-6) |
 | `rotate` | 0 | install.sh only: 180 = ports-down mount |
 
 ### Troubleshooting

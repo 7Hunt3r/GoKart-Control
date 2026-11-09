@@ -208,7 +208,7 @@ class EndToEnd(unittest.TestCase):
             code, body = st.request("GET", "/")
             for marker in (b'id="speedo"', b'id="gear"', b'id="boostMeter"', b'id="lapPanel"', b'id="gameChip"',
                            b'id="flash"', b'id="stopBanner"', b'id="slowBanner"', b'id="connBanner"',
-                           b'id="sunBtn"'):
+                           b'id="sunBtn"', b'id="freeBtn"', b'id="freeChip"'):
                 self.assertIn(marker, body)
             s = st.wait(lambda s: s["game"]["on"], what="game on (zones fetched)")
             self.assertEqual(s["map"]["zones"]["version"], 1)
@@ -251,6 +251,45 @@ class EndToEnd(unittest.TestCase):
             rx = [json.loads(r["line"]) for r in recs if r["kind"] == "rx" and '"t":"self"' in r["line"]]
             self.assertTrue(any(x["scale"] == 1.0 and x["mode_req"] == 1 for x in rx))
             self.assertTrue(any(x["scale"] == 0.5 for x in rx))
+        finally:
+            st.close()
+
+    def test_freeplay_without_pit_zones(self):
+        """Pit with NO zones + the simulator driving its loop: freeplay on -> one lap records the course,
+        boxes appear on it, the kart drives through at least one and the roll goes out as a boost line."""
+        st = Stack(["--course", "--warp", "3"], config={"freeplay_boxes": 3})
+        try:
+            s = st.wait(lambda s: s["self"]["gps"]["fix_fresh"] and s["map"]["sync"]["reachable"], what="fix + pit")
+            self.assertFalse(s["game"]["on"])
+            self.assertEqual(s["freeplay"]["phase"], "off")
+            code, body = st.request("POST", "/api/freeplay", {"on": True})
+            self.assertEqual(code, 200, body)
+            self.assertEqual(json.loads(body)["freeplay"]["phase"], "recording")
+            self.assertEqual(st.request("POST", "/api/freeplay", {"on": "yes"})[0], 400)
+            s = st.wait(lambda s: s["freeplay"]["phase"] == "ready" and len(s["freeplay"]["boxes"]) == 3,
+                        timeout=45, what="course recorded + 3 boxes")
+            f = s["freeplay"]
+            self.assertAlmostEqual(f["course"]["length_m"], 191, delta=12)    # the simulator's loop
+            self.assertEqual(f["course"]["source"], "recorded")
+            self.assertTrue(s["game"]["on"])
+            self.assertEqual(s["game"]["source"], "freeplay")
+            self.assertTrue(s["game"]["track"]["closed"])
+            self.assertEqual(s["map"]["zones"]["source"], "freeplay")       # the HUD draws the boxes
+            self.assertEqual(st.request("GET", "/map/zones.json")[0], 404)  # the pit's file is untouched
+            s = st.wait(lambda s: s["freeplay"]["collected"] >= 1, timeout=45, what="a box collected")
+            logs = [f for f in os.listdir(st.logs) if f.startswith("session-")]
+            with open(os.path.join(st.logs, logs[0])) as fh:
+                recs = [json.loads(x) for x in fh]
+            game = [r for r in recs if r["kind"] == "game"]
+            self.assertTrue([r for r in game if r["ev"] == "item" and r.get("source") == "freeplay"])
+            self.assertTrue([r for r in game if r["ev"] == "freeplay_collected"])
+            tx = [r["line"] for r in recs if r["kind"] == "tx"]
+            self.assertFalse([x for x in tx if x.split()[0] not in ("boost", "status")], tx)
+            self.assertTrue(os.path.exists(os.path.join(st.tmp.name, "freeplay.json")))   # next to game-state.json (dirname of --cache-dir)
+            code, body = st.request("POST", "/api/freeplay", {"toggle": True})
+            self.assertEqual(json.loads(body)["freeplay"]["phase"], "off")
+            s = st.wait(lambda s: not s["game"]["on"], what="freeplay off -> no game")
+            self.assertIsNone(s["game"]["source"])
         finally:
             st.close()
 
@@ -412,11 +451,17 @@ class ServerPieces(unittest.TestCase):
 
     def test_config_validation(self):
         cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS, map_fps=500, kart_id=9, sound="yes", sun_mode=1, bogus=1,
-                                              map_orientation="sideways", rotate=90, pit_urls="http://x"))
+                                              map_orientation="sideways", rotate=90, pit_urls="http://x",
+                                              freeplay="on", freeplay_boxes=9))
         self.assertEqual((cfg["map_fps"], cfg["kart_id"], cfg["sound"], cfg["sun_mode"], cfg["map_orientation"], cfg["rotate"]),
                          (10, 2, True, True, "heading_up", 0))
+        self.assertEqual((cfg["freeplay"], cfg["freeplay_boxes"]), (True, 3))
         self.assertEqual(cfg["pit_urls"], ["http://x"])
-        self.assertEqual(len(w), 7, w)
+        self.assertEqual(len(w), 9, w)
+        cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS, freeplay=False, freeplay_boxes=6))
+        self.assertEqual((cfg["freeplay"], cfg["freeplay_boxes"], w), (False, 6, []))
+        self.assertIn("freeplay", self.ks.PUBLIC_CFG)
+        self.assertIn("freeplay_boxes", self.ks.PUBLIC_CFG)
         self.assertIs(self.ks.validate_config(dict(self.ks.DEFAULTS, sun_mode=False))[0]["sun_mode"], False)
         cfg, w = self.ks.validate_config(dict(self.ks.DEFAULTS))
         self.assertEqual(w, [])
