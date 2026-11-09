@@ -128,8 +128,8 @@ function render() {
   else if (wheel !== null) { txt("mph", Math.round(wheel)); svgCls(mphEl, "mphnum"); txt("mphSrc", "WHEEL"); arcMph = wheel; }
   else { txt("mph", !fresh ? "NO DATA" : "NO FIX"); svgCls(mphEl, "mphnum na"); txt("mphSrc", "GPS"); }
   txt("mphNote", fresh && !g.fix_fresh
-    ? (wheel !== null ? "NO GPS FIX: wheel speed (uncalibrated)" : !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "")
-    : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph (uncalibrated)` : ""));
+    ? (wheel !== null ? "NO GPS FIX: wheel speed" : !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "")
+    : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph` : ""));
   const game = S.game || {}, meter = (game.meter || {});
   drawSpeedo(arcMph, fresh ? meter.kind : "unknown");
 

@@ -3,7 +3,7 @@
 // variant (which runs on this exact board). Everything else is this project's choice.
 #pragma once
 
-#define FW_VERSION      "kart-0.2.2"
+#define FW_VERSION      "kart-0.2.3"
 #define DEFAULT_KART_ID 1            // runtime override: USB command "id N" (stored in flash)
 
 // ---- VESC writes -----------------------------------------------------------
@@ -106,6 +106,16 @@ static const ModeDef MODES[3] = {
 };
 #define MODE_MATCH_TOL  0.015f   // a live scale this close to a mode's reads as that mode ...
 #define MODE_ERPM_TOL   50.0f    // ... when the live ERPM bound is also this close to the mode's cap
+
+// ---- speed calibration -------------------------------------------------------
+// The caps are turned into ERPM with the controller's own si_* numbers (poles / gear / wheel). On the
+// MotoTec karts those numbers are off by about 2.5x: on 2026-11-09 kart 2's GPS read 0.00159 km/h per
+// ERPM where the configured 14 poles / 2.769 / 0.406 m predict 0.00395, so the 15 and 25 mph caps were
+// really 6 and 10 mph on the road. SPEED_CAL multiplies the ERPM the drivetrain math gives for a speed
+// (real ERPM = configured-math ERPM x SPEED_CAL). Default = that measurement; the console's
+// `speedcal X` (0.3..5, stored per kart) overrides it, `speedcal clear` returns to the default; the
+// status line reports speed_cal. The proper fix is the si_* values in VESC Tool; then set speedcal 1.0.
+#define SPEED_CAL_DEFAULT 2.48f
 // A BOOST (timed scale ABOVE the mode's) also lifts the speed cap one mode up for its duration
 // (ECO -> NORMAL's 25 mph, NORMAL -> uncapped, SPORT unchanged); MUD (scale at or below the mode's)
 // keeps the cap. Without this a boost pad on a straight does nothing to a kart already at its cap.

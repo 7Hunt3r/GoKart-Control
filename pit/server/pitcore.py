@@ -69,6 +69,9 @@ UNDER_LOAD_A = 20.0      # |batt_a| above this: voltage sag makes % unreliable
 POLE_PAIRS = 7           # 14 poles (2026-11-05 runtime capture, not physically verified)
 GEAR_RATIO = 2.769
 WHEEL_DIAMETER_M = 0.406
+# Measured 2026-11-09 on kart 2 (GPS vs ERPM over a drive): the controller's si_* numbers above are off by
+# this factor (real ERPM per mph = formula x WHEEL_CAL). Same constant as firmware config.h SPEED_CAL_DEFAULT.
+WHEEL_CAL = 2.48
 METERS_PER_MILE = 1609.34
 
 
@@ -93,13 +96,13 @@ def wheel_mph(erpm):
     Sign is kept (negative = reverse rotation)."""
     if erpm is None:
         return None
-    mph = float(erpm) / POLE_PAIRS / GEAR_RATIO * (WHEEL_DIAMETER_M * math.pi) * 60.0 / METERS_PER_MILE
+    mph = float(erpm) / POLE_PAIRS / GEAR_RATIO / WHEEL_CAL * (WHEEL_DIAMETER_M * math.pi) * 60.0 / METERS_PER_MILE
     return round(mph, 2)
 
 
 def erpm_for_mph(mph):
     """Inverse of wheel_mph (used by the simulator)."""
-    return mph * METERS_PER_MILE / 60.0 / (WHEEL_DIAMETER_M * math.pi) * GEAR_RATIO * POLE_PAIRS
+    return mph * METERS_PER_MILE / 60.0 / (WHEEL_DIAMETER_M * math.pi) * GEAR_RATIO * POLE_PAIRS * WHEEL_CAL
 
 
 def kph_to_mph(kph):
@@ -300,7 +303,7 @@ class KartState:
                 "battery_pct": battery_percent(volts),
                 "under_load": under_load(batt_a),
                 "wheel_mph": wheel_mph(self.vesc.get("erpm")),
-                "wheel_mph_calibrated": False,
+                "wheel_mph_calibrated": True,
                 "gps_mph": kph_to_mph(self.fix.get("gps_kph")),
             },
             "gps": {

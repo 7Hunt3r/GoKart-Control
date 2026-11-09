@@ -66,6 +66,9 @@ UNDER_LOAD_A = 20.0
 POLE_PAIRS = 7
 GEAR_RATIO = 2.769
 WHEEL_DIAMETER_M = 0.406
+# Measured 2026-11-09 on kart 2 (GPS vs ERPM over a drive): the controller's si_* numbers above are off by
+# this factor (real ERPM per mph = formula x WHEEL_CAL). Same constant as firmware config.h SPEED_CAL_DEFAULT.
+WHEEL_CAL = 2.48
 METERS_PER_MILE = 1609.34
 
 
@@ -84,14 +87,14 @@ def under_load(batt_a):
 
 
 def wheel_mph(erpm):
-    """Contract formula; UNCALIBRATED (drivetrain numbers not physically verified)."""
+    """Contract formula x WHEEL_CAL (GPS-calibrated on kart 2, 2026-11-09)."""
     if erpm is None:
         return None
-    return round(float(erpm) / POLE_PAIRS / GEAR_RATIO * (WHEEL_DIAMETER_M * math.pi) * 60.0 / METERS_PER_MILE, 2)
+    return round(float(erpm) / POLE_PAIRS / GEAR_RATIO / WHEEL_CAL * (WHEEL_DIAMETER_M * math.pi) * 60.0 / METERS_PER_MILE, 2)
 
 
 def erpm_for_mph(mph):
-    return mph * METERS_PER_MILE / 60.0 / (WHEEL_DIAMETER_M * math.pi) * GEAR_RATIO * POLE_PAIRS
+    return mph * METERS_PER_MILE / 60.0 / (WHEEL_DIAMETER_M * math.pi) * GEAR_RATIO * POLE_PAIRS * WHEEL_CAL
 
 
 def kph_to_mph(kph):
@@ -194,7 +197,7 @@ class KartState:
                 "battery_pct": battery_percent(volts),
                 "under_load": under_load(self.vesc.get("batt_a")),
                 "wheel_mph": wheel_mph(self.vesc.get("erpm")),
-                "wheel_mph_calibrated": False,
+                "wheel_mph_calibrated": True,
                 # GPS ground speed only from a fresh fix: no fix is "unknown", never 0 mph.
                 "gps_mph": kph_to_mph(self.fix.get("gps_kph")) if fix_fresh else None,
             },

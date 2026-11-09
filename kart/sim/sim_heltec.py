@@ -215,7 +215,7 @@ class SimKart:
         lat, lon, hd = self.path.at(self.s)
         fix = not self.nofix
         vup = not self.novesc
-        erpm = int(self.mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7)
+        erpm = int(self.mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7 * 2.48)   # x WHEEL_CAL (kartcore)
         self.seq = (self.seq + 1) % 256
         scale = round(self.eff_scale(), 3)
         return {"t": t, "kart": self.k, "seq": self.seq,

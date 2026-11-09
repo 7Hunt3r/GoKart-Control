@@ -144,7 +144,7 @@ function mobileCardHtml(k) {
       <div class="row sm"><span class="val" data-f="rssi"></span></div>
       <div class="kexp">
         <div class="row sm"><span class="val" data-f="gpsmph"></span></div>
-        <div class="row sm"><span><span class="val" data-f="wheel">--</span><span class="lbl"> mph wheel (uncalibrated)</span></span></div>
+        <div class="row sm"><span><span class="val" data-f="wheel">--</span><span class="lbl"> mph wheel</span></span></div>
         ${kartButtons(k)}
         <div class="lastcmd"><span><span class="lbl">Last command</span> <span class="outcome" data-f="out"></span></span>
           <button class="mdetail" data-sheet="${k}">DETAILS</button></div>
@@ -1268,7 +1268,7 @@ function openSheet(k) {
       <div class="swatch" id="shSw">${k}</div><b style="font-size:22px">Kart ${k}</b><span id="shLink" class="chip"></span>
       <span class="spacer" style="flex:1"></span><button data-close="1">CLOSE</button></div>
     <div class="grid2 sm" id="shBody"></div>${kartButtons(k)}
-    <p class="note">Wheel mph is uncalibrated. Motor temperature is unavailable (no sensors wired).</p>`;
+    <p class="note">Wheel mph is GPS-calibrated (2.48x, kart 2 2026-11-09). Motor temperature is unavailable (no sensors wired).</p>`;
   $("sheet").classList.remove("hidden");
   updateSheet();
 }

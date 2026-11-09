@@ -168,6 +168,7 @@ uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
 bool     slowActive = false; float slowErpm = 0; uint8_t slowMph = 0;
+float    speedCal = SPEED_CAL_DEFAULT;      // real ERPM per configured-math ERPM (config.h; pref "speedcal")
 // Timed scale override for the game zones (boost pad / mud): auto-reverts, cleared by STOP/START, never above 1.0.
 bool     ovActive = false; float ovScale = 1.0f; uint32_t ovUntilMs = 0;
 // Race start: grid hold at zero power until GO. GO is issued_utc + arg when the kart has GPS/beacon time (all
@@ -287,7 +288,7 @@ static float mphToErpm(float mph) {
   const VescActiveLimits& L = origLimits;
   if (!origValid || L.motorPoles == 0 || L.gearRatio <= 0 || L.wheelDiameter <= 0) return 0;
   float wheel_rpm = mph * 1609.34f / 60.0f / (3.14159265f * L.wheelDiameter);
-  return wheel_rpm * L.gearRatio * (L.motorPoles / 2.0f);
+  return wheel_rpm * L.gearRatio * (L.motorPoles / 2.0f) * speedCal;
 }
 // Mode m's own ERPM bound (config.h MODES[].topMph), never above the controller's own; m out of
 // range or topMph 0 = the controller's own bound. -1 = the mode wants a cap but this controller's
@@ -516,6 +517,10 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
           logf("mode %s: its %u mph cap needs this controller's drivetrain numbers (poles %u gear %.3f wheel %.3f)",
                MODES[arg].name, MODES[arg].topMph, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
           break;
+        }
+        if (src != 0xFE && slowActive) {                 // owner 2026-11-09: a mode from the PIT releases SLOW;
+          slowActive = false; slowErpm = 0; slowMph = 0;  // the driver's own mode buttons do not (SLOW is the operator's)
+          logf("mode %s from the pit releases SLOW", MODES[arg].name);
         }
         modeReq = arg; modeConfirmed = false;
         if (stopActive || raceHold) break;                 // remembered; applied at START / GO (W4)
@@ -1007,7 +1012,7 @@ static void usbStatus() {
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
-                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
+                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
                 "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
                 "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"tx_dbm\":%d,\"tx_radiated_dbm\":%d,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
@@ -1015,7 +1020,7 @@ static void usbStatus() {
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
                 vesc.fwMajor, vesc.fwMinor, hw, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
-                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), gkBool(baselineSuspect),
+                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gkBool(baselineSuspect),
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, mac,
                 vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
@@ -1109,8 +1114,13 @@ static void usbCommand(char* line) {
       else logf("setOutputPower(%d) failed: %d", p, st);
     }
   }
+  else if (!strcmp(line, "speedcal") && arg) {
+    if (!strcmp(arg, "clear")) { prefs.remove("speedcal"); speedCal = SPEED_CAL_DEFAULT; logf("speed calibration back to the default %.3f", speedCal); }
+    else { float c = atof(arg); if (c >= 0.3f && c <= 5.0f) { speedCal = c; prefs.putFloat("speedcal", c); logf("speed calibration %.3f stored (caps re-apply at the next mode command)", c); }
+           else logf("speedcal must be 0.3..5 (real ERPM per configured-math ERPM)"); }
+  }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -1188,6 +1198,7 @@ void setup() {
   vescUuid = prefs.getString("vescuuid", "");
   reportRate = prefs.getUChar("rate", 2); if (reportRate != 1) reportRate = 2;   // default 2 Hz (owner: "go faster")
   txPowerDbm = prefs.getChar("txpwr", LORA_TX_POWER_DBM); if (txPowerDbm < 0 || txPowerDbm > 22) txPowerDbm = LORA_TX_POWER_DBM;
+  speedCal = prefs.getFloat("speedcal", SPEED_CAL_DEFAULT); if (!(speedCal >= 0.3f && speedCal <= 5.0f)) speedCal = SPEED_CAL_DEFAULT;
   if (kartId < 1 || kartId > GK_MAX_KARTS) kartId = DEFAULT_KART_ID;
 
   // OLED (Vext powers it, active low)

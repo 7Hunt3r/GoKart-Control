@@ -1,6 +1,6 @@
 # Prebuilt images
 
-> **Current images: kart 0.2.2, base and repeater 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
+> **Current images: kart 0.2.3, base and repeater 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
 > set are kept for rollback only; 0.1.0 predates the relay bit, `slow_mph`, BOOST, RACE and the
 > 27-byte beacon. To refresh: `./build.sh kart compile` (also `base`, `repeater`), copy
 > `build/<sketch>/<sketch>.ino.merged.bin` here under a new version name, add the row and the
@@ -68,3 +68,14 @@ Radio unchanged (interoperates with the 0.2.0 / 0.2.1 base and repeater, which s
 
 - `kart-heltec-v4-ble-0.2.2.merged.bin` — ECO / NORMAL / SPORT are now a top-speed cap plus a torque scale (`config.h MODES[]`: 15 mph + 0.50, 25 mph + 0.75, uncapped + 1.0; the old 80 / 100 / 140 A current-only modes were indistinguishable on the kart), the cap computed from the controller's own poles / gear / wheel like SLOW; a BOOST above the mode's scale lifts the cap one mode up for its duration; `mode_actual` and the write verify check the ERPM bound as well as the scale; a capped mode is `rejected` on a controller without drivetrain numbers; `cap_mph` / `cap_erpm` / `baseline_suspect` in `status`; the OLED shows the cap. **Flashed on kart 2** 2026-11-07 20:14 over WiFi (`python3 ~/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/tools/espota.py -i 192.168.151.44 -p 3232 -f firmware/build/kart-heltec-v4/kart-heltec-v4.ino.bin`; OTA takes the app image `kart-heltec-v4.ino.bin` from the same build, not the merged image). The mode read-back test is still owed (the VESC was off). Test wheels-up first: after `mode 0`, `status` must show `scale_max` 0.500 and `max_erpm` 6115 on the baseline drivetrain (`mode 1`: 0.750 / 10191; `mode 2`: 1.000 and the controller's own bound back); then the 0.2.1 radio-power watch (`dmesg -w` on the kart Pi for USB resets).
   SHA-256 `c3ecc33fe881f3ccd3b0636e24002a6a690b7a223e1d60b4671565ec187a6b20`
+
+## 0.2.3 (2026-11-09 evening, kart only: speed calibration + pit mode releases SLOW)
+
+Radio unchanged (interoperates with the 0.2.1 base and repeater).
+
+- `kart-heltec-v4-ble-0.2.3.merged.bin` — the mode speed caps are now multiplied by a per-kart speed
+  calibration (`config.h SPEED_CAL_DEFAULT 2.48`, console `speedcal X|clear`, status `speed_cal`):
+  measured on kart 2 by GPS vs ERPM, the controller's si_* numbers are off by 2.48x, so the 15 / 25 mph
+  caps were really 6 / 10 mph and SLOW 5 was 2 mph. A mode command from the pit now releases SLOW (the
+  driver's own mode buttons still do not; START still does). Flashed to kart 2 by OTA 2026-11-09.
+  SHA-256 `f04cba51e704c429c7cb1106acd147ea452e686c5bd6cf218554d107d55f0ab7`

@@ -55,7 +55,7 @@ class Derivations(unittest.TestCase):
 
     def test_wheel_mph_contract_formula(self):
         erpm = 12345
-        want = erpm / 7 / 2.769 * (0.406 * math.pi) * 60 / 1609.34
+        want = erpm / 7 / 2.769 / pc.WHEEL_CAL * (0.406 * math.pi) * 60 / 1609.34   # x WHEEL_CAL (GPS-calibrated 2026-11-09)
         self.assertAlmostEqual(pc.wheel_mph(erpm), want, places=2)
         self.assertEqual(pc.wheel_mph(0), 0.0)                # valid zero stays zero
         self.assertIsNone(pc.wheel_mph(None))

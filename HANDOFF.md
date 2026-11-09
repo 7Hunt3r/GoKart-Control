@@ -93,6 +93,9 @@ Hardware in hand (from the bench logs):
 
 - BOOST and the race grid hold against a live VESC (SLOW, ECO/NORMAL/SPORT caps, STOP and START were
   verified wheels-up on 2026-11-09, see History).
+- Kart 2's Pi lost its Wi-Fi after the 2026-11-09 brown-out reboots (same netplan failure as the pit on
+  2026-11-06); kart/install.sh now writes keyfiles like the pit. Needs one wired `kart/deploy.sh <ip>
+  --install` to apply, and the Pi 3 B still needs a 5 V 3 A supply (Known issues 10).
 - Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
   Kart 2 runs 0.2.2 (OTA 2026-11-07 20:14). The `dmesg -w` USB-reset watch (750 mA peaks at 27 dBm
   off the Pi's USB) is still owed: it needs the Heltec actually cabled to the kart Pi, and on
@@ -193,6 +196,10 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
     kart display now carries the pit's health chip so it shows UNDERVOLT on the panel (kart/README.md).
 
 ## Decisions for Colin
+
+- **Drivetrain numbers in the controllers are wrong by ~2.5x** (2026-11-09, measured on kart 2: GPS vs ERPM).
+  Firmware 0.2.3 carries a 2.48 speed calibration so the mph caps are real; the clean fix is correcting
+  si_motor_poles / si_gear_ratio / si_wheel_diameter in VESC Tool on every kart (then `speedcal 1.0`).
 
 1. **Regen on STOP** (proposal). STOP currently ramps the current scale to zero and the kart
    coasts. The Heltec also sends a brake request to an on-VESC LispBM script
@@ -445,6 +452,15 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   outside on a mast (3-6 dBi omni, short low-loss coax), kart whip vertical on the hood turret, repeater
   mid-course, then SF8/BW250 at 1 Hz (slot plan decision). Pit Pi lost power at 16:45 and rebooted
   (journal ends abruptly). Kart display: full-screen map HUD + SUN mode shipped and deployed the same day.
+
+- 2026-11-09 (evening): kart 0.2.3 by OTA. Eamon: "eco and normal are still way too slow". The drive log
+  (GPS km/h vs ERPM, 40 moving samples + the 19 mph / 19,691 ERPM peak) gives 0.00159 km/h per ERPM where the
+  controller's si_* numbers (14 poles, 2.769, 0.406 m) predict 0.00395: the caps were 6 / 10 mph on the road,
+  SLOW 5 was 2 mph. Fix: `SPEED_CAL_DEFAULT 2.48` in config.h applied in mphToErpm (per-kart `speedcal X`,
+  status `speed_cal`); pitcore/kartcore `WHEEL_CAL` so wheel mph agrees (UI no longer says uncalibrated);
+  sim_heltec matched. Also: a SET_MODE from the pit clears SLOW (Eamon: "pressing the other buttons should
+  take it out of slow"); the driver's own mode buttons do not. The proper fix is the si_* values in VESC
+  Tool (Colin), after which speedcal goes back to 1.0.
 
 ## Collaboration and delivery state
 
