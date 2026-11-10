@@ -28,11 +28,20 @@ or approved route. The operational pit's `map.json` and its presets are untouche
 
 - At the target 1024×600 resolution, the map fills the main area with roughly 70%
   clear of the instrument panel. A charcoal overlay with 7% transparency carries
-  the readings; a faint CRT texture, seven-segment numerals, segmented labels,
-  cyan accents and amber mode selection add restrained retro racing styling.
+  the readings; a faint CRT texture and seven-segment numerals retain the retro
+  character. Helvetica-style labels use a consistent grid and spacing. The speed
+  gauge is a true 180-degree semicircle with concentric ticks. ECO is green,
+  NORMAL blue and SPORT orange; a solid fill identifies the active mode.
   Full-width alerts remain above it. At narrow phone widths the panels stack.
-- **AREA** opens a South Norwalk street overview; **FOLLOW** returns to the
-  existing driver camera. These controls only move the map camera.
+- The default is a stationary, zoomed-out view of the whole course. The camera
+  fits the track into the clear map area and does not chase or rotate with karts.
+  **North up** starts off: the course's first straight sets a fixed orientation.
+  The toggle switches to geographic north; **TRACK** restores the course framing.
+  **AREA** opens a north-up South Norwalk overview; **ALL** frames the fleet once.
+  Manual pan and pinch zoom preserve the selected orientation. These controls
+  affect presentation only.
+- Buildings use thin, subdued outlines from the same OSM extract. All kart trails
+  draw before all numbered circles, so a later trail cannot cross over a label.
 - Supporting readings show existing pack voltage, electrical RPM, ESC temperature
   and input power calculated from reported battery current × voltage. Missing or
   stale new readings show `--`. Battery warning thresholds are retained. Rising
@@ -44,9 +53,10 @@ or approved route. The operational pit's `map.json` and its presets are untouche
   only in browser storage; no controller/configuration request is sent.
 - Brightness adjusts page rendering from 30–100% (80% is neutral). It does not
   operate the physical backlight. The settings panel stays readable when dimmed.
-- Existing mode press-and-hold, game actions, alerts, sound, map following,
-  heading and zoom handlers are retained. No server, firmware or telemetry code
-  is changed. No kart has been connected or deployed to for this graphics work.
+- Existing mode press-and-hold, game actions, alerts and sound are retained.
+  The map camera follows Hunter's stationary-view preference. No server, firmware
+  or telemetry code is changed. No kart has been connected or deployed to for this
+  graphics work.
 
 `retro.css` contains this presentation layer. `instruments.js` reads the same
 state as the existing display and makes no network requests. DSEG fonts by
@@ -71,8 +81,12 @@ the existing mode hold gesture, narrow-screen layout and JavaScript errors.
 On 2026-11-10, all seven offline suites passed (262 tests, six existing skips).
 The simulator browser checks above passed, including the unchanged `/cmd` mode
 payload after a hold and no command after a short tap. Source comparison also
-confirmed the state/render, command, game and map-input handlers are retained.
+confirmed that vehicle command and game-action handlers are retained.
 STOP/fault, disconnected and race-countdown screen fixtures also rendered with
 their alerts visible and no JavaScript errors.
+The later camera/typography refinement also checks stable course framing during
+moving telemetry, North up off by default, orientation-preserving pan, complete
+track visibility, a mathematically semicircular gauge and trail-before-marker
+paint order. Vehicle command handlers remain unchanged.
 These are simulator checks; physical screen performance, touch and outdoor
 readability require later hardware review.
