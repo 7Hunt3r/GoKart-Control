@@ -32,15 +32,15 @@ map/zone presets are unchanged.
 ## Graphics
 
 - At the target 1024×600 resolution, the map fills the main area with roughly 70%
-  clear of the instrument panel. A charcoal overlay with 3% transparency carries
+  clear of the instrument panel. A smoky blue-gray overlay with 6% transparency carries
   the readings; a faint CRT texture and seven-segment numerals retain the retro
   character. Braun/Sony-inspired labels use a consistent grid and spacing, with
-  larger supporting readings (28 px at 1024×600, scaling up on larger screens).
+  supporting readings sized to fit their cells (22 px at 1024×600, up to 38 px on larger screens).
   The speed gauge is a true 180-degree semicircle with a heavier arc and the
   original bold DSEG7 font. Visible digit shapes are centered over MPH; the blank
   bearing beside a segmented 1 does not shift the reading. Wider three-digit
   readings shrink to preserve clearance inside the arc. ECO is green,
-  NORMAL blue and SPORT orange; a solid fill identifies the active mode.
+  NORMAL blue and SPORT pink; a solid fill identifies the active mode.
   Full-width alerts remain above it. At narrow phone widths the panels stack.
 - The default is a stationary, zoomed-out view of the whole course. The camera
   fits the track into the clear map area and does not chase or rotate with karts.
@@ -59,6 +59,14 @@ map/zone presets are unchanged.
 - **Display** opens light/dark, high contrast and brightness controls. The map
   has a matching palette for each light/contrast combination, with no live tile
   server dependency. The small OpenStreetMap contributor credit remains visible.
+  Settings close after three seconds without interaction. Adjusting a control
+  restarts the timer; an active touch/slider drag keeps the panel open until release.
+- Lap timing is docked below the profile controls in the instrument panel, with
+  a compact digital timer and aligned LAST/BEST readings. It does not cover the map.
+- Supporting measurements sit in a distinct background with thin cell dividers.
+  Their regular-weight segmented digits and extra cell padding separate them from
+  the bold speed readout. Taller screens give these cells more space and move the
+  drive modes down; the 1024×600 layout keeps the normal panel visible without scrolling.
 - Contrast and the existing **SUN** button stay synchronized. Preferences persist
   only in browser storage; no controller/configuration request is sent.
 - Brightness adjusts page rendering from 30–100% (80% is neutral). It does not
@@ -105,3 +113,35 @@ without scrolling at 1024×600, and checks that all 35 route segments coincide
 with source-map streets and all fake karts use that same path.
 These are simulator checks; physical screen performance, touch and outdoor
 readability require later hardware review.
+
+## Pit information
+
+This page is the driver display. The pit dashboard is a separate screen with the same shared visual system:
+`pit/server/static/kiosk.html` and the operator page `index.html`. It includes all
+eight kart slots, connection state, battery, speed, temperature, faults, GPS, radio,
+commands and race status. See `pit/GUI.md` for the matching graphics-demo runner.
+The independent pit simulator uses its own eight-kart sample data on the same SoNo
+route; it is not the same live feed as this three-kart graphics fixture. No vehicle
+or race behavior is changed by this display branch.
+
+## Shared visual system
+
+`kart/server/static/display-theme.css`, `display.js`, `font-segments.css` and the
+four SoNo SVGs are the source assets for both static roots. After changing a shared
+asset, run `python3 tools/sync_gui_assets.py`; use `--check` to verify parity. This
+keeps the two existing servers unchanged. The shared display dialog supports light,
+dark, high contrast and page brightness, and closes after three idle seconds.
+
+The softened electronic concept uses translucent smoky blue-gray panels, pale cyan
+numerals with a restrained glow in standard dark mode, fine borders and mint/blue/pink
+profile controls. High contrast removes the glow/texture and makes panels opaque.
+Day mode retains dark readable digits on cool pale blue panels. The working layout,
+70% clear map, centered speed and button positions are retained; the map-control
+buttons are slightly larger (58 px wide, 52 px tall). Alert colors and status text
+retain their original meaning. Generated concept images are design references,
+not screenshots of implemented functionality or geographic evidence.
+
+The final reference-matching pass retains the working layout and larger map controls,
+uses a yellow driver pointer, quiet trail lines and more widely spaced chevrons, and
+docks lap timing below the profile controls in the instrument panel. Supporting labels
+are smaller regular-weight text; readings stay inside their individual grid cells.
