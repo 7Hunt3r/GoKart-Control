@@ -135,6 +135,7 @@ function render() {
   else if (wheel !== null) { txt("mph", Math.round(wheel)); svgCls(mphEl, "mphnum"); txt("mphSrc", "WHEEL"); arcMph = wheel; }
   else { txt("mph", !fresh ? "NO DATA" : "NO FIX"); svgCls(mphEl, "mphnum na"); txt("mphSrc", "GPS"); }
   mphEl.dataset.digits = String(mphEl.textContent.length);
+  centerSpeedReading();
   txt("mphNote", fresh && !g.fix_fresh
     ? (wheel !== null ? "NO GPS FIX: wheel speed" : !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "")
     : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph` : ""));
@@ -215,7 +216,21 @@ function render() {
 let pulse = false;
 
 /* ------------------------------------------------------- game: speedo */
-const SPEEDO = { cx: 180, cy: 154, r: 126, a0: 180, a1: 360, max: 30 };
+const SPEEDO = { cx: 180, cy: 180, r: 166, a0: 180, a1: 360, max: 30 };
+const speedTextMeasure = document.createElement("canvas").getContext("2d");
+let speedTextKey = "";
+function centerSpeedReading() {
+  const el = $("mph"), font = getComputedStyle(el).font;
+  const key = el.textContent + ";" + font;
+  if (key === speedTextKey) return;
+  speedTextMeasure.font = font;
+  const m = speedTextMeasure.measureText(el.textContent);
+  // Centre the visible segments, not the advance width (the digit 1 has a wide blank bearing).
+  el.setAttribute("x", 180 + (m.width - m.actualBoundingBoxRight + m.actualBoundingBoxLeft) / 2);
+  el.setAttribute("y", 132 + (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2);
+  speedTextKey = key;
+}
+if (document.fonts) document.fonts.ready.then(() => { speedTextKey = ""; centerSpeedReading(); });
 function polar(a, r) { const t = a * Math.PI / 180; return [SPEEDO.cx + r * Math.cos(t), SPEEDO.cy + r * Math.sin(t)]; }
 function arcPath(a0, a1, r) {
   const p0 = polar(a0, r), p1 = polar(a1, r);
@@ -228,7 +243,7 @@ function arcPath(a0, a1, r) {
     const a = SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * v / SPEEDO.max, major = v % 15 === 0;   // seven radial ticks on one exact semicircle
     const p = polar(a, SPEEDO.r - 10), q = polar(a, SPEEDO.r - (major ? 22 : 17));
     svg += `<line class="tick${major ? "" : " minor"}" x1="${p[0].toFixed(1)}" y1="${p[1].toFixed(1)}" x2="${q[0].toFixed(1)}" y2="${q[1].toFixed(1)}"/>`;
-    if (major) { const l = v === 0 ? [34, 159] : v === 15 ? [180, 17] : [326, 159]; svg += `<text class="ticklbl" x="${l[0]}" y="${l[1]}" text-anchor="middle">${v}</text>`; }
+    if (major && v !== 15) { const l = v === 0 ? [14, 205] : [346, 205]; svg += `<text class="ticklbl" x="${l[0]}" y="${l[1]}" text-anchor="middle">${v}</text>`; }
   }
   $("ticks").innerHTML = svg;
 })();
@@ -806,7 +821,7 @@ function drawTrack(ctx, en, px, dim) {          // cached layer: band, edge, dir
   else { trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "rgba(0,70,90,.55)"; ctx.lineWidth = w + 5; ctx.stroke(); }
   trackPath(ctx, P, t.closed, px); ctx.strokeStyle = dim ? "rgba(0,229,255,.28)" : "rgba(0,229,255,.5)"; ctx.lineWidth = w; ctx.stroke();
   const cs = Math.max(5, Math.min(15, w * 0.42));     // direction chevrons, a little larger than the band edge
-  trackChevrons(t.points, t.closed, en, 15).forEach(([e, n, hd]) => {
+  trackChevrons(t.points, t.closed, en, Math.max(15, 46 / view.scale)).forEach(([e, n, hd]) => {
     const q = px([e, n]);
     ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd);      // world-aligned: the layer turns with the map
     ctx.beginPath(); ctx.moveTo(-cs, cs * 0.6); ctx.lineTo(0, -cs * 0.5); ctx.lineTo(cs, cs * 0.6);
@@ -1090,6 +1105,17 @@ function drawMap() {
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "low";
     ctx.translate(cxS, cyS); ctx.rotate(-view.rot);
     ctx.drawImage(L.cv, (L.cx - view.cx) * view.scale - L.half * k, -(L.cy - view.cy) * view.scale - L.half * k, 2 * L.half * k, 2 * L.half * k);
+    ctx.restore();
+  }
+  if (isSonoMap(pkg)) {
+    ctx.save(); ctx.font = '600 14px "Helvetica Neue", Helvetica, Arial, sans-serif';
+    ctx.textAlign = "center"; ctx.lineWidth = 4; ctx.lineJoin = "round";
+    const light = document.documentElement.dataset.theme === "light";
+    ctx.strokeStyle = light ? "#e5e9df" : "#22302a"; ctx.fillStyle = light ? "#48625a" : "#b5c5bc";
+    [[41.099036, -73.41856, "SoNo"], [41.095672, -73.421925, "South Norwalk station"]].forEach(([lat, lon, name]) => {
+      const p = px(en(lat, lon));
+      ctx.strokeText(name, p[0], p[1] - 16); ctx.fillText(name, p[0], p[1] - 16);
+    });
     ctx.restore();
   }
   if (headingUp && mePos) { drawTrackAhead(ctx, en, px, mePos); drawChevronsNear(ctx, L, px, mePos); }
