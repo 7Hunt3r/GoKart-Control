@@ -1,0 +1,22 @@
+{
+  "_comment": "SoNo street map for GUI reference. Synthetic preview motion is not a surveyed course.",
+  "version": 1001,
+  "image": "sono-light.png",
+  "bounds": {
+    "north": 41.106,
+    "south": 41.091,
+    "east": -73.405,
+    "west": -73.427
+  },
+  "origin": {
+    "lat": 41.09399,
+    "lon": -73.41637
+  },
+  "course": [],
+  "pit": {
+    "lat": 41.09399,
+    "lon": -73.41637
+  },
+  "source": "OpenStreetMap contributors; local vector rendering from the 2026-11-10 GUI preview extract. ODbL 1.0; https://www.openstreetmap.org/copyright. Not a surveyed course.",
+  "attribution": "\u00a9 OpenStreetMap contributors"
+}
