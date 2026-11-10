@@ -1,5 +1,51 @@
 # Collaborator handoff
 
+## M5 first telemetry integration — 2026-11-10
+
+**Latest upstream:** merged Eamon's `b48c5ad` into `v1.5/m5-core2` without changing his
+branch. Today's changes are kart **0.2.6** remembered controller baselines / readback retry
+(`83e7dc2`) and the local map development kit (`b48c5ad`). The merge also includes his
+post-sync work from last night: timed SLOW, multiplayer FREEPLAY, pit map editing and Pi Wi-Fi
+recovery. The existing M5 display scope remains telemetry, mode requests and the simple map;
+it ignores game-only fields and does not host, join or attack a multiplayer session.
+
+**First hardware target:** `m5-demo`, then `m5` + **`kart-m5-readonly`**, kart **1**.
+The read-only flag still gates temporary VESC limits and custom-app braking, including game
+hits and timed effects. The baseline fix reads VESC state and may save baseline metadata in
+**Heltec NVS**; it does not restore settings to the VESC on boot/reconnect. Retain each board's
+full private backup before flashing. Do not use the upstream write-enabled release image for
+this first test. Keep the VESC powered off until the old M5 BLE app has been replaced.
+
+**Compatibility:** upstream telemetry now supports 46/47/54-byte radio frames, with the kart
+still sending 47 bytes while no game fields are active. Active multiplayer needs updated
+base/repeater firmware (0.2.2). M5's existing parser ignores the new fields; merged emitters
+retain the larger 700-byte fleet / 940-byte self buffers and both UART mirror calls. Tests cover all three packet lengths and the larger JSON payloads. Wide-value test reports
+fit at 644/700 bytes for fleet and 781/940 bytes for self plus extras.
+
+**Validation:** all seven offline suites pass: **267 tests, zero skipped**. All eight targets
+compile on ESP32 core 3.3.8: `m5-demo`, `m5`, `kart-m5-readonly`, `kart-m5`, `kart`, `kart-uart`,
+`base`, `repeater`. The 600-second virtual eight-kart run processes 11,170 frames / 6,079,844
+bytes; peak scheduled burst 5,310 bytes/500 ms is 46.1% of ideal UART capacity, not measured
+hardware throughput. Read-only build options explicitly include `-DENABLE_VESC_WRITES=0`.
+Whitespace checks pass. The temporary toolchain had been partially cleaned overnight and was
+restored to the same pinned compiler/library versions before these builds.
+
+**Hardware status:** no USB boards were enumerated at the latest check; the owner is connecting
+them. No hardware upload or VESC command has been issued in this session. The next step is
+identify the explicit Core2/Heltec ports, retain private full-flash backups, then install the
+Core2 demo and the read-only telemetry pair. The boards can be programmed separately by USB;
+the three-wire link is needed for live telemetry. Keep the VESC off until the old Core2 BLE
+app is replaced, then turn it on for telemetry only.
+
+**Before a later write-capable deployment:** harden Eamon's remembered-baseline association.
+The current cache path can use a retained UUID before a fresh identity reply, and the separate
+NVS UUID/float writes are not an atomic record. Require fresh matched controller identity and
+a validated atomic record (or invalidation until all fields are saved). This does not defeat
+the compile-time VESC write gate in today's telemetry-only build. Coordinate the change with
+Eamon before commissioning mode writes; do not label a cached RAM baseline a saved VESC backup.
+
+The 2026-11-09 sections below describe the previous tested milestone and remain historical.
+
 ## M5 v1.5 milestone — 2026-11-09
 
 **Branch:** `v1.5/m5-core2`, based on Eamon's `8d9c41c` (including his 0.2.3 speed
@@ -164,8 +210,12 @@ Hardware in hand (from the bench logs):
 - BOOST and the race grid hold against a live VESC (SLOW, ECO/NORMAL/SPORT caps, STOP and START were
   verified wheels-up on 2026-11-09, see History).
 - Kart 2's Pi lost its Wi-Fi after the 2026-11-09 brown-out reboots (same netplan failure as the pit on
-  2026-11-06); kart/install.sh now writes keyfiles like the pit. Needs one wired `kart/deploy.sh <ip>
-  --install` to apply, and the Pi 3 B still needs a 5 V 3 A supply (Known issues 10).
+  2026-11-06); kart/install.sh now writes keyfiles like the pit, applied to kart 2 on 2026-11-09 18:31
+  over a direct Ethernet link (its netplan yaml was 0 bytes). The Pi 3 B still needs a 5 V 3 A supply
+  (Known issues 10): the kart display's log of the Heltec's serial shows the reboot storm's resets were
+  preceded by `E BOD: Brownout detector was triggered` (36x), several right after `vesc link up` (the
+  BLE connect current spike), plus 9 task-watchdog resets and two Guru Meditation panics typical of a
+  sagging rail. Power, not firmware. `txpower 12` would ease it at ~2 dB of range.
 - Range test, dead-zone test with the repeater, eight-kart load test, PPS at the base (indoors).
   Kart 2 runs 0.2.2 (OTA 2026-11-07 20:14). The `dmesg -w` USB-reset watch (750 mA peaks at 27 dBm
   off the Pi's USB) is still owed: it needs the Heltec actually cabled to the kart Pi, and on
@@ -175,6 +225,16 @@ Hardware in hand (from the bench logs):
   Then the antennas: a 3-6 dBi 915 MHz omni on a mast for the pit base (short low-loss coax), the
   repeater high on a pole mid-track with line of sight both ways, kart whips vertical on the dash
   hood. Height and placement are worth more than every firmware change made today.
+- **Base and repeater still on 0.2.1 (reflash owed, 2026-11-09 evening).** Kart firmware 0.2.5 adds 7 game
+  bytes to telemetry (54-byte packet, docs/freeplay-multiplayer.md); a 0.2.1 base/repeater rejects that
+  length, so 0.2.5 karts send the old 47-byte packet while they are not in a game (nothing lost until
+  someone hosts). Images are built: `firmware/releases/base-tbeam-s3-0.2.2.merged.bin` (copy it with
+  `scp firmware/releases/base-tbeam-s3-0.2.2.merged.bin pit@gokart-pit.local:` and run
+  `ssh pit@gokart-pit.local ./flash_base.sh base-tbeam-s3-0.2.2.merged.bin`; the Mac-side session policy
+  refused to run that flash itself) and
+  `firmware/releases/repeater-tbeam-s3-0.2.2.merged.bin` (USB from the Mac: `./build.sh repeater upload
+  /dev/cu.usbmodemXXXX`, or esptool with the merged image at 0x0). Until then the pit shows a kart as
+  offline while it is in a multiplayer game.
 - Touch, map redraw speed and demo mode by eye on the Pi 3 B panel.
 - Formal bench validation of link loss / reconnect (requirements acceptance checks) before
   enabling profile writes; saved-flash VESC baseline; controller commercial model and ratings.
@@ -313,6 +373,23 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
    display and pit log have both); the cap is only as right as `si_gear_ratio` / `si_wheel_diameter`
    in the controller. The kart logs `baseline_suspect` when the limits it reads at link-up look like
    its own caps left by a previous Heltec session (fix: key the kart off and on).
+9. **Remembered controller baseline** (0.2.6, 2026-11-10; flagged against "no saved-profile restore"). After a
+   Heltec reboot with the controller still on, the link-up read returns the previous session's temporary caps and
+   the kart clamps every later cap to them (2026-11-09: stuck at ECO's 15 mph, boosts and ROCKET did nothing).
+   0.2.6 keeps an NVS copy of a clean link-up read per controller UUID and uses it as the ceiling for its own
+   temporary writes when the live read looks like its leftovers; it also adopts the mode the live limits match
+   as the request (read-only). It never writes the remembered values to the controller. If you would rather the
+   kart stay clamped until a key cycle, that is a one-line revert; say so.
+8. **Kart-to-kart game bytes in telemetry** (2026-11-09 evening, owner request; protocol change for your
+   sign-off). Multiplayer freeplay (invite other karts, item boxes give a SHELL / LIGHTNING, fire it at a
+   kart within 25 m, the target gets a 4 s / 3 s timed SLOW 5) rides on seven bytes appended to
+   GkTelemetry (54 bytes, 25.7 ms on air; 46/47-byte packets still accepted everywhere; a kart sends the
+   47-byte packet while idle). Everything is kart-to-kart over the existing telemetry; the pit only
+   observes (`session`/`score` badges). Contract and rules: docs/freeplay-multiplayer.md. Open for you: whether
+   the fleet wants this at all, the 25 m / 4 s / 3 s numbers, and whether the pit should be able to end a game.
+   Also owner 2026-11-09: freeplay starts in ECO, a BOOST is NORMAL (0.75, 25 mph) for 5 s and a ROCKET (was
+   SUPER) is SPORT (1.0, uncapped) for 8 s; firmware 0.2.5 lifts the cap to the mode whose scale the boost
+   reaches (0.2.4 lifted exactly one mode).
 
 ## Doc drift to reconcile
 
@@ -408,6 +485,28 @@ higher current or fault thresholds are the fix without an event log and verified
 7. Investigate drift cutoff with logs, then propose any tuning as a separate change.
 
 ## History
+
+**2026-11-09 (evening, multiplayer freeplay)**
+- Owner: "single player and multiplayer freeplay, invite other online karts, mystery boxes give cached
+  shells etc., when close enough to another kart press it on the display and shell them into slow mode
+  for a few seconds"; then "2 boost modes: start in ECO, regular boost = NORMAL, rocket icon = SPORT".
+- Built and committed (f266445 firmware/protocol/pit, b646c20 kart Pi + dash): docs/freeplay-multiplayer.md
+  is the contract. Seven game bytes on GkTelemetry (54 bytes; 46/47 still accepted; idle karts keep sending
+  47), kart 0.2.5 `session host|join N|leave` / `attack N|all shell|lightning` with game/hit/attack lines,
+  hits = timed SLOW 5 (shell 4 s, lightning 3 s) through the 0.2.4 timed-slow path; kart Pi FreeplayGame
+  multiplayer state + POST /api/freeplay host/join/leave/use + dash UI (invite card, held-item button, HIT
+  flash, score); BOOST = `boost 5 0.75` (NORMAL), ROCKET (was SUPER) = `boost 8 1.0` (SPORT), firmware cap
+  lift follows the boost's scale.
+- Verified: tools/run_tests.sh 7 suites / 262 tests ALL PASSED; integrated headless run on the sim (kart 3
+  hosting, kart 5 joining): invite -> join -> shell held -> fired at K5 at 22.6 m -> acked, score 1 -> hit
+  by K3 -> SLOW 5 MPH banner, slow_mph 5 for 4 s then 0. Live: kart 2's Heltec on 0.2.5 by OTA 19:53 (VESC
+  link up, mode ECO, no writes at boot), `session host` -> game lines at 1 Hz, the pit on base 0.2.1 marks
+  the kart stale while it hosts (54-byte packets) and online again after `session leave`; kart Pi deployed
+  20:04 (multi.fw_ok true). Freeplay was switched off and its course reset at the kart screen at 19:59
+  (before the deploy), so the display shows freeplay OFF until the driver taps FREEPLAY again.
+- Owed: base + repeater reflash to 0.2.2 (images in firmware/releases, see Open); a second 0.2.5 kart to
+  play against (kart 1 is on Colin's old build); real-track numbers for 25 m / 4 s / 3 s.
+
 
 Condensed from the dated sections this file accumulated. Times are local (ET).
 
@@ -540,6 +639,11 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   `freeplay` / `freeplay_boxes`, state in `cache/freeplay.json`. Simulator + headless screenshots only; not
   deployed. Open for the owner: freeplay keeps running when the pit's game is switched OFF (the brief), so
   the pit master switch no longer silences a kart whose driver turned freeplay on.
+- 2026-11-09 (night, after the first freeplay drive, "lotta fun"): freeplay switch-on sends `mode 0` (ECO base,
+  so a BOOST's cap lift is felt; skipped while STOPPED / grid hold / paused); boosts stack (remaining + new,
+  <= 30 s, larger scale; `boost_stacked`); mud = `slow 5 4` (timed SLOW, `mud_slow_secs`) when the Heltec's
+  status `fw` is kart-0.2.4+, else the old `boost 4 0.5` (0.2.3 would read it as a permanent slow). Simulator
+  reports fw `sim-kart-0.2.4` (`--fw-old` = 0.2.3) and `slow_mph`. Tests only; not deployed or driven.
 
 ## Collaboration and delivery state
 

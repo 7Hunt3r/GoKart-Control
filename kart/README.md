@@ -189,9 +189,14 @@ with a fix, plus a 4 Hz tick):
 - **boost** (circle or polygon): on entry, sends the Heltec `boost <secs> <scale>`
   once. Re-armed only after leaving the zone (> 3 m outside the edge) and
   `cooldown_s` (default 20) after that exit.
-- **mud**: on entry `boost 3 <scale>`, repeated every 2 s while inside; leaving
-  just stops repeating (the Heltec reverts within 3 s). Inside mud, a boost
-  entry is suppressed (mud wins).
+- **mud**: on entry a timed mud command, repeated every 2 s while inside; leaving
+  just stops repeating (it ends within `mud_slow_secs`, default 4 s). Heltec
+  kart-0.2.4+ (status `fw`): `slow 5 4`, a real 5 mph cap that reverts by itself;
+  older or unknown firmware: `boost 4 <scale>`. Inside mud, or while a mud is
+  still running, a boost entry is suppressed (mud wins).
+- **stacking**: a boost while our previous boost still runs sends the remaining +
+  new seconds (<= 30) at the larger scale (<= 1.0); `boost_stacked` record, and the
+  HUD meter counts down the extended end.
 - **lapline**: the path between consecutive fixes (<= 5 s apart) crossing a-b in
   either direction counts if `min_lap_s` (default 20) has passed since the last
   crossing. The first crossing starts lap 1; crossing time is interpolated
@@ -250,10 +255,11 @@ with a fix, plus a 4 Hz tick):
   `gps_hz`, `fix_age_ms`, `base`).
 
 - **Item boxes** (`type: "item"`, circle or polygon): on entry the kart rolls
-  locally (seedable RNG): 45 % BOOST (`boost 5 1.0`), 15 % SUPER (`boost 8 1.0`),
-  25 % MUD (`boost 3 0.5`), 15 % empty (nothing sent). Same exit/cooldown rules as
-  a boost pad (`cooldown_s`, default 15) and the same gates. Logged as
-  `ev: "item"` with `item: boost|super|mud|empty`.
+  locally (seedable RNG): 45 % BOOST (`boost 5 0.75`: NORMAL's scale), 15 % ROCKET (`boost 8 1.0`: SPORT's
+  scale; called SUPER before 2026-11-09), 25 % MUD (`slow 5 4`, or `boost 4 0.5` before kart-0.2.4), 15 % empty
+  (nothing sent). Same exit/cooldown rules as a boost pad (`cooldown_s`, default 15) and the same gates. Logged as
+  `ev: "item"` with `item: boost|rocket|mud|empty` (a freeplay box in a multiplayer session also rolls
+  `shell|lightning`, see "Multiplayer freeplay"). Boost pads keep the scale their zone says.
 - **Race start** (`{"t":"race","event":"countdown","go_in_ms":N,...}` /
   `{"event":"go"}` from the race firmware): GO = the countdown line's arrival +
   `go_in_ms`; the go line only confirms it (`game.race.go_confirmed`). A go line with no
@@ -321,7 +327,7 @@ and a short full-screen flash (the text pops in) + synthesized sound on boost, m
 lap; the BOOST meter pulses while boosting.
 Item boxes show as a blue/white "?" box; entering one plays a ~1.2 s roulette
 (a 176 px box at the top of the map, left of the map buttons, each icon popping in) ending on the result, with a
-spinning star for SUPER.
+rocket for ROCKET (old records saying "super" render as the rocket).
 Every zone keeps its true-scale ring but its marker is at least 24 px across, so
 3-5 m pads stay visible at the 70 m follow span. The track is drawn under the
 zones as a translucent cyan band `width_m` wide with a dark edge and white
@@ -418,9 +424,10 @@ position events; with `--race-at` the sequence starts at the countdown).
 
 **Safety notes.** Zones only change the current scale (motor torque limit)
 inside the firmware's own limits and never above 1.0; ECO/NORMAL karts do get up
-to SPORT torque on a 1.0 boost pad, and (firmware 0.2.2+) a boost above the mode's
-scale lifts the mode's speed cap one mode up for its duration (ECO 15 -> 25 mph,
-NORMAL -> uncapped), which is the point, so place pads on straights. The race director's kill is the pit's `enabled` switch (karts stop
+to SPORT torque on a 1.0 boost pad, and a boost above the mode's scale lifts the mode's speed cap for its
+duration: firmware 0.2.5 lifts it to the highest mode whose scale the boost reaches (0.75 -> NORMAL 25 mph,
+1.0 -> SPORT uncapped; an in-between scale still lifts one mode; 0.2.2-0.2.4 lifted exactly one mode), which is
+the point, so place pads on straights. The race director's kill is the pit's `enabled` switch (karts stop
 sending within one poll, 30 s, or at once after a `POST /api/map/refresh`); a pit
 STOP is always immediate. GPS is a few metres off: zones under ~10 m feel random.
 
@@ -433,10 +440,17 @@ stack, headless screenshots); not yet driven on kart 2.
 **What it is.** `kartcore.FreeplayGame` builds a zones document in the same shape mapsync delivers
 (`{"version": "freeplay-N", "enabled": true, "source": "freeplay", "zones": [item boxes], "track": {...}}`)
 and the server hands it to the normal `GameEngine.set_zones`. Everything after that is the existing game
-layer: the item roll (45 % BOOST `boost 5 1.0`, 15 % SUPER `boost 8 1.0`, 25 % MUD `boost 3 0.5`, 15 %
-empty), the roulette, sounds, cooldown/hysteresis, nothing while STOPPED or in a grid hold, mud wins,
-scale never above 1.0. Freeplay itself never sends anything to the Heltec (no mode/start/stop/slow); the
-only line is the engine's timed `boost`. Engine records from a freeplay document carry
+layer: the item roll (45 % BOOST `boost 5 0.75`, 15 % ROCKET `boost 8 1.0`, 25 % MUD `slow 5 4` on Heltec
+kart-0.2.4+ / `boost 4 0.5` before, 15 % empty), boosts stacking up to 30 s, the roulette, sounds,
+cooldown/hysteresis, nothing while STOPPED or in a grid hold, mud wins, scale never above 1.0.
+
+**Starts in ECO** (2026-11-09 night). Switching freeplay ON (button or API, not a restart restore) sends
+one `mode 0` through the same path as `POST /cmd` mode (it shows in `commands` with `who: "freeplay"`),
+unless the kart is STOPPED, in a grid hold, or freeplay is paused/demo; outcome in the session log
+(`freeplay_mode`: sent / skipped / failed) and in `/api/state` `freeplay.eco`. ECO's 15 mph cap is the
+base; a BOOST (NORMAL's scale) lifts it to 25 mph and a ROCKET (SPORT's) removes it for their time (firmware
+0.2.5 `BOOST_LIFTS_CAP`). Apart from that one ECO
+request freeplay sends nothing itself (no start/stop/slow); the other lines are the engine's. Engine records from a freeplay document carry
 `"source": "freeplay"` in the session log, as do freeplay's own records (`freeplay_on/off`,
 `freeplay_phase`, `freeplay_course`, `freeplay_spawn`, `freeplay_collected`, `freeplay_course_reset`).
 
@@ -474,13 +488,80 @@ off for the demo and comes back after it.
 **`/api/state` `freeplay`:** `{"allowed", "on", "phase": "recording"|"ready"|"paused_pit"|"off"|"no_gps",
 "pause_reason", "boxes_target", "course": {"points", "length_m", "source": "recorded"|"pit"} | null,
 "boxes": [{"id", "name", "lat", "lon", "r_m"}], "respawning", "collected", "record": {"distance_m",
-"points"} | null}`. While freeplay runs, `map.zones` is its document (the HUD draws the boxes) and
+"points"} | null, "eco": {"outcome", "line"/"id" | "why" | "error", "age_s"} | null}`. While freeplay runs, `map.zones` is its document (the HUD draws the boxes) and
 `game.source` is `"freeplay"`; `/map/zones.json` stays the pit's file. The pit never sees freeplay boxes.
 
 **Config + files.** `freeplay` (default true = allowed; false hides the button and refuses the API; it
 also needs `game: true`) and `freeplay_boxes` (1-6, default 3). On/off, the course and the collected count
 are kept in `cache/freeplay.json` (next to `game-state.json`), so a restart resumes with fresh boxes on the
 same course. Freeplay starts OFF on a new kart: the driver turns it on.
+
+### Multiplayer freeplay
+
+Added 2026-11-09 (owner: "single-player and multiplayer freeplay, where you can invite other online karts; in
+the mystery boxes you get cached shells etc. that, when you're close enough to another kart, you press on the
+display and shell them"). Contract: `docs/freeplay-multiplayer.md`. Needs Heltec firmware kart-0.2.5+ (status
+`fw`); older firmware ignores the console lines, so the kart refuses them and the dash hides the buttons.
+SIMULATION-tested only (unit tests + the e2e stack against `sim_heltec.py --peer-host --hit-at S`).
+
+**Who does what.** The Heltecs own the session, the attack repeats/acks and the hit effect (over the existing
+LoRa telemetry, no pit). The kart Pi keeps the *wish* (hosting, or the joined host's id), the held item, the
+item roll and the target choice, and mirrors the firmware's `{"t":"game"}` lines as the truth about the session.
+Freeplay must be on (and not paused by a pit game or demo) to host, join or use; turning freeplay off sends
+`session leave`.
+
+**API** (`POST /api/freeplay`, localhost only like the rest): `{"host": true}` -> `session host`;
+`{"join": N}` -> `session join N` (the firmware only accepts it while N is heard hosting); `{"leave": true}` ->
+`session leave` (never refused); `{"use": true}` fires the held item: a SHELL at the nearest peer with
+`in_range` (`attack N shell`), LIGHTNING at everyone (`attack all lightning`). 400 for a bad body, 409
+`{"ok": false, "error": ...}` when refused (`nothing held`, `no one in range`, `not in a session`, freeplay off /
+paused, firmware without multiplayer, demo running). The reply is the `freeplay` block. Every request is an
+`op` record (with `refused` when it was). These lines go out through the game's command path (`_game_out`, queued,
+never blocking), not `POST /cmd`: the firmware does not echo them with a `cmd` line.
+
+**Items.** In a session (`multi.session != 0`) a freeplay box rolls 35 % BOOST (`boost 5 0.75`), 30 % SHELL
+(held), 15 % LIGHTNING (held), 10 % ROCKET (`boost 8 1.0`), 10 % empty; outside a session, and always on the
+pit's own item boxes, the single-player table is unchanged. The engine's `item` record shows the roll
+(`item: "shell"`, `table: "multi"`, `held: true`) so the roulette can land on it; a held roll sends nothing.
+One slot: a new held item replaces the old one. The slot empties when `use` sends the attack and comes back if
+the firmware answers `rejected`. Instant items stack exactly like today's boosts.
+
+**Peers and range.** `multi.peers` = the karts in my session (the latest game line's `peers`; before any game
+line, fleet karts heard in the last 10 s whose `session` equals mine). `dist_m` = from my latest filtered GPS
+position to the peer's last fleet fix moved along its heading at its `gps_kph` for at most 3 s of age;
+`in_range` = within 25 m with a peer fix younger than 10 s. `score` and `age_s` come from its fleet line.
+
+**Re-sending the wish.** The firmware forgets its session on a reboot. On every link up/down and on a detected
+Heltec reboot the kart clears the mirrored session and re-sends `session host` / `session join N` as soon as
+the status reply shows kart-0.2.5+. While the wish is not in force (game lines show another session) it is
+re-sent at most every 5 s; after 3 sends that did not take it is dropped (`freeplay_leave` with `auto: true`,
+`multi.note` says why, a `session` event with `ended: "rejected"`). A game line with `ended` ("host lost" /
+"host left") drops a join wish at once (never re-joins a vanished host) and clears the held item. These are
+session-membership lines only: nothing about driving state is replayed.
+
+**`/api/state` `freeplay.multi`** (always present, zeros/empties when off): `{"session": 0|H, "hosting",
+"peers": [{"id", "dist_m"|null, "in_range", "score", "age_s"}], "hosts": [ids heard hosting, not me],
+"held": null|{"item", "since_s"}, "score", "attack": null|{"to", "item", "seq", "result", "age_s", "acked",
+"why"}, "last_hit": null|{"from", "item", "secs", "applied", "why", "age_s"}, "fw_ok", "events": [last 12
+{"seq", "age_s", "ev": "hit"|"attack"|"held"|"session"|"peer", ...}], "wish": null|"host"|N, "note"}`. `seq`
+increases forever within a server process, like `game.events`. `fleet[].multi` / `self.multi` carry the raw
+telemetry fields (`session`, `atk_to`, `atk_item`, `atk_seq`, `ack_from`, `ack_seq`, `score`; 0 on old frames).
+
+**Persistence.** `cache/freeplay.json` gains `"multi": {"wish": null|"host"|N, "held": null|"shell"|"lightning"}`
+(still `"v": 1`; older files load as before). Restored only when freeplay comes back on.
+
+**Session log** (`kind: "game"`, all `"source": "freeplay"`): `freeplay_host` / `freeplay_join` (also with
+`resend` and `tries` when re-sent), `freeplay_leave` (`why`: driver / freeplay off / the give-up reason),
+`freeplay_session` (the firmware's session/peers changed: `session`, `hosting`, `peers`, `hosts`, `score`,
+`ended`, `prev`), `freeplay_item_held` (`item`, `replaced`), `freeplay_use` (`item`, `to`, `dist_m`, `line`),
+`freeplay_attack` (terminal result: `acked`/`timeout`/`done`/`replaced`/`rejected`, `acked`, `why`,
+`returned`), `freeplay_hit` (we were hit: `from`, `item`, `secs`, `applied`, `why`), and `cmd` records for each
+`session ...` / `attack ...` line with `sent`.
+
+**Simulator.** `sim_heltec.py` speaks kart-0.2.5 (`--fw-old` = 0.2.3 ignores it all): `--peer-host` makes
+fleet kart 3 host from the start and kart 5 join it after 5 s; `session host` makes kart 5 join us after 3 s;
+attacks on a peer are acked ~1 s later; `--hit-at S` has a peer (kart 3 first) shell us at second S once we
+are in a session (hit line + `slow 5` for 4 s through the timed-slow path).
 
 ## How the map arrives from the pit
 
@@ -610,6 +691,7 @@ by the default and reported in the journal (`CONFIG: ...`), the session log and 
 | `sound` / `sound_volume` | true / 0.8 | page sounds |
 | `sun_mode` | true | SUN theme by default (the SUN button overrides it per device) |
 | `freeplay` / `freeplay_boxes` | true / 3 | FREEPLAY allowed (kart-local item boxes, see Freeplay); boxes on the course (1-6) |
+| `mud_slow_secs` | 4 | seconds per mud command (1-30): `slow 5 N` on Heltec kart-0.2.4+, else `boost N 0.5` |
 | `rotate` | 0 | install.sh only: 180 = ports-down mount |
 
 ### Troubleshooting

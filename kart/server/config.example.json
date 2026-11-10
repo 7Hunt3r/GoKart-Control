@@ -28,6 +28,7 @@
     "sun_mode": "Driver page SUN theme by default: opaque black HUD with white borders, yellow active mode, contrast-boosted map photo (the 7 inch panel's backlight cannot be raised). The SUN map button toggles it per device and its last setting wins.",
     "freeplay": "Allow FREEPLAY (map button under SUN, or POST /api/freeplay from the kart): a kart-local item-box game that needs no pit. Drive one lap to set the course, then random item boxes appear on it. The pit's own game (enabled, with zones) always wins and pauses it. Needs game true. On/off and the course are kept in freeplay.json next to game-state.json.",
     "freeplay_boxes": "Item boxes kept on the freeplay course at once (1-6).",
+    "mud_slow_secs": "Seconds each mud command lasts (zone repeat every 2 s, MUD item once), 1-30. Heltec kart-0.2.4+: `slow 5 N` (a real 5 mph cap that ends by itself); older or unknown firmware: `boost N 0.5`.",
     "rotate": "0 or 180. Read by install.sh only: 180 = panel mounted ports-down (kernel video= rotate + touch calibration udev rule; reboot). Kart 2 runs 0.",
     "health_period_s": "Seconds between Pi power/thermal samples (vcgencmd get_throttled + CPU temperature, 0.2-3600). The driver page shows UNDERVOLT / THROTTLED / HAD UNDERVOLT only when something is wrong; transitions are logged.",
     "health_file": "Tests/dev only: read the get_throttled text from this file instead of vcgencmd (null on a kart)."
@@ -62,6 +63,7 @@
   "sun_mode": true,
   "freeplay": true,
   "freeplay_boxes": 3,
+  "mud_slow_secs": 4,
   "rotate": 0,
   "health_period_s": 10.0,
   "health_file": null

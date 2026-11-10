@@ -1,6 +1,6 @@
 # Prebuilt images
 
-> **Current images: kart 0.2.3, base and repeater 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
+> **Current images: kart 0.2.4, base and repeater 0.2.1** (2026-11-07, below). `kart-heltec-v4-ble-0.1.0.merged.bin` and the 0.2.0
 > set are kept for rollback only; 0.1.0 predates the relay bit, `slow_mph`, BOOST, RACE and the
 > 27-byte beacon. To refresh: `./build.sh kart compile` (also `base`, `repeater`), copy
 > `build/<sketch>/<sketch>.ino.merged.bin` here under a new version name, add the row and the
@@ -79,3 +79,14 @@ Radio unchanged (interoperates with the 0.2.1 base and repeater).
   caps were really 6 / 10 mph and SLOW 5 was 2 mph. A mode command from the pit now releases SLOW (the
   driver's own mode buttons still do not; START still does). Flashed to kart 2 by OTA 2026-11-09.
   SHA-256 `f04cba51e704c429c7cb1106acd147ea452e686c5bd6cf218554d107d55f0ab7`
+
+## 0.2.4 (2026-11-09 night, kart only: timed SLOW for the game's mud)
+
+Radio unchanged (interoperates with the 0.2.1 base and repeater).
+
+- `kart-heltec-v4-ble-0.2.4.merged.bin` — USB console `slow MPH SECS` (SECS 1-60) caps speed for SECS
+  seconds and then returns by itself to whatever cap was in force before (a pit SLOW comes back); a timed
+  slow never raises a pit cap that is already lower. The kart display uses it for mud (`slow 5 4`): "mud
+  mode should actually make the kart go into slow mode". START and a pit mode command still clear every
+  SLOW. Flashed to kart 2 by OTA 2026-11-09.
+  SHA-256 `2dfc5913466da0c4762649b516dc305920029c2c811645e9caac4caa764c0969`

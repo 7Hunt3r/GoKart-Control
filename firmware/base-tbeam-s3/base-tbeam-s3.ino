@@ -237,7 +237,7 @@ static void serviceLoraRx() {
       }
       edgeMicros = cand; edgeSetMs = now; edgeSrc = 2;
     }
-    char out[640];
+    char out[GK_TELE_JSON_MAX];
     gkTelemetryToJson(out, sizeof out, fleet[h->src], "tele", rssi, snr, millis());
     Serial.println(out);
   }

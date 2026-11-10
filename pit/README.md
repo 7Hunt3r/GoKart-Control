@@ -183,13 +183,24 @@ pages, the editor driven with real mouse events). Not yet tried with real karts.
   tap a zone. The selected zone gets a name field and a radius slider (3-60 m). `SAVE` posts the
   whole document; `CANCEL` drops the draft. Saving warns if someone else saved meanwhile.
   Polygons are not drawn by the editor but are rendered, moved and deleted if present in the file.
+  Faster placing (2026-11-09): `PLACE AT KART` (kart picker, defaults to the first online kart) drops
+  the armed PLACE tool's zone at that kart's latest fix (needs a fix < 5 s old; the tool stays armed so
+  you can drive/walk the course dropping several), or sets a lap line end / adds a track point with
+  LAP LINE / TRACK. `SNAP` (default on, remembered per browser) puts a tapped or at-kart pad / mud /
+  item box on the nearest point of the track centreline when within 10 m. `UNDO` takes back the last
+  placement of this editing session (one level). `AUTO BOXES` (2/3/4/6 or 1-20) replaces every item
+  box with N boxes ("Box 1..N", 4 m, cooldown 15 s) spread by arc length along the saved track
+  (unsaved edits are saved first). Touch selection uses a 22 px hit radius (14 px with a mouse). With no
+  track and no zones the hint points at PACE CAR (a button opens it on the phone).
 - **API (login like `/cmd`, logged as `op` with who).** `POST /zones` `{"zones":[...]}` replaces
   the zone list (`enabled` kept unless given; `track` kept if absent, removed if `null`) after
   validation: types boost/mud/item/lapline, circle `r_m` 3-500, polygon 3-64 points, lap line >= 4 m, unique ids (1-16 of `A-Za-z0-9_-`), at most
   one lap line; `scale` clamped 0.1-1.0, boost `secs` 1-30, `cooldown_s` 0-600 (default 20 boost,
   15 item), `min_lap_s` 5-600; track 2-200 points (3+ if closed), `width_m` 2-20.
   Refusals are HTTP 409 with the reason. Unknown zone types are kept as-is (karts ignore them,
-  the pit draws them grey). `POST /zones/enable {"enabled":true|false}` flips the master switch.
+  the pit draws them grey). `POST /zones/enable {"enabled":true|false}` flips the master switch. `POST /zones/auto_boxes {"n":1-20}`
+  replaces every item box with n boxes along the saved track (`pitcore.boxes_along_track`; 409 when there is
+  no track), logged as `zones_auto_boxes`.
   Both bump `version`. `POST /laps/reset` clears lap state.
 - **Chips and badges.** Every top-bar chip has one height and font and is coloured only by state;
   GAME is a toggle (ON = amber with a solid dot, OFF = outlined). Card badges (STOPPED, FAULT, GRID,

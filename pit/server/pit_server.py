@@ -388,6 +388,22 @@ class App:
         self.log.write("op", who=who, action="zones_enable", enabled=en, version=doc["version"])
         return {"enabled": en, "version": doc["version"]}
 
+    def auto_boxes(self, body, who):
+        """POST /zones/auto_boxes {"n": 3}: replace every item box with n boxes spread evenly along
+        the saved track (pitcore.boxes_along_track); a normal zones save (version bump, log)."""
+        n = body.get("n", 3)
+        r_m = body.get("r_m", pitcore.AUTO_BOX_R_M)
+        self._load_zones()
+        with self.lock:                                     # RLock: save_zones takes it again
+            cur = self.fleet.game.doc
+            if not cur.get("track"):
+                raise pitcore.ZoneError("no track yet: record one with PACE CAR or draw it with TRACK, then SAVE")
+            zbody, boxes = pitcore.auto_boxes_body(cur, n, r_m)
+            doc = self.save_zones(zbody, who)
+        self.log.write("op", who=who, action="zones_auto_boxes", version=doc["version"], n=len(boxes),
+                       r_m=boxes[0]["r_m"], ids=[b["id"] for b in boxes])
+        return {"zones": doc, "boxes": [b["id"] for b in boxes]}
+
     def set_gps_correction(self, body, who):
         enabled = bool((body or {}).get("enabled"))
         with self.lock:
@@ -1005,6 +1021,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "race": app.race(body, who)})
             if p == "/zones":
                 return self._json(200, {"ok": True, "zones": app.save_zones(body, who)})
+            if p == "/zones/auto_boxes":
+                return self._json(200, {"ok": True, **app.auto_boxes(body, who)})
             if p == "/zones/enable":
                 return self._json(200, {"ok": True, **app.enable_zones(body, who)})
             if p == "/race/start":

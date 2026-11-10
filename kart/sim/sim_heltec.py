@@ -13,14 +13,19 @@ What it prints (same shapes as the real firmware's USB output):
   log    occasional firmware-style log lines; ble every ~6 s; cmd for every command
   status in reply to "status"
 Text commands honoured like the firmware's usbCommand(): mode 0|1|2, stop, start,
-slow [mph], ping, status, boost SECS SCALE (src 254, own ++usbSeq). Mode changes are
+slow [MPH] [SECS], ping, status, boost SECS SCALE (src 254, own ++usbSeq). Mode changes are
 "accepted" at once and "applied" (mode_actual + mode_confirmed) about 0.6 s later.
 `boost SECS SCALE` (SECS 1-30, SCALE 0.10-1.00, else a usage log line and no cmd) is
 a timed current-scale override like the firmware's GK_CMD_BOOST: cmd line with cmd 6,
 arg = scale percent; rejected (4) while stopped, no_vesc (3) without a VESC; the
 `scale` field follows it and reverts to the mode scale after SECS ("boost over" log);
 STOP/START cancel it. Speed follows the live scale (17 mph at 1.0) under the mode's speed cap
-(MODE_TOP_MPH, lifted one mode by a boost, like firmware 0.2.2+).
+(MODE_TOP_MPH; a boost lifts it to the highest mode whose scale it reaches, like firmware 0.2.5).
+SLOW like firmware kart-0.2.4: `slow MPH SECS` (SECS 1-60) caps MPH for SECS s and then returns to
+the previous cap (an untimed pit SLOW that was in force comes back; a timed slow never lifts a lower
+pit cap); `slow [MPH]` is untimed (until START). The self line reports `slow_mph` (0 = none) and the
+status reply fw "sim-kart-0.2.5" (0.2.4's timed slow + multiplayer, below). --fw-old acts like kart-0.2.3: fw "sim-kart-0.2.3" and `slow 5 4`
+reads as a PERMANENT slow 5 (the firmware's atoi), which is why the kart only sends it to 0.2.4+.
 GPS like firmware 2026-11-06+: a {"t":"gps"} line per fix at 5 Hz (--nogpsline = off,
 like `gpsline off`), and the self line's USB-only hdop / fix_age_ms / gps_hz /
 base_lat / base_lon / base_fix_age_s (the pit radio's fix: 3 m east, 2 m north of the
@@ -47,6 +52,19 @@ the mud and across the start/finish line of kart/sim/zones.course.json (serve th
 with fake_pit.py --zones kart/sim/zones.course.json); starts in NORMAL just before
 the line. --warp X moves the own kart X times faster along the loop (tests only;
 reported speeds stay real).
+MULTIPLAYER FREEPLAY like firmware kart-0.2.5 (docs/freeplay-multiplayer.md sections 3/4; fw "sim-kart-0.2.5";
+--fw-old ignores all of it with an "unknown command" log line and prints none of the new fields):
+`session host` (we host, kart 5 joins us 3 s later) | `session join N` (only while N is heard hosting, else a
+"rejected" log line and no change) | `session leave`; `attack N shell|lightning` / `attack all ...` (rejected
+without a session or a heard peer in it; a peer acks ~1 s later: `acked`, score +1; `all` runs 5 s and ends
+`done` with every peer that acked). Prints {"t":"game"} once a second while in a session or a host is heard,
+at once on every change and once when it all goes back to nothing; {"t":"attack"} sent + one terminal line;
+self/fleet lines carry session/atk_to/atk_item/atk_seq/ack_from/ack_seq/score. A joined kart leaves by itself
+when its host is not heard for 10 s ("host lost") or stops hosting ("host left").
+--peer-host: fleet kart 3 hosts from the start and kart 5 joins it after 5 s. --hit-at S: at second S (once we
+are in a session) a peer in it (kart 3 first) shells us: a {"t":"hit"} line and the same timed `slow 5 4` as
+the USB command (skipped, applied:false, while STOPPED / grid hold / no VESC). The fleet karts drive the same
+loop at their own speeds, so with --warp the own kart laps them and they come within 25 m now and then.
 """
 from __future__ import annotations
 
@@ -62,13 +80,19 @@ import threading
 import time
 import tty
 
-FW = "sim-kart-0.1.0"
+FW = "sim-kart-0.2.5"            # "sim-" = the display's SIMULATION banner; kart-0.2.4 = timed `slow MPH SECS`,
+                                 # kart-0.2.5 = multiplayer freeplay (`session`, `attack`, game/hit/attack lines)
+FW_OLD = "sim-kart-0.2.3"        # --fw-old: before timed slow and multiplayer
+ITEM_CODES = {"shell": 1, "lightning": 2}
+ITEM_NAMES = {v: k for k, v in ITEM_CODES.items()}
+HIT_SECS = {"shell": 4, "lightning": 3}
+ADDR_ALL = 255
 ORIGIN = (41.0940, -73.4167)     # near the shop; not a surveyed course
 COURSE_ORIGIN = (41.09399, -73.41637)   # --course: shop preset origin (map.shop.json)
 R_EARTH = 6371000.0
 FULL_SCALE_MPH = 17.0            # sim speed at scale 1.0 (SPORT)
 MODE_SCALE = {0: 0.50, 1: 0.75, 2: 1.0}      # firmware config.h MODES[] (checked by firmware/tests/test_protocol.py)
-MODE_TOP_MPH = {0: 15, 1: 25, 2: 0}          # firmware speed cap per mode, 0 = none; a boost above the mode's scale lifts it one mode
+MODE_TOP_MPH = {0: 15, 1: 25, 2: 0}          # firmware speed cap per mode, 0 = none; a boost lifts it (cap_mph)
 
 
 def en_to_latlon(e, n):
@@ -161,6 +185,8 @@ class SimKart:
         self.mph = 0.0
         self.stopped = False
         self.slow_mph = None
+        self.slow_until = None          # mono end of a timed slow (firmware 0.2.4 slowTimed / slowUntilMs)
+        self.slow_prev = None           # the untimed cap a timed slow replaced (None = none)
         self.nofix, self.novesc, self.fault = nofix, novesc, fault
         self.volts = 82.0 - k * 0.7
         self.ah = 0.0
@@ -168,6 +194,12 @@ class SimKart:
         self.last_cmd_seq, self.cmd_result = 0, 0
         self.pending = None             # (apply_at, mode)
         self.ov = None                  # (scale, until_mono): boost / mud override
+        # multiplayer freeplay (fleet karts; firmware kart-0.2.5 telemetry fields)
+        self.session = 0
+        self.plan = None                # (session, at_mono): a scripted join/leave
+        self.last_heard = None          # mono of its last fleet frame (the "heard in the last 10 s" rule)
+        self.atk = (0, 0, 0, 0.0)       # (to, item code, seq, until_mono) repeated in its frames
+        self.ack = (0, 0, 0.0)          # (from, seq, until_mono)
 
     def eff_scale(self):
         if self.stopped or self.race_go is not None:
@@ -177,11 +209,13 @@ class SimKart:
         return MODE_SCALE.get(self.mode_actual, 0.75)
 
     def cap_mph(self):
-        """The firmware's speed cap for the live state: the mode's, lifted one mode by a boost above
-        the mode's scale (not by mud), then SLOW on top; None = uncapped."""
+        """The firmware's speed cap for the live state (kart-0.2.5): a boost above the mode's scale (not mud)
+        lifts it to the highest mode whose scale the boost reaches (0.75 -> NORMAL, 1.0 -> SPORT), an in-between
+        scale still one mode; then SLOW on top; None = uncapped."""
         m = self.mode_actual if self.mode_actual is not None else 1
         if self.ov and self.ov[0] > MODE_SCALE.get(m, 1.0) + 0.001 and m < 2:
-            m += 1
+            reach = max(x for x, sc in MODE_SCALE.items() if sc <= self.ov[0] + 0.001)
+            m = max(m + 1, reach)
         cap = MODE_TOP_MPH.get(m) or None
         if self.slow_mph and (cap is None or self.slow_mph < cap):
             cap = self.slow_mph
@@ -268,6 +302,8 @@ class Sim:
         self.t0 = time.monotonic()
         self.usb_seq = 0
         self.boost_secs = 0
+        self.slow_secs = 0
+        self.fw = FW_OLD if getattr(args, "fw_old", False) else FW
         self.pos_seq = parse_pos_seq(getattr(args, "race_pos", None))
         self.pos_step = float(getattr(args, "race_pos_step", None) or 10.0)
         self.pos_t0 = time.monotonic()
@@ -286,6 +322,22 @@ class Sim:
         L = self.me.path.length
         self.fleet = [SimKart(others[0], 45.0 % L, mode=2, path=path), SimKart(others[1], 120.0 % L, mode=0, path=path)]
         self.pit_done = set()
+        # multiplayer freeplay (firmware kart-0.2.5; docs/freeplay-multiplayer.md sections 3/4)
+        self.multi = self.fw != FW_OLD
+        self.session = 0
+        self.score = 0
+        self.atk_seq = 0
+        self.atk = None                 # {"to", "item", "seq", "t0", "acked": [], "ack_at": {kart: mono}}
+        self.ack = None                 # (from, seq, until_mono)
+        self.ended = None
+        self.game_next = 0.0
+        self.game_had = False           # the last game line had something (session or a host heard)
+        self.hit_done = False
+        self.peer_host = bool(getattr(args, "peer_host", False))
+        if self.peer_host:
+            h = self.fleet[0]
+            h.session = h.k                                  # fleet kart 3 hosts from the start ...
+            self.fleet[1].plan = (h.k, self.t0 + 5.0)        # ... and kart 5 joins it after 5 s
 
     def position_at(self, now):
         """(race_pos, race_state) the beacon would give this kart at `now`."""
@@ -382,6 +434,7 @@ class Sim:
                     self.log(f"vesc write scale {sc:.3f}")
         elif cmd == 3:
             k.stopped, k.slow_mph, k.ov, k.race_go = False, None, None, None
+            k.slow_until, k.slow_prev = None, None
             if k.novesc:
                 res = 3
             else:
@@ -392,8 +445,20 @@ class Sim:
                 res = 3
             else:
                 mph = arg or 5
-                k.slow_mph = float(mph)
-                self.log(f"slow: cap {mph} mph = {mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7:.0f} ERPM")
+                secs, self.slow_secs = self.slow_secs, 0
+                if secs and k.slow_mph and k.slow_until is None and k.slow_mph <= mph:
+                    self.log(f"slow {secs} s: pit cap {k.slow_mph:.0f} mph already lower, kept")
+                else:
+                    if secs:
+                        if k.slow_until is None:
+                            k.slow_prev = k.slow_mph
+                        k.slow_until = time.monotonic() + secs
+                    else:
+                        k.slow_until, k.slow_prev = None, None
+                    k.slow_mph = float(mph)
+                    erpm = mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7
+                    self.log(f"slow: cap {mph} mph = {erpm:.0f} ERPM" + (f" for {secs} s" if secs else ""))
+            self.slow_secs = 0
         else:
             res = 4
         k.cmd_result = res
@@ -402,13 +467,173 @@ class Sim:
     def status(self):
         k = self.me
         lat, lon, _ = k.path.at(k.s)
-        self.emit({"t": "status", "kart": k.k, "fw": FW, "built": "sim", "writes": True, "transport": "ble",
+        self.emit({"t": "status", "kart": k.k, "fw": self.fw, "built": "sim", "writes": True, "transport": "ble",
                    "radio": True, "radio_status": 0, "lora_tx": self.uptime() * 2, "lora_rx": self.uptime(),
                    "lora_rx_bad": 0, "gps_locked": True, "gps_cfg": "9600", "pps_count": self.uptime(),
                    "vesc_fw": "6.05", "vesc_hw": "SIM", "vesc_packets": self.uptime() * 10, "vesc_crc_err": 0,
                    "vesc_limits": not k.novesc, "rate": 2, "sync": "pps", "pit_karts_online": 3,
                    "gps_fix": not k.nofix, "gps_sats": 9, "gps_hdop": 0.9, "gps_age_ms": 200,
-                   "gps_lat": lat if not k.nofix else 0.0, "gps_lon": lon if not k.nofix else 0.0, "heap": 180000})
+                   "gps_lat": lat if not k.nofix else 0.0, "gps_lon": lon if not k.nofix else 0.0, "heap": 180000,
+                   **({"session": self.session, "hosting": self.hosting(), "score": self.score} if self.multi else {})})
+
+    # -- multiplayer freeplay (firmware kart-0.2.5) ----------------------------------
+    def hosting(self):
+        return self.session != 0 and self.session == self.me.k
+
+    def heard(self, f, now):
+        return f.last_heard is not None and now - f.last_heard <= 10.0
+
+    def peers(self, now):
+        return sorted(f.k for f in self.fleet if self.session and f.session == self.session and self.heard(f, now))
+
+    def hosts(self, now):
+        return sorted(f.k for f in self.fleet if f.session == f.k and self.heard(f, now))
+
+    def emit_game(self, now):
+        a = self.atk
+        self.game_had = bool(self.session or self.hosts(now))
+        self.game_next = now + 1.0
+        self.emit({"t": "game", "kart": self.me.k, "session": self.session, "hosting": self.hosting(),
+                   "peers": self.peers(now), "hosts": self.hosts(now), "score": self.score,
+                   "attack": {"to": a["to"], "item": a["item"], "seq": a["seq"], "age_ms": int((now - a["t0"]) * 1000)}
+                   if a else None, "ended": self.ended})
+
+    def set_session(self, sess, now, ended=None):
+        if sess != self.session:
+            self.score = 0                                   # reset on session change
+        self.session, self.ended = sess, ended
+        self.emit_game(now)
+
+    def attack_line(self, to, item, seq, result, acked=None, why=None):
+        self.emit({"t": "attack", "kart": self.me.k, "to": to, "item": item, "seq": seq, "result": result,
+                   "acked": sorted(acked or []), "why": why})
+
+    def session_cmd(self, rest, now):
+        parts = rest.split()
+        if parts[:1] == ["host"]:
+            self.set_session(self.me.k, now)
+            self.log(f"session: hosting (G{self.me.k})")
+        elif parts[:1] == ["leave"]:
+            self.set_session(0, now)
+            self.log("session: left")
+        elif parts[:1] == ["join"] and len(parts) == 2 and parts[1].isdigit():
+            n = int(parts[1])
+            f = next((x for x in self.fleet if x.k == n), None)
+            if f is None or not self.heard(f, now) or f.session != n:
+                self.log(f"session: join {n} rejected ({'not heard' if f is None or not self.heard(f, now) else 'not hosting'})")
+            else:
+                self.set_session(n, now)
+                self.log(f"session: joined K{n}'s game")
+        else:
+            self.log("usage: session host | session join N | session leave")
+
+    def attack_cmd(self, rest, now):
+        parts = rest.split()
+        if len(parts) != 2 or parts[1] not in ITEM_CODES or not (parts[0] == "all" or parts[0].isdigit()):
+            self.log("usage: attack N|all shell|lightning")
+            return
+        to = ADDR_ALL if parts[0] == "all" else int(parts[0])
+        item = parts[1]
+        why = None
+        f = next((x for x in self.fleet if x.k == to), None)
+        if not self.session:
+            why = "no session"
+        elif to != ADDR_ALL and (f is None or not self.heard(f, now)):
+            why = "not heard"
+        elif to != ADDR_ALL and f.session != self.session:
+            why = "not in your game"
+        if why:
+            self.attack_line(to, item, 0, "rejected", why=why)
+            self.log(f"attack {parts[0]} {item}: rejected ({why})")
+            return
+        if self.atk:
+            o = self.atk
+            self.attack_line(o["to"], o["item"], o["seq"], "replaced", acked=o["acked"])
+        self.atk_seq = self.atk_seq % 255 + 1
+        targets = self.peers(now) if to == ADDR_ALL else [to]
+        self.atk = {"to": to, "item": item, "seq": self.atk_seq, "t0": now, "acked": [],
+                    "ack_at": {k: now + 1.0 for k in targets}}
+        self.attack_line(to, item, self.atk_seq, "sent")
+        self.log(f"attack {parts[0]} {item} seq {self.atk_seq}")
+        self.emit_game(now)
+
+    def multi_step(self, now, el):
+        if not self.multi:
+            return
+        # scripted fleet: kart 5 joins our game 3 s after we host, else (--peer-host) kart 3's after 5 s
+        j = self.fleet[1]
+        want = self.me.k if self.hosting() else (self.fleet[0].k if self.peer_host else 0)
+        if j.session != want and (j.plan is None or j.plan[0] != want):
+            j.plan = (want, max(self.t0 + 5.0, now + 3.0) if want else now)
+        if j.plan and now >= j.plan[1]:
+            j.session, j.plan = j.plan[0], None
+        # a joined kart leaves by itself when its host is lost / left
+        if self.session and not self.hosting():
+            h = next((x for x in self.fleet if x.k == self.session), None)
+            if h is None or not self.heard(h, now):
+                self.set_session(0, now, ended="host lost")
+            elif h.session != h.k:
+                self.set_session(0, now, ended="host left")
+        # our attack in flight: acks ~1 s after launch, 5 s window
+        a = self.atk
+        if a:
+            for k, at in a["ack_at"].items():
+                f = next((x for x in self.fleet if x.k == k), None)
+                if now >= at and k not in a["acked"] and f is not None and f.session == self.session:
+                    a["acked"].append(k)
+                    self.score = min(255, self.score + 1)
+                    f.ack = (self.me.k, a["seq"], now + 5.0)
+            if a["to"] != ADDR_ALL and a["acked"]:
+                self.atk = None
+                self.attack_line(a["to"], a["item"], a["seq"], "acked", acked=a["acked"])
+                self.emit_game(now)
+            elif now - a["t0"] >= 5.0:
+                self.atk = None
+                self.attack_line(a["to"], a["item"], a["seq"], "done" if a["to"] == ADDR_ALL else "timeout",
+                                 acked=a["acked"])
+                self.emit_game(now)
+        # --hit-at S: a peer in our game (kart 3 first) shells us
+        hit_at = getattr(self.args, "hit_at", None)
+        if hit_at is not None and not self.hit_done and el >= hit_at and self.session:
+            src = [f for f in self.fleet if f.session == self.session and self.heard(f, now)]
+            src.sort(key=lambda f: f is not self.fleet[0])
+            if src:
+                self.hit(src[0], "shell", now)
+        if now >= self.game_next and (self.session or self.hosts(now)):
+            self.emit_game(now)
+        elif self.game_had and not (self.session or self.hosts(now)):
+            self.emit_game(now)                              # once when it all goes back to nothing
+
+    def hit(self, f, item, now):
+        self.hit_done = True
+        seq = random.randint(1, 255)
+        f.atk = (self.me.k, ITEM_CODES[item], seq, now + 1.0)
+        self.ack = (f.k, seq, now + 5.0)
+        k, secs = self.me, HIT_SECS[item]
+        why = "stopped" if k.stopped else "grid hold" if k.race_go is not None else "no vesc" if k.novesc else None
+        if why is None:                                      # the same timed SLOW as `slow 5 SECS`
+            if k.slow_mph and k.slow_until is None and k.slow_mph <= 5:
+                self.log(f"hit: pit cap {k.slow_mph:.0f} mph already lower, kept")
+            else:
+                if k.slow_until is None:
+                    k.slow_prev = k.slow_mph
+                k.slow_until, k.slow_mph = now + secs, 5.0
+                self.log(f"slow: cap 5 mph for {secs} s (hit by K{f.k})")
+        self.emit({"t": "hit", "kart": k.k, "from": f.k, "item": item, "seq": seq, "secs": secs,
+                   "applied": why is None, "why": why})
+
+    def multi_fields(self, owner, now):
+        """The 7 telemetry fields for our self line (owner None) or a fleet kart's frames."""
+        if owner is None:
+            a = self.atk
+            ack = self.ack if self.ack and now < self.ack[2] else (0, 0, 0)
+            return {"session": self.session, "atk_to": a["to"] if a else 0,
+                    "atk_item": ITEM_CODES[a["item"]] if a else 0, "atk_seq": a["seq"] if a else 0,
+                    "ack_from": ack[0], "ack_seq": ack[1], "score": self.score}
+        at = owner.atk if now < owner.atk[3] else (0, 0, 0, 0)
+        ack = owner.ack if now < owner.ack[2] else (0, 0, 0)
+        return {"session": owner.session, "atk_to": at[0], "atk_item": at[1], "atk_seq": at[2],
+                "ack_from": ack[0], "ack_seq": ack[1], "score": 0}
 
     def handle_line(self, line):
         line = line.strip()
@@ -440,14 +665,41 @@ class Sim:
             self.command(254, 7, arg if rest else 5)
         elif word == "finish":                               # SIMULATION: as if the pit sent race 100+P
             self.command(254, 7, 100 + arg if rest and arg else 0)
-        elif word in ("stop", "start", "ping", "slow"):
+        elif word == "slow":
+            parts = rest.split()
+            try:
+                mph = int(parts[0]) if parts else 0
+                secs = int(parts[1]) if len(parts) > 1 else 0
+            except ValueError:
+                mph, secs = 0, 0
+            if self.fw == FW_OLD:
+                secs = 0                                     # kart-0.2.3: atoi("5 4") = 5, untimed
+            if secs < 0 or secs > 60:
+                self.log("usage: slow [MPH] [SECS 1-60]")
+            else:
+                self.slow_secs = secs
+                self.command(254, 5, mph)
+        elif word in ("stop", "start", "ping"):
             self.command(254, {"stop": 2, "start": 3, "ping": 4, "slow": 5}[word], arg)
+        elif word == "session" and self.multi:
+            self.session_cmd(rest, time.monotonic())
+        elif word == "attack" and self.multi:
+            self.attack_cmd(rest, time.monotonic())
         elif word == "help":
-            self.log("commands: status | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping (SIMULATION)")
+            self.log("commands: status | mode 0..2 | stop | start | slow [MPH] [SECS] | boost SECS SCALE | race [secs] | ping"
+                     + (" | session host|join N|leave | attack N|all shell|lightning" if self.multi else "") + " (SIMULATION)")
         else:
             self.log(f"unknown command: {line}")
 
     # -- main loop ---------------------------------------------------------------
+    def expire_slow(self, now):
+        """Timed slow over (firmware 0.2.4): back to the pit cap it replaced, or none."""
+        k = self.me
+        if k.slow_until is not None and now >= k.slow_until:
+            k.slow_until = None
+            k.slow_mph, k.slow_prev = k.slow_prev, None
+            self.log(f"timed slow over, pit cap {k.slow_mph:.0f} mph back" if k.slow_mph else "timed slow over")
+
     def pit_link_up(self, now):
         return not (self.args.pitloss and (now - self.t0) % 60.0 >= 40.0)
 
@@ -480,6 +732,7 @@ class Sim:
                     self.me.ov = None
                     self.log(f"boost over, back to {self.me.eff_scale():.2f}")
                     self.log(f"vesc write scale {self.me.eff_scale():.3f}")
+                self.expire_slow(now)
                 self.me.step(dt * self.args.warp, now)
                 for f in self.fleet:
                     f.step(dt, now)
@@ -494,7 +747,9 @@ class Sim:
                     extra = {"hdop": 99.0 if self.args.nofix else self.args.hdop, "fix_age_ms": 999999 if self.args.nofix else 150,
                              "gps_hz": 5, "base_lat": round(blat, 7) if up else None,
                              "base_lon": round(blon, 7) if up else None, "base_fix_age_s": 1 if up else None,
-                             "race_pos": self.race_pos, "race_state": self.race_state}
+                             "race_pos": self.race_pos, "race_state": self.race_state,
+                             "slow_mph": int(round(self.me.slow_mph or 0)),
+                             **(self.multi_fields(None, now) if self.multi else {})}
                     self.emit(self.me.tele("self", rx_ms=int(el * 1000), uptime=self.uptime(),
                                            base_rssi=-71 + random.randint(-6, 6) if up else 0, extra=extra))
                 for i, f in enumerate(self.fleet):
@@ -502,9 +757,12 @@ class Sim:
                         next_fleet[i] += 1.0
                         if i == 1 and el % 40.0 > 30.0:      # second kart drops out ~10 s in every 40 s
                             continue
+                        f.last_heard = now
                         self.emit(f.tele("fleet", rssi=-80 - 6 * i + random.randint(-4, 4),
                                          snr=round(8.5 - 2 * i + random.uniform(-1, 1), 1),
-                                         rx_ms=int(el * 1000), base_rssi=-70, uptime=self.uptime()))
+                                         rx_ms=int(el * 1000), base_rssi=-70, uptime=self.uptime(),
+                                         extra=self.multi_fields(f, now) if self.multi else None))
+                self.multi_step(now, el)
                 if now >= next_ble:
                     next_ble += 6.0
                     self.emit({"t": "ble", "kart": self.me.k, "pinned": "sim:00:00:00:00:01",
@@ -594,6 +852,7 @@ def build_parser():
     ap.add_argument("--pit-slow-at", type=float)
     ap.add_argument("--uptime0", type=int, default=5, help="Heltec uptime at sim start (s)")
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--fw-old", action="store_true", help="act like kart-0.2.3: no timed `slow MPH SECS` (reads as untimed)")
     ap.add_argument("--course", action="store_true", help="drive the game course (kart/sim/zones.course.json)")
     ap.add_argument("--warp", type=float, default=1.0, help="own kart moves this many times faster (tests)")
     ap.add_argument("--nogpsline", action="store_true", help="no 5 Hz gps lines (firmware `gpsline off`)")
@@ -601,6 +860,9 @@ def build_parser():
     ap.add_argument("--race-at", type=float, help="the pit sends `race 5` at this second")
     ap.add_argument("--race-pos", help='running positions from the pit beacon, e.g. "3,2,2,1"')
     ap.add_argument("--race-pos-step", type=float, default=10.0, help="seconds per --race-pos entry")
+    ap.add_argument("--peer-host", action="store_true",
+                    help="multiplayer: fleet kart 3 hosts a freeplay game, kart 5 joins it after 5 s")
+    ap.add_argument("--hit-at", type=float, help="multiplayer: a peer in our session shells us at this second")
     return ap
 
 

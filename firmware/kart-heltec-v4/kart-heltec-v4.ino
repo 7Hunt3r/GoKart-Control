@@ -169,6 +169,10 @@ uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
 bool     slowActive = false; float slowErpm = 0; uint8_t slowMph = 0;
+// Timed SLOW (USB `slow MPH SECS`, e.g. the game's mud): reverts by itself to what was in force before it
+// (a pit SLOW that was active comes back). A pit SLOW (no SECS) stays until START or a pit mode command.
+bool     slowTimed = false; uint32_t slowUntilMs = 0;
+bool     slowPrevActive = false; float slowPrevErpm = 0; uint8_t slowPrevMph = 0;
 float    speedCal = SPEED_CAL_DEFAULT;      // real ERPM per configured-math ERPM (config.h; pref "speedcal")
 // Timed scale override for the game zones (boost pad / mud): auto-reverts, cleared by STOP/START, never above 1.0.
 bool     ovActive = false; float ovScale = 1.0f; uint32_t ovUntilMs = 0;
@@ -203,12 +207,37 @@ bool     revertMissed = false;        // a timed override ended while the VESC l
 bool     wroteThisBoot = false;       // any SET_MCCONF_TEMP sent since boot (the controller may still hold it)
 float    wErpm = 0;                   // ERPM bound the in-flight write carries (verified like the scale)
 bool     baselineSuspect = false;     // limits read at link-up look like this firmware's own caps (see the link-up code)
+const char* baselineSource = "none";  // "read" (clean link-up read) | "remembered" (NVS copy of an earlier clean read, used because
+                                      // the live read looked like our own leftovers) | "suspect" (looked like leftovers, nothing remembered)
+static uint8_t wVerifyTries = 0;      // a verify reply from a superseded write can land late: one re-read before judging MISMATCH
 VescActiveLimits firstLimits; bool haveFirst = false; char firstUuid[25] = "";   // first read of the pinned controller this boot
 uint8_t  usbSeq = 0;
 
 // ---------------------------------------------------------------- fleet
 GkTelemetry fleet[GK_MAX_KARTS + 1];
 uint32_t    fleetMs[GK_MAX_KARTS + 1];
+
+// ---------------------------------------------------------------- freeplay multiplayer (docs/freeplay-multiplayer.md)
+// Karts hear each other's telemetry directly, so sessions, invites and kart-to-kart hits need no pit:
+// the kart Pi types `session host|join N|leave` and `attack N|all shell|lightning`; the game bytes in
+// GkTelemetry carry the rest. A hit is a timed SLOW through the same code as the USB `slow 5 SECS`
+// (never while STOPPED / grid hold / writes off; pit STOP, SLOW and mode commands still win).
+#define GAME_SRC             0xFD    // handleCommand source id for a hit's SLOW (USB history slot; echoed as src 253)
+#define GAME_PEER_MAX_AGE_MS 10000   // a session peer / host counts while heard this recently
+#define GAME_ATTACK_MS       5000    // an attack rides in telemetry this long (or until acked)
+#define GAME_ACK_HOLD_MS     5000    // ack_from/ack_seq stay in telemetry this long after a hit
+#define GAME_HIT_REPEAT_MS   60000   // the same (attacker, seq) counts as a new hit again after this long
+#define GAME_SHELL_SECS      4
+#define GAME_LIGHTNING_SECS  3
+#define GAME_SLOW_MPH        5
+uint8_t  gameSession = 0;                         // 0 or the host's id (mine while hosting)
+uint8_t  atkTo = 0, atkItem = 0, atkSeq = 0;      // the attack in flight (atkTo 0 = none); atkSeq = last seq used
+uint32_t atkStartMs = 0; uint8_t atkAckMask = 0;  // bit k-1: kart k acknowledged the attack in flight
+uint8_t  ackFrom = 0, ackSeq = 0; uint32_t ackMs = 0;
+uint8_t  hitSeq[GK_MAX_KARTS + 1]; uint32_t hitMs[GK_MAX_KARTS + 1];   // last hit accepted per attacker
+uint8_t  gameScore = 0;
+uint32_t gameLineMs = 0; bool gameLineDirty = false, gameLineQuiet = true;
+const char* gameEnded = nullptr;                  // "host lost" / "host left": carried by the next game line
 
 // ---------------------------------------------------------------- display / misc
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, PIN_OLED_RST, PIN_OLED_SCL, PIN_OLED_SDA);
@@ -323,7 +352,14 @@ static float modeCapErpm(uint8_t m) {
 // Boost lift (config.h BOOST_LIFTS_CAP): a timed override ABOVE mode m's scale moves the cap one mode up.
 static uint8_t capModeFor(uint8_t m) {
 #if BOOST_LIFTS_CAP
-  if (m < GK_MODE_COUNT - 1 && ovActive && ovScale > MODES[m].currentMaxScale + 0.001f) return m + 1;
+  // Owner 2026-11-09: freeplay starts in ECO; a BOOST is NORMAL for its duration (scale 0.75, 25 mph) and
+  // a ROCKET is SPORT (scale 1.0, uncapped): the cap follows the highest mode whose scale the boost
+  // reaches. A scale between two modes still lifts one mode (the old rule).
+  if (m < GK_MODE_COUNT - 1 && ovActive && ovScale > MODES[m].currentMaxScale + 0.001f) {
+    uint8_t j = m;
+    for (uint8_t i = m + 1; i < GK_MODE_COUNT; i++) if (MODES[i].currentMaxScale <= ovScale + 0.001f) j = i;
+    return j > m ? j : (uint8_t)(m + 1);
+  }
 #endif
   return m;
 }
@@ -388,6 +424,8 @@ static void fillTelemetry(GkTelemetry& t, bool forRadio) {
   t.mode_actual = ma;
   t.scale_x1000 = (scale < 0) ? 65535 : (uint16_t)(scale * 1000);
   t.slow_mph = slowActive ? slowMph : 0;
+  t.session = gameSession; t.atk_to = atkTo; t.atk_item = atkTo ? atkItem : 0; t.atk_seq = atkTo ? atkSeq : 0;
+  t.ack_from = ackFrom; t.ack_seq = ackFrom ? ackSeq : 0; t.score = gameScore;
   const CmdEnt* lc = lastCmd(forRadio ? 0 : lastSrcIdx);   // radio: pit commands only (see CmdEnt)
   t.last_cmd_seq = lc ? lc->seq : 0;
   t.cmd_result = lc ? lc->result : GK_RES_NONE;
@@ -445,7 +483,7 @@ static bool startWrite(float scale, const CmdRef& owner) {
   l.sendInCurrent = false;                     // battery limits: always the controller's own
   wAckSeen = vesc.lastAckMs();
   vesc.sendTempLimits(l);
-  wState = W_SENT; wTarget = scale; wErpm = capE; wSentMs = millis(); wOwner = owner; wroteThisBoot = true;
+  wState = W_SENT; wTarget = scale; wErpm = capE; wSentMs = millis(); wOwner = owner; wroteThisBoot = true; wVerifyTries = 0;
   uint8_t capM = capMphNow();
   if (capM) logf("vesc write scale %.3f, cap %u mph = %.0f ERPM", scale, capM, capE);
   else      logf("vesc write scale %.3f, no speed cap (%.0f ERPM)", scale, capE);
@@ -471,6 +509,13 @@ static void serviceWrites() {
     ovActive = false; logf("boost over, back to %.2f", scaleTarget());
     autoWrite("boost end");
   }
+  if (slowActive && slowTimed && (int32_t)(now - slowUntilMs) >= 0) {   // timed slow over: back to the pit cap or none
+    slowTimed = false; slowUntilMs = 0;
+    if (slowPrevActive) { slowErpm = slowPrevErpm; slowMph = slowPrevMph; logf("timed slow over, pit cap %u mph back", slowMph); }
+    else { slowActive = false; slowErpm = 0; slowMph = 0; logf("timed slow over"); }
+    slowPrevActive = false;
+    autoWrite("slow end");
+  }
   if (rampIdx >= 0 && wState == W_IDLE && (int32_t)(now - rampNextMs) >= 0) {
     const int n = sizeof(STOP_RAMP) / sizeof(STOP_RAMP[0]);
     if (!startWrite(STOP_RAMP[rampIdx], rampOwner)) { setResult(rampOwner, GK_RES_NO_VESC); rampIdx = -1; }
@@ -484,9 +529,14 @@ static void serviceWrites() {
       break;
     case W_VERIFY:
       if (vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - wSentMs) >= 0) {
-        wState = W_IDLE;
         bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL
                && fabsf(vesc.limits().maxErpm - wErpm) <= MODE_ERPM_TOL;
+        if (!ok && wVerifyTries == 0) {                     // a reply to a superseded write's verify can land here: read once more
+          wVerifyTries = 1; wSentMs = now; vesc.requestMotorConfig();
+          logf("vesc write verify: re-reading (got scale %.3f, ERPM %.0f; want %.3f, %.0f)", vesc.limits().currentMaxScale, vesc.limits().maxErpm, wTarget, wErpm);
+          break;
+        }
+        wState = W_IDLE;
         if (rampIdx < 0) setResult(wOwner, ok ? GK_RES_APPLIED : GK_RES_UNKNOWN);
         if (ok) revertMissed = false;
         modeConfirmed = ok && !stopActive && ((modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL)
@@ -503,6 +553,7 @@ static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint8_t 
 }
 
 static uint8_t boostSecs = 0;   // set by the USB `boost` command just before handleCommand
+static uint8_t slowSecs = 0;    // set by the USB `slow MPH SECS` command just before handleCommand (0 = untimed)
 static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint16_t ttl, uint32_t issued) {
   const int8_t si = (src == GK_ADDR_BASE) ? 0 : 1;
   const uint32_t nowMs = millis();
@@ -540,7 +591,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
           break;
         }
         if (src != 0xFE && slowActive) {                 // owner 2026-11-09: a mode from the PIT releases SLOW;
-          slowActive = false; slowErpm = 0; slowMph = 0;  // the driver's own mode buttons do not (SLOW is the operator's)
+          slowActive = false; slowErpm = 0; slowMph = 0; slowTimed = false; slowPrevActive = false;   // the driver's own mode buttons do not (SLOW is the operator's)
           logf("mode %s from the pit releases SLOW", MODES[arg].name);
         }
         modeReq = arg; modeConfirmed = false;
@@ -563,7 +614,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
         break;
       case GK_CMD_START: {
         if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-        stopActive = false; slowActive = false; ovActive = false; raceHold = false; rampIdx = -1;
+        stopActive = false; slowActive = false; slowTimed = false; slowPrevActive = false; ovActive = false; raceHold = false; rampIdx = -1;
         if (!origValid || !vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
         float s = scaleTarget();
         if (s < 0.05f) {                                  // no mode known and the controller read back ~0
@@ -621,8 +672,16 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
         float mph = arg ? (float)arg : (float)SLOW_DEFAULT_MPH;
         float e = mphToErpm(mph);
         if (e < 100) { cmdResult = GK_RES_REJECTED; logf("slow: drivetrain numbers unavailable"); break; }
-        slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
-        logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
+        {
+          uint8_t secs = slowSecs; slowSecs = 0;
+          if (secs) {                                       // timed: never above an untimed (pit) cap already in force
+            if (slowActive && !slowTimed && slowErpm <= e) { logf("slow %u s: pit cap %u mph already lower, kept", secs, slowMph); cmdResult = GK_RES_APPLIED; break; }
+            if (!slowTimed) { slowPrevActive = slowActive; slowPrevErpm = slowErpm; slowPrevMph = slowMph; }
+            slowTimed = true; slowUntilMs = nowMs + secs * 1000UL;
+          } else { slowTimed = false; slowUntilMs = 0; slowPrevActive = false; }
+          slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
+          if (secs) logf("slow: cap %.0f mph = %.0f ERPM for %u s", mph, e, secs); else logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
+        }
         if (!startWrite(scaleTarget(), cmdCur)) cmdResult = GK_RES_NO_VESC;
         break;
       }
@@ -788,33 +847,64 @@ static void serviceVesc() {
   // keep the earlier baseline for those fields so START still restores the real limits.
   if (up && !origValid && vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - vescLinkUpMs) >= 0 && wState == W_IDLE) {
     origLimits = vesc.limits(); origValid = true;
-    if (haveFirst && wroteThisBoot && !strcmp(firstUuid, vesc.uuidHex)) {   // same controller (uuid, or both unknown)
+    const VescActiveLimits raw = origLimits;                 // what the controller reports right now
+    const bool sameSession = haveFirst && wroteThisBoot && !strcmp(firstUuid, vesc.uuidHex);   // same controller (uuid, or both unknown)
+    if (sameSession) {
       origLimits.currentMaxScale = firstLimits.currentMaxScale;
       origLimits.minErpm = firstLimits.minErpm; origLimits.maxErpm = firstLimits.maxErpm;
       logf("vesc relinked with this session's overrides: keeping baseline scale %.2f ERPM %.0f..%.0f (live %.2f)",
-           origLimits.currentMaxScale, origLimits.minErpm, origLimits.maxErpm, vesc.limits().currentMaxScale);
-    } else { firstLimits = origLimits; haveFirst = true; strlcpy(firstUuid, vesc.uuidHex, sizeof firstUuid); }
-    logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m",
-         origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
-         origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
+           origLimits.currentMaxScale, origLimits.minErpm, origLimits.maxErpm, raw.currentMaxScale);
+    }
     // Honesty check, NO restore (owner rule: reconnect is read-only). If what we just read as "the
     // controller's own" is one of this firmware's caps (a mode scale below 1, a stop, or an ERPM bound
     // that is a whole number of mph on this drivetrain), a previous Heltec session probably left it
-    // behind. Keying the kart off and on restores the controller's saved configuration; until then
-    // SPORT writes scale 1.0 but the ERPM baseline is the leftover cap. Reported as baseline_suspect.
-    baselineSuspect = false;
+    // behind (a Heltec reboot or OTA while the controller stayed on: 2026-11-09 the kart was then
+    // stuck at ECO's 15 mph because every cap is clamped to this ceiling). Keying the kart off and on
+    // restores the controller's saved configuration. 0.2.6: a clean read is REMEMBERED in NVS per
+    // controller UUID, and a suspect read on the same controller uses that memory as the ceiling for
+    // our temporary writes instead (still nothing written to the controller by this code).
+    baselineSuspect = false; baselineSource = sameSession ? "session" : "read";
     if (!wroteThisBoot) {
       float onePerMph = mphToErpm(1.0f);
-      float mphF = onePerMph > 0 ? origLimits.maxErpm / onePerMph : 0;
+      float mphF = onePerMph > 0 ? raw.maxErpm / onePerMph : 0;
       bool capLike = onePerMph > 0 && mphF <= 60.0f && fabsf(mphF - roundf(mphF)) < 0.02f;
-      bool scaleLike = origLimits.currentMaxScale < 0.05f;
+      bool scaleLike = raw.currentMaxScale < 0.05f;
       for (uint8_t i = 0; i < GK_MODE_COUNT; i++)
-        if (MODES[i].currentMaxScale < 0.999f && fabsf(origLimits.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) scaleLike = true;
+        if (MODES[i].currentMaxScale < 0.999f && fabsf(raw.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) scaleLike = true;
+      const bool haveUuid = vesc.uuidHex[0] != 0;
       if (capLike || scaleLike) {
-        baselineSuspect = true;
-        logf("WARNING: limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph): a previous Heltec session probably left them; key the kart off and on to restore the controller's own",
-             origLimits.currentMaxScale, origLimits.maxErpm, mphF);
+        baselineSuspect = true; baselineSource = "suspect";
+        if (haveUuid && prefs.getString("bl_uuid", "") == vesc.uuidHex) {
+          float bs = prefs.getFloat("bl_scale", -1.0f), blo = prefs.getFloat("bl_emin", 0.0f), bhi = prefs.getFloat("bl_emax", 0.0f);
+          if (bs > 0.05f && bhi > 100.0f) {
+            origLimits.currentMaxScale = bs; origLimits.minErpm = blo; origLimits.maxErpm = bhi;
+            baselineSuspect = false; baselineSource = "remembered";
+            logf("limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph, left by a previous Heltec session): using this controller's remembered baseline instead: scale %.2f, ERPM %.0f..%.0f",
+                 raw.currentMaxScale, raw.maxErpm, mphF, bs, blo, bhi);
+          }
+        }
+        if (baselineSuspect)
+          logf("WARNING: limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph): a previous Heltec session probably left them; key the kart off and on to restore the controller's own",
+               raw.currentMaxScale, raw.maxErpm, mphF);
+      } else if (haveUuid) {                                   // a clean read: remember it for the next Heltec reboot
+        if (prefs.getString("bl_uuid", "") != vesc.uuidHex || fabsf(prefs.getFloat("bl_scale", -1.0f) - raw.currentMaxScale) > 0.001f
+            || fabsf(prefs.getFloat("bl_emax", 0.0f) - raw.maxErpm) > 0.5f || fabsf(prefs.getFloat("bl_emin", 0.0f) - raw.minErpm) > 0.5f) {
+          prefs.putString("bl_uuid", vesc.uuidHex); prefs.putFloat("bl_scale", raw.currentMaxScale);
+          prefs.putFloat("bl_emin", raw.minErpm); prefs.putFloat("bl_emax", raw.maxErpm);
+          logf("controller baseline remembered (uuid %s): scale %.2f, ERPM %.0f..%.0f", vesc.uuidHex, raw.currentMaxScale, raw.minErpm, raw.maxErpm);
+        }
       }
+    }
+    if (!sameSession) { firstLimits = origLimits; haveFirst = true; strlcpy(firstUuid, vesc.uuidHex, sizeof firstUuid); }
+    logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m (baseline %s)",
+         origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
+         origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter, baselineSource);
+    // Reconcile, read-only (owner rule): a Heltec that rebooted mid-session has no mode request, so the end of
+    // a boost/mud/SLOW would fall back to the controller's own full limits. If the live limits ARE one of our
+    // modes (scale and cap), that mode becomes the request; nothing is written here.
+    if (modeReq == GK_MODE_UNKNOWN) {
+      uint8_t ma = modeActual(nullptr);
+      if (ma != GK_MODE_UNKNOWN) { modeReq = ma; modeConfirmed = true; logf("mode %s adopted from the controller's live limits (no write)", MODES[ma].name); }
     }
   }
   // A lost FW_VERSION / GET_MCCONF reply must not leave the kart unable to answer a STOP: ask again (read-only).
@@ -921,9 +1011,109 @@ static void serviceGps() {
   }
 }
 
+// ---------------------------------------------------------------- freeplay multiplayer
+static bool peerFresh(uint8_t k) { return k >= 1 && k <= GK_MAX_KARTS && k != kartId && fleetMs[k] && millis() - fleetMs[k] < GAME_PEER_MAX_AGE_MS; }
+static bool peerInMySession(uint8_t k) { return gameSession && peerFresh(k) && fleet[k].session == gameSession; }
+static bool kartHosting(uint8_t k) { return peerFresh(k) && fleet[k].session == k; }
+static size_t maskList(char* out, size_t n, uint8_t mask) {   // "3,5" for bits 2 and 4
+  size_t o = 0; out[0] = 0;
+  for (uint8_t k = 1; k <= GK_MAX_KARTS; k++) if (mask & (1 << (k - 1))) o += snprintf(out + o, n - o, "%s%u", o ? "," : "", k);
+  return o;
+}
+static void emitGame(uint8_t hosts, uint8_t peers) {
+  char pl[32], hl[32]; maskList(pl, sizeof pl, peers); maskList(hl, sizeof hl, hosts);
+  Serial.printf("{\"t\":\"game\",\"kart\":%u,\"session\":%u,\"hosting\":%s,\"peers\":[%s],\"hosts\":[%s],\"score\":%u,\"attack\":",
+                kartId, gameSession, gkBool(gameSession && gameSession == kartId), pl, hl, gameScore);
+  if (atkTo) Serial.printf("{\"to\":%u,\"item\":\"%s\",\"seq\":%u,\"age_ms\":%lu}", atkTo, gkItemName(atkItem), atkSeq, (unsigned long)(millis() - atkStartMs));
+  else Serial.print("null");
+  if (gameEnded) Serial.printf(",\"ended\":\"%s\"}\n", gameEnded); else Serial.print(",\"ended\":null}\n");
+}
+static void emitAttack(uint8_t to, uint8_t item, uint8_t seq, const char* result, const char* why, uint8_t acked) {
+  char al[32]; maskList(al, sizeof al, acked);
+  Serial.printf("{\"t\":\"attack\",\"kart\":%u,\"to\":%u,\"item\":\"%s\",\"seq\":%u,\"result\":\"%s\",\"acked\":[%s],\"why\":",
+                kartId, to, gkItemName(item), seq, result, al);
+  if (why) Serial.printf("\"%s\"}\n", why); else Serial.print("null}\n");
+}
+static void attackEnd(const char* result, const char* why) {
+  if (!atkTo) return;
+  emitAttack(atkTo, atkItem, atkSeq, result, why, atkAckMask);
+  logf("attack %s on %s: %s%s%s", gkItemName(atkItem), atkTo == GK_ADDR_ALL ? "all" : "one kart", result, why ? ": " : "", why ? why : "");
+  atkTo = 0; atkItem = 0; atkAckMask = 0; gameLineDirty = true;
+}
+static void gameLeave(const char* ended) {
+  if (!gameSession) return;
+  if (atkTo) attackEnd("timeout", "session ended");
+  gameSession = 0; gameScore = 0; gameEnded = ended; gameLineDirty = true;
+}
+static void gameAttack(uint8_t to, uint8_t item) {
+  const char* why = nullptr;
+  if (!gameSession) why = "no session";
+  else if (to != GK_ADDR_ALL && to == kartId) why = "that is me";
+  else if (to != GK_ADDR_ALL && !peerFresh(to)) why = "not heard";
+  else if (to != GK_ADDR_ALL && fleet[to].session != gameSession) why = "not in your game";
+  if (why) { emitAttack(to, item, 0, "rejected", why, 0); logf("attack rejected: %s", why); return; }
+  if (atkTo) attackEnd("replaced", nullptr);
+  atkSeq = (uint8_t)(atkSeq == 255 ? 1 : atkSeq + 1);
+  atkTo = to; atkItem = item; atkStartMs = millis(); atkAckMask = 0; gameLineDirty = true;
+  emitAttack(to, item, atkSeq, "sent", nullptr, 0);
+  logf("attack: %s at %s (seq %u)", gkItemName(item), to == GK_ADDR_ALL ? "everyone in the game" : "one kart", atkSeq);
+}
+// A hit on us: the item's timed SLOW through the command path (W-rules apply), acknowledged either way.
+static void applyHit(uint8_t from, uint8_t item, uint8_t seq) {
+  const uint8_t secs = item == GK_ITEM_LIGHTNING ? GAME_LIGHTNING_SECS : GAME_SHELL_SECS;
+  const char* why = nullptr;
+  if (stopActive) why = "stopped"; else if (raceHold) why = "grid hold";
+  else if (!writesEnabled()) why = "writes off"; else if (!vescUp() || !origValid) why = "no vesc";
+  if (!why) { slowSecs = secs; handleCommand(GAME_SRC, ++usbSeq, GK_CMD_SLOW, GAME_SLOW_MPH, 0, 0); }
+  Serial.printf("{\"t\":\"hit\",\"kart\":%u,\"from\":%u,\"item\":\"%s\",\"seq\":%u,\"secs\":%u,\"applied\":%s,\"why\":",
+                kartId, from, gkItemName(item), seq, secs, gkBool(why == nullptr));
+  if (why) Serial.printf("\"%s\"}\n", why); else Serial.print("null}\n");
+  if (why) logf("hit by kart %u (%s): no effect, %s", from, gkItemName(item), why);
+  else logf("hit by kart %u (%s): slow %u mph for %u s", from, gkItemName(item), GAME_SLOW_MPH, secs);
+}
+// A fresh telemetry copy from kart k: did it acknowledge our attack, is it attacking us?
+static void gameOnPeer(uint8_t k) {
+  if (!gameSession) return;
+  const GkTelemetry& p = fleet[k];
+  const uint32_t now = millis();
+  if (atkTo && (atkTo == k || atkTo == GK_ADDR_ALL) && p.ack_from == kartId && p.ack_seq == atkSeq && !(atkAckMask & (1 << (k - 1)))) {
+    atkAckMask |= (uint8_t)(1 << (k - 1));
+    if (gameScore < 255) gameScore++;
+    logf("hit landed: %s on kart %u (score %u)", gkItemName(atkItem), k, gameScore);
+    if (atkTo != GK_ADDR_ALL) attackEnd("acked", nullptr); else gameLineDirty = true;
+  }
+  if (p.session == gameSession && p.atk_seq && (p.atk_to == kartId || p.atk_to == GK_ADDR_ALL)
+      && (p.atk_seq != hitSeq[k] || now - hitMs[k] > GAME_HIT_REPEAT_MS)) {
+    hitSeq[k] = p.atk_seq; hitMs[k] = now;
+    ackFrom = k; ackSeq = p.atk_seq; ackMs = now;
+    applyHit(k, p.atk_item, p.atk_seq);
+  }
+}
+static void serviceGame() {
+  const uint32_t now = millis();
+  if (atkTo && now - atkStartMs >= GAME_ATTACK_MS) attackEnd(atkTo == GK_ADDR_ALL ? "done" : "timeout", nullptr);
+  if (ackFrom && now - ackMs >= GAME_ACK_HOLD_MS) { ackFrom = 0; ackSeq = 0; }
+  if (gameSession && gameSession != kartId) {                 // joined: the host must still be hosting
+    const uint8_t h = gameSession;
+    if (!peerFresh(h)) { gameLeave("host lost"); logf("freeplay: host kart %u not heard for 10 s, game over", h); }
+    else if (fleet[h].session != h) { gameLeave("host left"); logf("freeplay: host kart %u ended the game", h); }
+  }
+  uint8_t hosts = 0, peers = 0;
+  for (uint8_t k = 1; k <= GK_MAX_KARTS; k++) {
+    if (kartHosting(k)) hosts |= (uint8_t)(1 << (k - 1));
+    if (peerInMySession(k)) peers |= (uint8_t)(1 << (k - 1));
+  }
+  static uint8_t lastHosts = 0, lastPeers = 0;
+  if (hosts != lastHosts || peers != lastPeers) { lastHosts = hosts; lastPeers = peers; gameLineDirty = true; }
+  const bool active = gameSession || hosts;
+  if (gameLineDirty || (active && now - gameLineMs >= 1000) || (!active && !gameLineQuiet)) {
+    emitGame(hosts, peers); gameLineMs = now; gameLineDirty = false; gameLineQuiet = !active; gameEnded = nullptr;
+  }
+}
+
 // ---------------------------------------------------------------- lora
 static void emitFleet(uint8_t id, float rssi, float snr) {
-  char buf[640];
+  char buf[GK_TELE_JSON_MAX];
   gkTelemetryToJson(buf, sizeof buf, fleet[id], "fleet", rssi, snr, millis());
   Serial.println(buf);
   m5Emit(buf);
@@ -956,6 +1146,7 @@ static void serviceLoraRxOne() {
         // Repeater copy of a packet already heard directly: drop it (the kart Pi would count it twice).
         if (relayed && fleetMs[h->src] && millis() - fleetMs[h->src] < 400 && fleet[h->src].h.seq == h->seq) break;
         gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); emitFleet(h->src, rssi, snr);
+        gameOnPeer(h->src);
       }
       break;
     case GK_MSG_COMMAND: {
@@ -1024,7 +1215,11 @@ static void serviceLoraTx() {
   if (!radioOk || !slotDue()) return;
   GkTelemetry t; fillTelemetry(t, true);
   digitalWrite(PIN_LED, HIGH);
-  int st = radio.transmit((uint8_t*)&t, sizeof t);
+  // Rollout: with no game bytes set (not in a session, no attack/ack, score 0) send the 0.2.4-length
+  // packet so a pit base or repeater still on 0.2.1 keeps decoding this kart; the game bytes it would
+  // carry are all 0 anyway (receivers on 0.2.2+ pad a short packet with zeros).
+  const bool gameIdle = !t.session && !t.atk_to && !t.ack_from && !t.score;
+  int st = radio.transmit((uint8_t*)&t, gameIdle ? GK_TELEMETRY_LEN_V1 : sizeof t);
   loraIrq = false;                       // the TX-done interrupt also raised DIO1
   radio.startReceive();
   digitalWrite(PIN_LED, LOW);
@@ -1062,7 +1257,7 @@ static void serviceWifi() {
 // ---------------------------------------------------------------- usb
 static void usbReport() {
   GkTelemetry t; fillTelemetry(t, false);
-  char buf[720];
+  char buf[GK_TELE_JSON_MAX + 240];
   int n = gkTelemetryToJson(buf, sizeof buf, t, "self", 0, 0, millis());
   if (n > 0 && n < (int)sizeof buf - 160 && buf[n - 1] == '}') {       // USB-only extras: fix quality and the pit radio's own fix
     uint32_t now = millis();
@@ -1086,7 +1281,7 @@ static void usbStatus() {
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
-                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
+                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"session\":%u,\"hosting\":%s,\"score\":%u,\"baseline_suspect\":%s,\"baseline_source\":\"%s\",\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
                 "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
                 "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"tx_dbm\":%d,\"tx_radiated_dbm\":%d,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
@@ -1094,7 +1289,7 @@ static void usbStatus() {
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
                 vesc.fwMajor, vesc.fwMinor, hw, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
-                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gkBool(baselineSuspect),
+                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gameSession, gkBool(gameSession && gameSession == kartId), gameScore, gkBool(baselineSuspect), baselineSource,
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, mac,
                 vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
@@ -1112,7 +1307,12 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "stop"))  handleCommand(0xFE, ++usbSeq, GK_CMD_STOP, 0, 0, 0);
   else if (!strcmp(line, "start")) handleCommand(0xFE, ++usbSeq, GK_CMD_START, 0, 0, 0);
   else if (!strcmp(line, "ping"))  handleCommand(0xFE, ++usbSeq, GK_CMD_PING, 0, 0, 0);
-  else if (!strcmp(line, "slow"))  handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, arg ? atoi(arg) : 0, 0, 0);
+  else if (!strcmp(line, "slow")) {                       // slow [MPH] [SECS]   SECS = timed (kart-local, e.g. mud), none = until START
+    int mph = arg ? atoi(arg) : 0, secs = 0;
+    if (arg) { char* a2 = strchr(arg, ' '); if (a2) secs = atoi(a2 + 1); }
+    if (secs < 0 || secs > 60) logf("usage: slow [MPH] [SECS 1-60]");
+    else { slowSecs = (uint8_t)secs; handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, (uint8_t)(mph > 255 ? 255 : mph), 0, 0); }
+  }
   else if (!strcmp(line, "race"))  handleCommand(0xFE, ++usbSeq, GK_CMD_RACE, arg ? atoi(arg) : 5, 0, 0);
   else if (!strcmp(line, "boost")) {                      // boost SECS SCALE   e.g. "boost 5 1.0" or "boost 4 0.5" (mud)
     int secs = 5; float sc = 1.0f;
@@ -1193,8 +1393,28 @@ static void usbCommand(char* line) {
     else { float c = atof(arg); if (c >= 0.3f && c <= 5.0f) { speedCal = c; prefs.putFloat("speedcal", c); logf("speed calibration %.3f stored (caps re-apply at the next mode command)", c); }
            else logf("speedcal must be 0.3..5 (real ERPM per configured-math ERPM)"); }
   }
+  else if (!strcmp(line, "session") && arg) {              // session host | join N | leave   (freeplay multiplayer, kart Pi)
+    if (!strcmp(arg, "host")) {
+      if (gameSession != kartId) { if (atkTo) attackEnd("timeout", "session ended"); gameSession = kartId; gameScore = 0; gameEnded = nullptr; gameLineDirty = true; }
+      logf("freeplay: hosting game %u", kartId);
+    } else if (!strncmp(arg, "join", 4)) {
+      int n = atoi(arg + 4);
+      if (n < 1 || n > GK_MAX_KARTS) logf("usage: session join 1..8");
+      else if (n == kartId) logf("session join %d: that is me (use session host)", n);
+      else if (!kartHosting((uint8_t)n)) { logf("session join %d: kart %d is not hosting a game (or not heard for 10 s)", n, n); gameLineDirty = true; }
+      else { if (gameSession != n) { if (atkTo) attackEnd("timeout", "session ended"); gameSession = (uint8_t)n; gameScore = 0; gameEnded = nullptr; gameLineDirty = true; } logf("freeplay: joined kart %d's game", n); }
+    } else if (!strcmp(arg, "leave")) { bool was = gameSession; gameLeave(nullptr); logf(was ? "freeplay: left the game" : "freeplay: not in a game"); gameLineDirty = true; }
+    else logf("usage: session host | join N | leave");
+  }
+  else if (!strcmp(line, "attack") && arg) {               // attack N|all shell|lightning
+    char* a2 = strchr(arg, ' '); if (a2) { *a2++ = 0; while (*a2 == ' ') a2++; }
+    uint8_t to = !strcmp(arg, "all") ? GK_ADDR_ALL : (uint8_t)atoi(arg);
+    uint8_t item = (a2 && !strcmp(a2, "lightning")) ? GK_ITEM_LIGHTNING : (a2 && !strcmp(a2, "shell")) ? GK_ITEM_SHELL : GK_ITEM_NONE;
+    if (!item || (to != GK_ADDR_ALL && (to < 1 || to > GK_MAX_KARTS))) logf("usage: attack 1..8|all shell|lightning");
+    else gameAttack(to, item);
+  }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | slow [MPH] [SECS] | session host|join N|leave | attack N|all shell|lightning | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -1341,6 +1561,7 @@ void loop() {
   serviceUsb();
   serviceVesc();
   serviceWrites();
+  serviceGame();
   serviceGps();
   serviceLoraRx();
   serviceLoraTx();

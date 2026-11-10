@@ -39,9 +39,19 @@ Rules every implementation follows:
   mud (scale at or below the mode's) keeps the cap. `scale` is clamped to 1.0 (never above SPORT or
   above the controller's own limits, which the firmware echoes). Re-trigger only after the kart has left the
   zone and `cooldown_s` (default 20) has passed.
-- **mud**: while inside, the kart Pi sends `boost 3 <scale>` and repeats it every 2 s so the cap
-  lasts exactly as long as the kart is in the zone (plus at most 3 s). On leaving it simply stops
-  repeating; the Heltec reverts to the mode scale on its own within 3 s.
+- **mud**: while inside, the kart Pi sends a timed mud command and repeats it every 2 s so the
+  slow-down lasts as long as the kart is in the zone (plus at most S s, S = kart config
+  `mud_slow_secs`, default 4). On Heltec firmware kart-0.2.4+ (the `fw` of its status reply) the
+  command is `slow 5 S`: a real 5 mph speed cap for S s, after which the Heltec returns to the
+  previous cap by itself (a pit SLOW that was in force stays / comes back; a timed slow never lifts a
+  lower pit cap). On older or unknown firmware it is `boost S <scale>` as before, because those builds
+  would read `slow 5 4` as a PERMANENT `slow 5` that only START releases. On leaving the kart simply
+  stops repeating.
+- **stacking** (2026-11-09 night): a boost (pad, item BOOST or SUPER) that fires while the kart's own
+  previous boost is still running sends `boost T SCALE` with T = remaining + new seconds, capped at 30
+  (the firmware's SECS limit; it simply re-arms) and SCALE = the larger of the two (never above 1.0).
+  The kart logs `boost_stacked` with the total. A running mud never stacks: a boost while inside mud
+  or while a mud command is still running is suppressed (mud wins), and a mud during a boost replaces it.
 - **lapline**: a lap counts when the kart's path (previous fix -> current fix) crosses segment a-b in
   either direction and at least `min_lap_s` has passed since the previous crossing (default 20 s).
   First crossing starts the clock (lap 0 -> "lap 1 running"). Each kart keeps: lap count, last lap,
@@ -50,7 +60,8 @@ Rules every implementation follows:
 - **Entry hysteresis**: a kart is "inside" when within the shape; "outside" again only once it is
   more than 3 m outside the edge (avoid flapping on the boundary).
 - **enabled=false** or a missing file: no triggers, no lap timing; HUD shows the game as off.
-- **Safety**: zones never raise the scale above 1.0, never send STOP/START/mode, and a pit STOP
+- **Safety**: zones never raise the scale above 1.0, never send STOP/START/mode (the only lines are
+  `boost` and, for mud on kart-0.2.4+, the timed `slow MPH SECS`), and a pit STOP
   always wins (the firmware clears the override). The pit's master switch is the race director's
   kill for the whole game. SLOW from the pit is not affected by zones (the ERPM cap stays).
 
@@ -73,7 +84,9 @@ when it sends `race`, and laps count from the first lap-line crossing after GO.
 
 Zone `type: "item"` (circle or polygon, same sizes as boost). On entry the KART rolls a random item
 locally and applies it at once, showing a short roulette on the HUD: 45 % BOOST (`boost 5 1.0`),
-15 % SUPER (`boost 8 1.0`, star animation), 25 % MUD (`boost 3 0.5`), 15 % nothing ("empty box").
+15 % SUPER (`boost 8 1.0`, star animation), 25 % MUD (`slow 5 4` on Heltec kart-0.2.4+, `boost 4 0.5`
+on older or unknown firmware; 4 = `mud_slow_secs`), 15 % nothing ("empty box"). BOOST and SUPER stack
+on a running boost (see boost/stacking above).
 Same cooldown/exit rules as boost pads (`cooldown_s`, default 15). The pit draws item boxes as a
 blue/white "?" box and never evaluates their outcome; the kart logs `{"kind":"game","event":"item",
 "item":"boost|super|mud|empty"}` to its session log. Items never raise the scale above 1.0 and are
@@ -109,6 +122,11 @@ A kart can run its own item-box game with no pit (kart/README.md "Freeplay"). Th
 zones document in this same format (`"version": "freeplay-N"`, `"enabled": true`, `"source": "freeplay"`,
 `type: "item"` circles of 4 m with `cooldown_s` 15, plus a closed `track` recorded from one lap of its own
 GPS) and runs it through the same engine, so the item contract above applies unchanged (same roll, same
-`boost` lines, scale never above 1.0, nothing while STOPPED or in grid hold). The pit's own game wins: a
+`boost` / mud lines, scale never above 1.0, nothing while STOPPED or in grid hold). Switching freeplay ON
+(button or `POST /api/freeplay`) also puts the kart in ECO: one `mode 0` through the kart's normal
+command path (as a driver mode tap), logged as `freeplay_mode` (sent / skipped / failed); skipped while
+STOPPED, in a grid hold, or when freeplay is not the running game (pit game on, demo); never re-sent on
+later ticks or after a restart. ECO's 15 mph cap is the base and a BOOST lifts it one mode up
+(firmware `BOOST_LIFTS_CAP`), so boosts are felt. The pit's own game wins: a
 pit `zones.json` with `enabled: true` and at least one zone or lap line pauses freeplay on every kart.
 The pit never sees freeplay boxes, and freeplay documents are never written to `zones.json`.

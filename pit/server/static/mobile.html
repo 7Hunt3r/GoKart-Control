@@ -67,8 +67,9 @@
       <div class="mapctl"><button data-zoom="in">+</button><button data-zoom="out">&minus;</button><button data-zoom="fit">Fit</button></div>
     </div>
     <div id="zoneBar" class="zonebar mdrawer hidden">
-      <div class="mdhead"><span class="mdtitle">ZONES</span><button id="zCancel" class="zcancel">CANCEL</button><button id="zSave" class="zsave">SAVE</button></div>
+      <div class="mdhead"><span class="mdtitle">ZONES</span><button id="zUndo" class="zchip" disabled title="Nothing to undo">UNDO</button><button id="zCancel" class="zcancel">CANCEL</button><button id="zSave" class="zsave">SAVE</button></div>
       <div id="zHint" class="zhint"></div>
+      <button id="zPaceGo" class="zpacego hidden">PACE CAR: record a lap</button>
       <div class="ztools mztools">
         <div class="zgroup"><span class="zglbl">PLACE</span>
           <button data-ztool="boost" class="zt-boost">BOOST PAD</button><button data-ztool="mud" class="zt-mud">MUD</button><button data-ztool="item" class="zt-item">ITEM BOX</button></div>
@@ -76,6 +77,11 @@
           <button data-ztool="lapline" class="zt-lap">LAP LINE</button><button data-ztool="track" class="zt-track">TRACK</button></div>
         <div class="zgroup"><span class="zglbl">EDIT</span>
           <button data-ztool="select">SELECT / MOVE</button><button data-ztool="delete" class="zt-del">DELETE</button></div>
+      </div>
+      <div class="zquick mzquick">
+        <div class="mzrow"><span class="zgroup zkart"><span class="zglbl">AT KART</span><select id="zAtKartSel" aria-label="kart to place at"><option value="1">K1</option><option value="2">K2</option><option value="3">K3</option><option value="4">K4</option><option value="5">K5</option><option value="6">K6</option><option value="7">K7</option><option value="8">K8</option></select><button id="zAtKart" class="zatkart">PLACE AT KART</button></span><button id="zSnap" class="zchip sel" aria-pressed="true" title="Snap pads, mud and boxes to the track centreline (within 10 m)">SNAP</button></div>
+        <div class="mzrow"><span class="zgroup zauto"><span class="zglbl">AUTO</span><button data-zn="2">2</button><button data-zn="3">3</button><button data-zn="4">4</button><button data-zn="6">6</button><input id="zAutoN" type="number" min="1" max="20" step="1" value="3" inputmode="numeric" aria-label="number of item boxes"><button id="zAuto" class="zt-item">AUTO BOXES</button></span></div>
+        <span id="zAutoHint" class="note zautohint"></span>
       </div>
       <div class="zprops">
         <span id="zSel" class="zsel">nothing selected</span>

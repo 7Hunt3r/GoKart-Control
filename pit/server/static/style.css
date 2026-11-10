@@ -293,6 +293,18 @@ table.laps tr.lead td.gap { color: #b37a00; font-weight: 900; font-size: 11px; l
 .zonebar:not(.hassel) .zpname, .zonebar:not(.hassel) .zprad { display: none; }
 .zonebar:not(.tooltrack) .ztrack { display: none; }
 .zprops .ztrack.zgroup button { min-height: 40px; font-size: 13px; padding: 2px 10px; }
+/* quick row: PLACE AT KART, AUTO BOXES, SNAP, UNDO (one level) */
+.zquick { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.zgroup select { font: inherit; font-size: 15px; font-weight: 800; border: 0; border-right: 1px solid #bbb; background: #fff; padding: 0 6px; min-height: 44px; }
+.zgroup button.zatkart { font-weight: 900; }
+.zgroup button.zatkart:not(.armed) { color: #888; }
+.zauto button[data-zn] { min-width: 40px; padding: 4px 8px; }
+.zauto input { width: 54px; font: inherit; font-size: 15px; font-weight: 800; text-align: center; border: 0; border-right: 1px solid #bbb; padding: 0 4px; }
+.zautohint { font-weight: 700; }
+.zchip { min-height: 44px; padding: 2px 14px; background: #fff; font-weight: 900; letter-spacing: .04em; }
+.zchip#zSnap.sel { background: #0b4fb3; border-color: #0b4fb3; color: #fff; }
+.zpacego { align-self: flex-start; min-height: 44px; padding: 2px 14px; background: #c40000; color: #fff; border-color: #7a0000; font-weight: 900; }
+.zhint[data-tool="start"] { border-left-color: #c40000; }
 .zradval { display: inline-block; min-width: 46px; padding: 3px 6px; background: #111; color: #fff; border-radius: 4px; text-align: center; font-variant-numeric: tabular-nums; }
 
 /* confirm sheet (phone START RACE) */
@@ -456,11 +468,33 @@ body.mobile .zprops { gap: 6px; }
 body.mobile .zprops .zsel { min-width: 0; flex-basis: 100%; }
 body.mobile .zprops label { flex-basis: 100%; font-size: 14px; }
 body.mobile .zprops input:not([type]) { flex: 1; min-width: 0; width: auto; font-size: 16px; min-height: 44px; }
-body.mobile .zprops input[type=range] { flex: 1; min-width: 0; width: auto; height: 36px; }
+body.mobile .zprops input[type=range] { flex: 1; min-width: 0; width: auto; height: 44px; }
 body.mobile .zprops .ztrack.zgroup { display: flex; flex-basis: 100%; }
 body.mobile .zprops .ztrack.zgroup button { flex: 1 1 0; min-width: 0; min-height: 44px; font-size: 12px; padding: 2px 4px; }
 body.mobile .zonebar:not(.tooltrack) .ztrack { display: none; }
 body.mobile .zprops #zCounts { flex-basis: 100%; font-size: 12px; }
+body.mobile .mdhead .zchip { padding: 2px 12px; }
+/* phone drawer order: hint, PLACE, AT KART + SNAP (right under the tools it drops), COURSE, EDIT, AUTO, props */
+body.mobile .zonebar > .mztools, body.mobile .zonebar > .mzquick { display: contents; }
+body.mobile .mztools > .zgroup:nth-child(1) { order: 1; }
+body.mobile .mzquick > .mzrow:nth-child(1) { order: 2; }
+body.mobile .mztools > .zgroup:nth-child(2) { order: 3; }
+body.mobile .mztools > .zgroup:nth-child(3) { order: 4; }
+body.mobile .mzquick > .mzrow:nth-child(2), body.mobile .mzquick > .zautohint { order: 5; }
+body.mobile .zonebar > .zprops { order: 6; }
+body.mobile .mztools > .zgroup, body.mobile .mzquick > *, body.mobile .zonebar > * { flex-shrink: 0; }   /* the drawer scrolls; never squash a row */
+body.mobile .mzrow { display: flex; gap: 6px; min-width: 0; }
+body.mobile .mzrow .zgroup { flex: 1 1 auto; min-width: 0; }
+body.mobile .mzrow .zgroup button { min-height: 46px; padding: 2px 6px; font-size: 13px; line-height: 1.1; }
+body.mobile .mzrow .zkart button { flex: 1 1 auto; min-width: 0; }
+body.mobile .mzrow .zkart select { min-height: 46px; font-size: 17px; }
+body.mobile .mzrow .zauto button[data-zn] { flex: 1 1 0; min-width: 34px; padding: 2px; font-size: 16px; }
+body.mobile .mzrow .zauto input { width: 46px; font-size: 16px; }
+body.mobile .mzrow .zauto #zAuto { flex: 2 1 auto; }
+body.mobile .mzrow > .zchip { flex: none; min-height: 50px; }
+body.mobile .zpacego { align-self: stretch; min-height: 48px; font-size: 16px; }
+body.mobile .mzquick .zautohint { font-size: 12px; }
+body.mobile .mzquick .zautohint:empty { display: none; }
 body.mobile .mpace { gap: 8px; padding-top: 6px; border-top: 2px solid var(--line); }
 body.mobile .mpacehead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
 body.mobile .mpacehead > select { min-height: 48px; font-size: 18px; font-weight: 800; padding: 4px 8px; border: 2px solid var(--line); border-radius: 6px; }

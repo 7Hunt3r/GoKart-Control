@@ -172,6 +172,12 @@ fi
 udevadm control --reload-rules && udevadm trigger --subsystem-match=input || true
 
 echo "--- systemd units"
+# Wi-Fi self-heal timer (tools/wifi_watch.sh): a Pi 3 B that comes back into range does not always
+# rejoin on its own (2026-11-09); the timer rescans, re-ups the profile, cycles the radio, then reloads
+# the driver, escalating only while wlan0 stays disconnected.
+install -m 644 "$SRC/systemd/gokart-wifi-watch.service" "$SRC/systemd/gokart-wifi-watch.timer" /etc/systemd/system/ 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable --now gokart-wifi-watch.timer >/dev/null 2>&1 || warn "gokart-wifi-watch.timer not enabled"
 install -m 644 "$DEST/kiosk/pam-gokart-kart-kiosk" /etc/pam.d/gokart-kart-kiosk
 for unit in gokart-kart.service gokart-kart-kiosk.service; do
   sed "s/@KART_USER@/$KART_USER/g" "$DEST/systemd/$unit" > "/etc/systemd/system/$unit"

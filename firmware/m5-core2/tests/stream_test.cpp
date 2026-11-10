@@ -59,6 +59,14 @@ std::string telemetry(unsigned id, uint32_t ms, bool gps = true, bool vesc = tru
   t.scale_x1000 = 750;
   t.erpm = int32_t(3000 + id);
   t.uptime_s = uint16_t(ms / 1000);
+  // Nonzero 0.2.5 multiplayer fields must remain harmless extra data on the M5 display.
+  t.session = 8;
+  t.atk_to = GK_ADDR_ALL;
+  t.atk_item = GK_ITEM_LIGHTNING;
+  t.atk_seq = 255;
+  t.ack_from = 8;
+  t.ack_seq = 255;
+  t.score = 255;
   char out[1100];
   int n = gkTelemetryToJson(out, sizeof out, t, id == 1 ? "self" : "fleet", -70, 9, ms);
   require(n > 0 && n < int(sizeof out), "production encoder truncated telemetry");
@@ -198,6 +206,102 @@ void recovery() {
   puts("M5 recovery: PASS, cable/GPS/peer loss, corrupt frames, late ack and Heltec restart; no automatic request.");
 }
 
+void multiplayerCompatibility() {
+  static_assert(GK_TELEMETRY_LEN == 54, "review mixed-version M5 fixtures after radio format changes");
+  GkTelemetry packet{};
+  gkFillHeader(packet.h, GK_MSG_TELEMETRY, 8, GK_ADDR_ALL, 255);
+  packet.flags = GK_FLAG_GPS_FIX | GK_FLAG_VESC_LINK | GK_FLAG_MODE_CONFIRMED;
+  packet.lat_e7 = 410939900;
+  packet.lon_e7 = -734163700;
+  packet.gps_age_s = 0;
+  packet.volts_x10 = 794;
+  packet.motor_a_x10 = 123;
+  packet.batt_a_x10 = 45;
+  packet.esc_temp_x10 = 321;
+  packet.mode_actual = 2;
+  packet.mode_req = 2;
+  packet.scale_x1000 = 1000;
+  packet.slow_mph = 5;
+  packet.session = 8;
+  packet.atk_to = GK_ADDR_ALL;
+  packet.atk_item = GK_ITEM_LIGHTNING;
+  packet.atk_seq = 255;
+  packet.ack_from = 1;
+  packet.ack_seq = 255;
+  packet.score = 255;
+  for (size_t length : {size_t(GK_TELEMETRY_LEN_V0), size_t(GK_TELEMETRY_LEN_V1), sizeof packet}) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&packet);
+    require(gkValidate(bytes, length) == GK_MSG_TELEMETRY, "legacy/current radio telemetry rejected");
+    GkTelemetry decoded;
+    gkCopyTelemetry(decoded, bytes, length);
+    char line[GK_TELE_JSON_MAX];
+    int n = gkTelemetryToJson(line, sizeof line, decoded, "fleet", -80, 9, 1000);
+    require(n > 0 && n < int(sizeof line), "mixed-version telemetry JSON truncated");
+    Link receiver;
+    receiver.waitUntil(1000);
+    receiver.line(line);
+    const auto& kart = receiver.state.karts[8];
+    require(receiver.frames == 1 && !receiver.rejected && !receiver.lines.dropped,
+            "mixed-version telemetry did not traverse the M5 parser");
+    require(kart.positionFresh(receiver.now()) && kart.vesc && kart.mode == 2 && kart.confirmed &&
+            std::fabs(kart.volts - 79.4f) < 0.001f && std::fabs(kart.motorA - 12.3f) < 0.001f,
+            "new game fields changed displayed telemetry");
+    require(kart.slow == (length == GK_TELEMETRY_LEN_V0 ? 0 : 5), "legacy SLOW compatibility changed");
+    require(!receiver.state.pending && !receiver.state.canRequest(receiver.now()),
+            "peer game data enabled/requested a driver mode");
+  }
+
+  // Wide numeric fields plus all new game bytes exercise the real production-sized buffers.
+  GkTelemetry wide;
+  memset(&wide, 0xFF, sizeof wide);
+  gkFillHeader(wide.h, GK_MSG_TELEMETRY, 8, GK_ADDR_ALL, 255);
+  wide.lat_e7 = INT32_MIN; wide.lon_e7 = INT32_MIN; wide.erpm = INT32_MIN;
+  wide.motor_a_x10 = INT16_MIN; wide.batt_a_x10 = INT16_MIN; wide.esc_temp_x10 = INT16_MIN;
+  wide.duty_pct = INT8_MIN; wide.base_rssi = INT8_MIN;
+  wide.mode_req = 2; wide.mode_actual = 2; wide.scale_x1000 = 65534;
+  wide.flags = GK_FLAG_GPS_FIX | GK_FLAG_VESC_LINK | GK_FLAG_MODE_CONFIRMED;
+  char fleet[GK_TELE_JSON_MAX];
+  int fleetSize = gkTelemetryToJson(fleet, sizeof fleet, wide, "fleet", -127, -20, UINT32_MAX);
+  require(fleetSize > 0 && fleetSize < int(sizeof fleet), "wide fleet JSON exceeds production buffer");
+  Link large;
+  large.waitUntil(10000);
+  large.line(fleet);
+  require(large.frames == 1 && !large.rejected && !large.lines.dropped,
+          "wide fleet JSON rejected by M5 line/state limits");
+  require(large.state.karts[8].vesc && !large.state.karts[8].fix,
+          "invalid wide coordinates must not become a map position");
+
+  wide.h.src = 1;
+  char own[GK_TELE_JSON_MAX + 240]; // usbReport() uses this size, with these extras.
+  int baseSize = gkTelemetryToJson(own, sizeof own, wide, "self", 0, 0, UINT32_MAX);
+  require(baseSize > 0 && baseSize < int(sizeof own) - 160 && own[baseSize - 1] == '}',
+          "self telemetry lost space reserved for USB extras");
+  int extraSize = snprintf(own + baseSize - 1, sizeof own - size_t(baseSize) + 1,
+      ",\"hdop\":99.99,\"fix_age_ms\":4294967295,\"gps_hz\":5,"
+      "\"base_lat\":-90.0000000,\"base_lon\":-180.0000000,\"base_fix_age_s\":29,"
+      "\"race_pos\":8,\"race_state\":3}");
+  require(extraSize > 0 && size_t(extraSize) < sizeof own - size_t(baseSize) + 1,
+          "wide own extras truncated in production-sized buffer");
+  size_t ownSize = strlen(own);
+  require(ownSize < 1100 && ownSize + 1 < 1152, "own report exceeds M5 JSON/line limits");
+  large.line(own);
+  require(large.frames == 2 && !large.rejected && !large.lines.dropped && large.state.self == 1,
+          "wide self report did not traverse M5 framing/state");
+  require(large.state.karts[1].mode == 2 && !large.state.karts[1].fix && !large.state.pending,
+          "wide own/game fields changed mode intent or created a GPS fix");
+
+  // These USB game events are not currently mirrored, but must be inert if ever received.
+  uint32_t ownReceived = large.state.karts[1].received;
+  large.line("{\"t\":\"game\",\"kart\":1,\"session\":8,\"hosting\":true}");
+  large.line("{\"t\":\"attack\",\"kart\":1,\"to\":8,\"item\":\"lightning\"}");
+  large.line("{\"t\":\"hit\",\"kart\":1,\"from\":8,\"item\":\"shell\",\"applied\":true}");
+  require(large.rejected == 3 && large.state.karts[1].received == ownReceived && !large.state.pending,
+          "unsupported game events renewed telemetry or requested a mode");
+  printf("M5 compatibility: PASS, 46/47/54-byte radio inputs; wide fleet JSON %d/%zu bytes, "
+         "self+extras %zu/%zu bytes; multiplayer fields/events remain display-inert.\n",
+         fleetSize, sizeof fleet, ownSize, sizeof own);
+}
+
 void sourceAge() {
   JsonDocument sample;
   deserializeJson(sample, telemetry(8, 0));
@@ -228,6 +332,6 @@ void sourceAge() {
 } // namespace
 
 int main() {
-  try { soak(); recovery(); sourceAge(); }
+  try { soak(); recovery(); sourceAge(); multiplayerCompatibility(); }
   catch (const std::exception& e) { fprintf(stderr, "M5 stream FAIL: %s\n", e.what()); return 1; }
 }

@@ -1,6 +1,6 @@
 # M5 Core2 v1.5
 
-Branch **`v1.5/m5-core2`**, based on Eamon's `8d9c41c` (2026-11-09).
+Branch **`v1.5/m5-core2`**, based on Eamon's `b48c5ad` (2026-11-10).
 Owner confirmed the display is **Core2 v1.3 / K010-V13** on 2026-11-09.
 An alternative driver display for the existing Heltec + pit stack. The Pi v2 display remains
 available. This milestone implements telemetry, mode requests, base-station status and a simple
@@ -21,9 +21,12 @@ and touch only. The original M5 BLE client/profile writer is not included. It mu
 by this display image before using this topology. No two devices should connect to the same
 VESC. The motor's wired controls and protection stay with the VESC.
 
-The M5 targets are **opt-in**. Normal `kart`, `kart-uart`, base, repeater and Pi builds retain
-existing behavior. No radio structs, IDs, frequencies, rates, slots, pit APIs or USB JSON fields
-were changed for this milestone. The UART mirrors the existing `self` and `fleet` JSON, plus
+The M5 targets are **opt-in**. Integration now includes Eamon's kart0.2.6 and 46/47/54-byte
+radio support; an idle kart still sends 47 bytes. M5 ignores the multiplayer-only fields.
+Active multiplayer requires updated base/repeater0.2.2; this first M5 telemetry test stays
+out of game sessions. Normal `kart`, `kart-uart`, base, repeater and Pi builds retain
+existing behavior. The M5-specific adapter adds no radio structs, IDs, frequency/rate/slot changes, pit APIs
+or USB JSON fields beyond Eamon's merged implementation. The UART mirrors the existing `self` and `fleet` JSON, plus
 one new UART-only `display` metadata line. See [SERIAL_PROTOCOL](SERIAL_PROTOCOL.md).
 All eight IDs work; Colin remains 1, Eamon remains 2. Do not assign a new ID based on display type.
 PIT OK means a recent pit beacon was heard; it does not prove the pit received this kart.

@@ -131,7 +131,9 @@ def _age(last_mono, now):
 VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "ah", "scale")
 STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "slow_mph", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
-                 "base_rssi", "rssi", "snr", "rx_ms")
+                 "base_rssi", "rssi", "snr", "rx_ms",
+                 # freeplay multiplayer (kart 0.2.5, docs/freeplay-multiplayer.md): absent/0 from older karts
+                 "session", "atk_to", "atk_item", "atk_seq", "ack_from", "ack_seq", "score")
 TRAIL_POINTS = 30
 LATE_WINDOW_S = 3.0      # a packet up to LATE_SEQS behind the last one, within this time, is a late copy
 LATE_SEQS = 16
@@ -1377,6 +1379,66 @@ def lapline_at(pts, length_m=LAPLINE_LEN_M):
     def back(e, n):
         return [round(p0[0] + math.degrees(n / R_EARTH), 7), round(p0[1] + math.degrees(e / (R_EARTH * cl)), 7)]
     return back(lx * half, ly * half), back(-lx * half, -ly * half)
+
+
+AUTO_BOX_R_M = 4.0
+AUTO_BOX_COOLDOWN_S = 15
+AUTO_BOX_MAX = 20
+
+
+def boxes_along_track(track, n, r_m=AUTO_BOX_R_M, taken=()):
+    """n item boxes spread evenly by arc length along the track centreline (ZONES.md "Track route"):
+    spacing = length / n (the closing segment counts on a closed track), the first box half a spacing
+    in from the first point, so an open track gets no box on either end and a closed loop has equal
+    gaps all the way round. Returns item zone dicts ("Box 1".."Box n", circle r_m, cooldown 15 s) with
+    ids i1, i2, ... skipping any id in `taken`. Raises ZoneError."""
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= AUTO_BOX_MAX:
+        raise ZoneError(f"n must be a whole number 1-{AUTO_BOX_MAX}")
+    if isinstance(r_m, bool) or not isinstance(r_m, (int, float)) or not MIN_R_M <= r_m <= 60:
+        raise ZoneError(f"r_m must be {MIN_R_M:g}-60")
+    t = validate_track(track)
+    if t is None:
+        raise ZoneError("no track: record one with PACE CAR or draw it with TRACK first")
+    pts = t["points"] + ([t["points"][0]] if t["closed"] else [])
+    proj = local_en(pts[0][0], pts[0][1])
+    xy = [proj(p[0], p[1]) for p in pts]
+    seg = [math.hypot(xy[i + 1][0] - xy[i][0], xy[i + 1][1] - xy[i][1]) for i in range(len(xy) - 1)]
+    total = sum(seg)
+    if total < 1.0:
+        raise ZoneError("the track is too short to place boxes along it")
+    cl = math.cos(math.radians(pts[0][0]))
+    taken, out, i, acc = set(taken), [], 0, 0.0
+    for k in range(n):
+        d = (k + 0.5) * total / n
+        while i < len(seg) - 1 and acc + seg[i] < d:
+            acc += seg[i]
+            i += 1
+        f = 0.0 if seg[i] <= 0 else min(1.0, (d - acc) / seg[i])
+        e = xy[i][0] + (xy[i + 1][0] - xy[i][0]) * f
+        nn = xy[i][1] + (xy[i + 1][1] - xy[i][1]) * f
+        j = len(out) + 1
+        zid = f"i{j}"
+        while zid in taken:
+            j += 1
+            zid = f"i{j}"
+        taken.add(zid)
+        out.append({"id": zid, "type": "item", "name": f"Box {k + 1}", "shape": "circle",
+                    "lat": round(pts[0][0] + math.degrees(nn / R_EARTH), 7),
+                    "lon": round(pts[0][1] + math.degrees(e / (R_EARTH * cl)), 7),
+                    "r_m": round(float(r_m), 1), "cooldown_s": AUTO_BOX_COOLDOWN_S})
+    return out
+
+
+def auto_boxes_body(cur_doc, n, r_m=AUTO_BOX_R_M):
+    """The zones body with every item box replaced by boxes_along_track(cur_doc's track, n).
+    Other zones and the track are kept. Raises ZoneError."""
+    if not cur_doc.get("track"):
+        raise ZoneError("no track: record one with PACE CAR or draw it with TRACK first")
+    keep = [dict(z) for z in cur_doc.get("zones") or [] if z.get("type") != "item"]
+    boxes = boxes_along_track(cur_doc["track"], n, r_m, taken=[z.get("id") for z in keep])
+    body = {"enabled": cur_doc.get("enabled", False), "zones": keep + boxes, "track": cur_doc["track"]}
+    validate_zones(body)
+    return body, boxes
 
 
 class TrackRecorder:

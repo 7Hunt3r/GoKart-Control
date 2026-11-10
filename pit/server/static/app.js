@@ -269,6 +269,7 @@ function updateCards() {
     else if (onGrid) b.push('<span class="badge grid">GRID</span>');
     else if ((goFlash[k.id] || 0) > Date.now()) b.push('<span class="badge go">GO</span>');
     if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph}${KIOSK ? "" : " MPH"}</span>`);
+    if (st.session > 0) b.push(`<span class="badge game" title="freeplay multiplayer: host kart ${st.session}, ${st.score || 0} hits landed">${st.session === k.id ? "HOST" : "G" + st.session}${st.score ? " \u2605" + st.score : ""}</span>`);   // kart-to-kart game (docs/freeplay-multiplayer.md)
     if (st.vesc_link === false) b.push(`<span class="badge unknown">${KIOSK ? "NO VESC" : "VESC LINK DOWN"}</span>`);
     if (st.writes === false) b.push(`<span class="badge grey">${KIOSK ? "WR OFF" : "WRITES OFF"}</span>`);
     const sm = k.scale_mismatch;     // live scale != requested mode for 10 s (pitcore watch_scales): tap resends the mode
@@ -660,8 +661,9 @@ function setupMapInput() {
     if (ptrs.size === 1) {
       const [x, y] = local(e);
       drag = { x, y, cx: view.cx, cy: view.cy, moved: false }; pinch = null;
+      drag.tol = e.pointerType === "touch" || e.pointerType === "pen" ? 22 : 14;   // fat finger hit radius (px)
       if (zed.on && zed.tool === "select") {          // zone editor: grab a zone to move it
-        const hit = zoneAt(world(x, y));
+        const hit = zoneAt(world(x, y), drag.tol);
         if (hit) { zed.sel = hit.id; drag.zone = hit; drag.last = world(x, y); if (S) drawMap(); }
       }
     }
@@ -697,7 +699,7 @@ function setupMapInput() {
   const release = (e) => {
     if (zed.on && e.type === "pointerup" && drag && !drag.moved && ptrs.size === 1 && ptrs.has(e.pointerId)) {
       const [x, y] = local(e);
-      zoneTap(world(x, y));
+      zoneTap(world(x, y), drag.tol);
     }
     ptrs.delete(e.pointerId);
     if (ptrs.size < 2) pinch = null;
@@ -717,7 +719,11 @@ const ZONE_STYLE = {
 };
 const ZONE_DEFAULT_R = { boost: 5, mud: 6, item: 4 };
 // zone editor state (operator page only): draft is edited locally until SAVE
-const zed = { track: null, on: false, tool: "select", draft: [], sel: null, lapA: null, dirty: false, baseVersion: null, shownSel: undefined };
+// undo: the last placement of this editing session (one level), see undoPlacement()
+const zed = { track: null, on: false, tool: "select", draft: [], sel: null, lapA: null, dirty: false, baseVersion: null, shownSel: undefined, undo: null };
+const SNAP_M = 10;                          // a tapped / at-kart zone snaps to the centreline within this
+const AT_KART_FRESH_S = 5;                  // PLACE AT KART needs a fix younger than this
+let zSnap = store.get("gk_zsnap", true);
 
 function zonesDoc() { return (S && S.zones) || { version: 0, enabled: false, zones: [] }; }
 function gameTiming() { return !!(S && S.fleet.game && S.fleet.game.timing); }
@@ -939,29 +945,56 @@ function drawZones(ctx, zones, px, en, off) {
 }
 
 /* ---- editor (operator page) ---- */
-function zoneAt(w) {
+/* the zone under world point w; tolPx = hit radius in screen px (22 on touch, 14 with a mouse).
+   Several hits: the one whose centre / line is nearest wins (later zones on ties). */
+function zoneAt(w, tolPx) {
   if (!S || !S.fleet.origin) return null;
-  const en = geo().en, tol = 14 / view.scale;
+  const en = geo().en, tol = (tolPx || 14) / view.scale;
+  let best = null, bestD = Infinity;
   for (let i = zed.draft.length - 1; i >= 0; i--) {
     const z = zed.draft[i];
+    let d = null;
     if (z.shape === "circle" && !nul(z.lat)) {
-      const c = en(z.lat, z.lon);
-      if (Math.hypot(w[0] - c[0], w[1] - c[1]) <= Math.max(z.r_m, tol)) return z;
+      const c = en(z.lat, z.lon), r = Math.hypot(w[0] - c[0], w[1] - c[1]);
+      if (r <= Math.max(z.r_m, tol)) d = r;
     } else if (z.shape === "line" && z.a && z.b) {
       const a = en(z.a[0], z.a[1]), b = en(z.b[0], z.b[1]);
       const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1;
       const t = Math.max(0, Math.min(1, ((w[0] - a[0]) * dx + (w[1] - a[1]) * dy) / L2));
-      if (Math.hypot(w[0] - a[0] - t * dx, w[1] - a[1] - t * dy) <= tol) return z;
+      const r = Math.hypot(w[0] - a[0] - t * dx, w[1] - a[1] - t * dy);
+      if (r <= tol) d = r;
     } else if (z.shape === "polygon" && Array.isArray(z.points)) {
       const ps = z.points.map((p) => en(p[0], p[1]));
       let inside = false;
       for (let a = 0, b = ps.length - 1; a < ps.length; b = a++) {
         if ((ps[a][1] > w[1]) !== (ps[b][1] > w[1]) && w[0] < (ps[b][0] - ps[a][0]) * (w[1] - ps[a][1]) / (ps[b][1] - ps[a][1]) + ps[a][0]) inside = !inside;
       }
-      if (inside) return z;
+      if (inside) d = tol;                   // a pad sitting on a big polygon still wins
     }
+    if (d !== null && d < bestD) { best = z; bestD = d; }
   }
-  return null;
+  return best;
+}
+/* nearest point of the draft centreline to world point w, or null if the track is empty */
+function nearestOnTrack(w) {
+  const t = zed.track;
+  if (!t || !t.points || !t.points.length || !S || !S.fleet.origin) return null;
+  const en = geo().en, ps = t.points.map((p) => en(p[0], p[1]));
+  if (t.closed && ps.length > 2) ps.push(ps[0]);
+  let best = ps[0], bd = Math.hypot(w[0] - ps[0][0], w[1] - ps[0][1]);
+  for (let i = 0; i + 1 < ps.length; i++) {
+    const a = ps[i], b = ps[i + 1], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+    const k = L2 ? Math.max(0, Math.min(1, ((w[0] - a[0]) * dx + (w[1] - a[1]) * dy) / L2)) : 0;
+    const q = [a[0] + k * dx, a[1] + k * dy], d = Math.hypot(w[0] - q[0], w[1] - q[1]);
+    if (d < bd) { best = q; bd = d; }
+  }
+  return { w: best, d: bd };
+}
+/* SNAP chip: a pad / mud / item box dropped within SNAP_M of the centreline lands on it */
+function snapW(w) {
+  if (!zSnap) return [w, false];
+  const n = nearestOnTrack(w);
+  return n && n.d <= SNAP_M ? [n.w, n.d > 0.05] : [w, false];
 }
 function moveZone(z, de, dn) {
   const g = geo();
@@ -975,27 +1008,35 @@ function newZoneId(prefix) {
   if (prefix === "lap" && !ids.has("lap")) return "lap";
   for (let i = 1; ; i++) if (!ids.has(prefix + i)) return prefix + i;
 }
-function zoneTap(w) {
+/* a tap on the map (tolPx: hit radius for SELECT / DELETE) or PLACE AT KART (atKart = true: the
+   PLACE tool stays armed so several zones can be dropped while driving / walking the course) */
+function zoneTap(w, tolPx, atKart) {
   if (!S || !S.fleet.origin) { toast("No map origin yet: wait for a GPS fix", true); return; }
-  const g = geo(), here = g.ll(w[0], w[1]);
+  const g = geo();
+  let here = g.ll(w[0], w[1]);
   const t = zed.tool;
   if (t === "track") {
     if (!zed.track) zed.track = { points: [], closed: false, width_m: 6 };
     if (zed.track.points.length >= 200) { toast("Track is limited to 200 points", true); return; }
     zed.track.points.push(here); zed.dirty = true;
+    zed.undo = { kind: "point", n: zed.track.points.length, what: "track point" };
     if (S) { drawMap(); updateZoneBar(); }
     return;
   }
   if (t === "boost" || t === "mud" || t === "item") {
+    const [sw, snapped] = snapW(w);
+    if (snapped) here = g.ll(sw[0], sw[1]);
     const z = t === "boost"
       ? { id: newZoneId("b"), type: "boost", name: "Boost pad", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.boost, scale: 1.0, secs: 5, cooldown_s: 20 }
       : t === "item"
         ? { id: newZoneId("i"), type: "item", name: "Item box", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.item, cooldown_s: 15 }
         : { id: newZoneId("m"), type: "mud", name: "Mud", shape: "circle", lat: here[0], lon: here[1], r_m: ZONE_DEFAULT_R.mud, scale: 0.5 };
     zed.draft.push(z); zed.sel = z.id; zed.dirty = true;
-    setZoneTool("select");
+    zed.undo = { kind: "zone", id: z.id, what: z.name.toLowerCase() };
+    if (atKart) { toast(`${z.name} placed${snapped ? " on the track" : ""}`); }
+    else setZoneTool("select");
   } else if (t === "lapline") {
-    if (!zed.lapA) { zed.lapA = here; }
+    if (!zed.lapA) { zed.lapA = here; zed.undo = { kind: "lapA", what: "lap line end" }; if (atKart) toast("Lap line: first end set, move to the other end"); }
     else {
       const a = g.en(zed.lapA[0], zed.lapA[1]);
       if (Math.hypot(w[0] - a[0], w[1] - a[1]) < 4) { toast("Lap line must be at least 4 m long", true); return; }
@@ -1003,25 +1044,100 @@ function zoneTap(w) {
       const z = { id: old ? old.id : newZoneId("lap"), type: "lapline", name: old ? old.name : "Start / finish", shape: "line",
         a: zed.lapA, b: here, min_lap_s: old && old.min_lap_s ? old.min_lap_s : 20 };
       zed.draft = zed.draft.filter((q) => q.type !== "lapline").concat([z]);   // one lap line per course
+      zed.undo = { kind: "lapline", id: z.id, prev: old ? JSON.parse(JSON.stringify(old)) : null, what: "lap line" };
       zed.lapA = null; zed.sel = z.id; zed.dirty = true;
+      if (atKart) toast("Lap line placed");
       setZoneTool("select");
     }
   } else if (t === "delete") {
-    const hit = zoneAt(w);
-    if (hit) { zed.draft = zed.draft.filter((z) => z !== hit); if (zed.sel === hit.id) zed.sel = null; zed.dirty = true; }
+    const hit = zoneAt(w, tolPx);
+    if (hit) {
+      zed.draft = zed.draft.filter((z) => z !== hit); if (zed.sel === hit.id) zed.sel = null; zed.dirty = true;
+      if (zed.undo && zed.undo.id === hit.id && zed.undo.kind === "zone") zed.undo = null;
+    }
   } else {
-    const hit = zoneAt(w);
+    const hit = zoneAt(w, tolPx);
     zed.sel = hit ? hit.id : null;
   }
   if (S) { drawMap(); updateZoneBar(); }
 }
-function setZoneTool(t) { zed.tool = t; zed.lapA = null; updateZoneBar(); }
+function setZoneTool(t) {
+  if (zed.lapA && zed.undo && zed.undo.kind === "lapA") zed.undo = null;
+  zed.tool = t; zed.lapA = null; updateZoneBar();
+}
+/* UNDO: take back the last placement of this editing session (one level) */
+function undoPlacement() {
+  const u = zed.undo;
+  if (!u) return;
+  zed.undo = null;
+  if (u.kind === "zone") zed.draft = zed.draft.filter((z) => z.id !== u.id);
+  else if (u.kind === "point") { if (zed.track && zed.track.points.length === u.n) { zed.track.points.pop(); if (zed.track.points.length < 3) zed.track.closed = false; } }
+  else if (u.kind === "lapA") zed.lapA = null;
+  else if (u.kind === "lapline") zed.draft = zed.draft.filter((z) => z.id !== u.id).concat(u.prev ? [u.prev] : []);
+  else if (u.kind === "auto") {
+    const ids = new Set(u.ids);
+    zed.draft = zed.draft.filter((z) => !ids.has(z.id)).concat(u.prev);
+    toast("Auto boxes taken back: SAVE to keep the old boxes");
+  }
+  if (zed.sel && !zed.draft.some((z) => z.id === zed.sel)) zed.sel = null;
+  zed.dirty = true;
+  if (S) { drawMap(); updateZoneBar(); }
+}
+/* PLACE AT KART: the chosen kart's latest (dead-reckoned) position, fix younger than 5 s */
+function atKartDefault() {
+  const sel = $("zAtKartSel");
+  if (!sel || sel.dataset.touched || !S) return;
+  const k = S.fleet.karts.find((q) => q.link === "online" && q.gps && q.gps.fix_fresh);
+  if (k && sel.value !== String(k.id)) sel.value = String(k.id);
+}
+function placeAtKart() {
+  if (!S || !S.fleet.origin) { toast("No map origin yet: wait for a GPS fix", true); return; }
+  if (!["boost", "mud", "item", "lapline", "track"].includes(zed.tool)) {
+    toast("Pick BOOST PAD, MUD, ITEM BOX, LAP LINE or TRACK first", true); return;
+  }
+  const id = Number($("zAtKartSel").value), k = S.fleet.karts[id - 1];
+  const f = k && k.gps && k.gps.last_fix;
+  const age = k && k.gps ? k.gps.fix_age_s : null;
+  if (!f || k.link !== "online" || nul(age) || age >= AT_KART_FRESH_S) {
+    toast(`K${id} has no fresh GPS fix${nul(age) ? "" : ` (last ${ageText(age)} ago)`}: wait for one or pick another kart`, true); return;
+  }
+  const en = geo().en;
+  zoneTap(drPosition(k, performance.now(), en) || en(f.lat, f.lon), 0, true);
+}
+/* AUTO BOXES: the server spreads N item boxes along the SAVED track (POST /zones/auto_boxes) */
+function autoBoxN() {
+  const v = Math.round(Number(($("zAutoN") || {}).value));
+  return Number.isFinite(v) && v >= 1 && v <= 20 ? v : 3;
+}
+function autoBoxes() {
+  const n = autoBoxN();
+  const prev = JSON.parse(JSON.stringify(zed.draft.filter((z) => z.type === "item")));
+  const run = () => post("/zones/auto_boxes", { n }).then((j) => {
+    if (!j || !j.ok) return;
+    if (S) S.zones = j.zones;
+    zoneEdit(true);                                      // reload the editor from the saved document
+    zed.undo = { kind: "auto", ids: j.boxes, prev, what: "auto boxes" };
+    updateZoneBar();
+    toast(`${j.boxes.length} item boxes placed along the track (zones v${j.zones.version})`);
+  });
+  const items = prev.length ? `replace the ${prev.length} item box${prev.length === 1 ? "" : "es"} with ` : "place ";
+  if (zed.dirty) {
+    if (zonesDoc().version !== zed.baseVersion && !confirm("Zones were changed elsewhere since you started editing. Overwrite them?")) return;
+    if (!confirm(`AUTO BOXES works on the saved course. Save your edits now, then ${items}${n} boxes along the track?`)) return;
+    const trk = zed.track && zed.track.points.length >= 2 ? zed.track : null;
+    if (trk && trk.closed && trk.points.length < 3) { toast("A closed track needs at least 3 points", true); return; }
+    post("/zones", { enabled: zonesDoc().enabled, zones: zed.draft, track: trk }).then((j) => { if (j && j.ok) { if (S) S.zones = j.zones; run(); } });
+  } else {
+    if (prev.length && !confirm(`Replace the ${prev.length} item box${prev.length === 1 ? "" : "es"} with ${n} boxes spread along the track?`)) return;
+    run();
+  }
+}
 function zoneEdit(on) {
   if (on) {
     zed.draft = JSON.parse(JSON.stringify(zonesDoc().zones));
     zed.track = zonesDoc().track ? JSON.parse(JSON.stringify(zonesDoc().track)) : null;
     zed.baseVersion = zonesDoc().version;
-    zed.sel = null; zed.lapA = null; zed.dirty = false; zed.tool = "select";
+    zed.sel = null; zed.lapA = null; zed.dirty = false; zed.tool = "select"; zed.undo = null;
     view.fit = false;                        // keep the view still while placing zones
   }
   zed.on = on;
@@ -1051,9 +1167,9 @@ function updateMobileMap() {
   paceWasRec = rec;
 }
 const ZONE_HINT = {
-  boost: "Tap the map to place a boost pad (5 m)", mud: "Tap the map to place a mud patch (6 m)",
-  track: "Tap points along the centreline in driving order, then CLOSE LOOP",
-  item: "Tap the map to place an item box (4 m)",
+  boost: "Tap the map (or PLACE AT KART) to place a boost pad (5 m)", mud: "Tap the map (or PLACE AT KART) to place a mud patch (6 m)",
+  track: "Tap points along the centreline in driving order (or PLACE AT KART), then CLOSE LOOP",
+  item: "Tap the map (or PLACE AT KART) to place an item box (4 m)",
   lapline: "Tap one end of the start/finish line, then the other end", delete: "Tap a zone to delete it",
   select: "Tap a zone to select it, drag it to move; drag empty map to pan",
 };
@@ -1072,10 +1188,29 @@ function updateZoneBar() {
   $("zRadiusVal").textContent = z && z.shape === "circle" ? `${Math.round(z.r_m)} m` : "--";
   $("zSel").textContent = z ? `${z.type.toUpperCase()} ${z.id}` : "nothing selected";
   const counts = ["boost", "mud", "lapline", "item"].map((t) => zed.draft.filter((q) => q.type === t).length);
-  $("zHint").textContent = zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line"
+  const hasTrack = !!(zed.track && zed.track.points.length >= 2);
+  const empty = !zed.draft.length && !(zed.track && zed.track.points.length);
+  const fresh = empty && zed.tool === "select";         // guided first step
+  setText($("zHint"), zed.tool === "lapline" && zed.lapA ? "Now tap the other end of the line (or PLACE AT KART there)"
     : zed.tool === "track" && zed.track && zed.track.closed ? "Track is a closed loop: new taps add points after the last one (UNDO POINT / OPEN LOOP / CLEAR)"
-      : ZONE_HINT[zed.tool];
-  $("zHint").dataset.tool = zed.tool;
+      : fresh ? "No course yet: record one with PACE CAR (drive a lap), or tap TRACK and tap along the course"
+        : ZONE_HINT[zed.tool]);
+  $("zHint").dataset.tool = fresh ? "start" : zed.tool;
+  if ($("zPaceGo")) $("zPaceGo").classList.toggle("hidden", !fresh);
+  if ($("zUndo")) { $("zUndo").disabled = !zed.undo; $("zUndo").title = zed.undo ? `Undo the last ${zed.undo.what}` : "Nothing to undo"; }
+  if ($("zSnap")) { $("zSnap").classList.toggle("sel", zSnap); $("zSnap").setAttribute("aria-pressed", String(zSnap)); $("zSnap").disabled = !hasTrack; }
+  if ($("zAuto")) {
+    $("zAuto").disabled = !hasTrack;
+    setText($("zAutoHint"), hasTrack ? "" : "needs a track");
+    const n = autoBoxN();
+    document.querySelectorAll("[data-zn]").forEach((b) => b.classList.toggle("sel", Number(b.dataset.zn) === n));
+  }
+  if ($("zAtKart")) {
+    atKartDefault();
+    const can = ["boost", "mud", "item", "lapline", "track"].includes(zed.tool);
+    $("zAtKart").classList.toggle("armed", can);
+    $("zAtKart").title = can ? "Drop the selected tool at the kart's position" : "Pick a PLACE or COURSE tool first";
+  }
   $("zCounts").textContent = `${counts[0]} boost · ${counts[1]} mud · ${counts[3]} item · ${counts[2] ? "lap line" : "no lap line"} · `
     + (zed.track && zed.track.points.length ? `track ${zed.track.points.length} pts${zed.track.closed ? " closed" : ""}` : "no track")
     + (zed.dirty ? " · UNSAVED" : "");
@@ -1097,6 +1232,8 @@ function setupZoneEditor() {
     const z = zed.draft.find((q) => q.id === zed.sel);
     if (z) { z.name = e.target.value.slice(0, 40); zed.dirty = true; if (S) drawMap(); }
   });
+  if ($("zAtKartSel")) $("zAtKartSel").addEventListener("change", (e) => { e.target.dataset.touched = "1"; });
+  if ($("zAutoN")) $("zAutoN").addEventListener("input", () => updateZoneBar());
   $("zRadius").addEventListener("input", (e) => {
     const z = zed.draft.find((q) => q.id === zed.sel);
     if (z && z.shape === "circle") { z.r_m = Number(e.target.value); zed.dirty = true; if (S) { drawMap(); updateZoneBar(); } }
@@ -1363,9 +1500,15 @@ document.addEventListener("click", (e) => {
   }
   else if (b.id === "zoneEdit") { if (zed.on && zed.dirty && !confirm("Discard unsaved zone changes?")) return; zoneEdit(!zed.on); }
   else if (b.id === "zSave") saveZones();
+  else if (b.id === "zUndo") undoPlacement();
+  else if (b.id === "zAtKart") placeAtKart();
+  else if (b.id === "zAuto") autoBoxes();
+  else if (ds.zn) { $("zAutoN").value = ds.zn; updateZoneBar(); }
+  else if (b.id === "zSnap") { zSnap = !zSnap; store.set("gk_zsnap", zSnap); updateZoneBar(); }
+  else if (b.id === "zPaceGo") { if (zed.dirty && !confirm("Discard unsaved zone changes?")) return; if (MOBILE) { zoneEdit(false); paceDrawer(true); } else { $("paceBar").scrollIntoView({ block: "nearest" }); $("pcKart").focus(); } }
   else if (b.id === "tUndo" || b.id === "tClose" || b.id === "tClear") {
-    if (b.id === "tClear") { if (zed.track && zed.track.points.length && !confirm("Clear the whole track?")) return; zed.track = null; }
-    else if (zed.track && b.id === "tUndo") { zed.track.points.pop(); if (zed.track.points.length < 3) zed.track.closed = false; }
+    if (b.id === "tClear") { if (zed.track && zed.track.points.length && !confirm("Clear the whole track?")) return; zed.track = null; if (zed.undo && zed.undo.kind === "point") zed.undo = null; }
+    else if (zed.track && b.id === "tUndo") { zed.track.points.pop(); if (zed.track.points.length < 3) zed.track.closed = false; if (zed.undo && zed.undo.kind === "point") zed.undo = null; }
     else if (zed.track && b.id === "tClose") {
       if (zed.track.points.length < 3) { toast("Add at least 3 points before closing the loop", true); return; }
       zed.track.closed = !zed.track.closed;
