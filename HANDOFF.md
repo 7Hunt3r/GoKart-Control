@@ -363,6 +363,28 @@ higher current or fault thresholds are the fix without an event log and verified
 
 ## History
 
+**2026-11-09 (evening, multiplayer freeplay)**
+- Owner: "single player and multiplayer freeplay, invite other online karts, mystery boxes give cached
+  shells etc., when close enough to another kart press it on the display and shell them into slow mode
+  for a few seconds"; then "2 boost modes: start in ECO, regular boost = NORMAL, rocket icon = SPORT".
+- Built and committed (f266445 firmware/protocol/pit, b646c20 kart Pi + dash): docs/freeplay-multiplayer.md
+  is the contract. Seven game bytes on GkTelemetry (54 bytes; 46/47 still accepted; idle karts keep sending
+  47), kart 0.2.5 `session host|join N|leave` / `attack N|all shell|lightning` with game/hit/attack lines,
+  hits = timed SLOW 5 (shell 4 s, lightning 3 s) through the 0.2.4 timed-slow path; kart Pi FreeplayGame
+  multiplayer state + POST /api/freeplay host/join/leave/use + dash UI (invite card, held-item button, HIT
+  flash, score); BOOST = `boost 5 0.75` (NORMAL), ROCKET (was SUPER) = `boost 8 1.0` (SPORT), firmware cap
+  lift follows the boost's scale.
+- Verified: tools/run_tests.sh 7 suites / 262 tests ALL PASSED; integrated headless run on the sim (kart 3
+  hosting, kart 5 joining): invite -> join -> shell held -> fired at K5 at 22.6 m -> acked, score 1 -> hit
+  by K3 -> SLOW 5 MPH banner, slow_mph 5 for 4 s then 0. Live: kart 2's Heltec on 0.2.5 by OTA 19:53 (VESC
+  link up, mode ECO, no writes at boot), `session host` -> game lines at 1 Hz, the pit on base 0.2.1 marks
+  the kart stale while it hosts (54-byte packets) and online again after `session leave`; kart Pi deployed
+  20:04 (multi.fw_ok true). Freeplay was switched off and its course reset at the kart screen at 19:59
+  (before the deploy), so the display shows freeplay OFF until the driver taps FREEPLAY again.
+- Owed: base + repeater reflash to 0.2.2 (images in firmware/releases, see Open); a second 0.2.5 kart to
+  play against (kart 1 is on Colin's old build); real-track numbers for 25 m / 4 s / 3 s.
+
+
 Condensed from the dated sections this file accumulated. Times are local (ET).
 
 **2026-11-05**
