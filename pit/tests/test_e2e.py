@@ -122,8 +122,12 @@ class EndToEnd(unittest.TestCase):
                 for marker in (b'data-page="mobile"', b'id="stopAll"', b'id="cards"', b'id="map"',
                                b'data-tab="log"', b'data-tab="map"', b'data-tab="race"', b'id="zoneBar"',
                                b'data-allmode="0"', b'id="sheet"', b'id="baseChip"', b'id="paceBar"',
-                               b'apple-mobile-web-app-capable', b"manifest.webmanifest"):
+                               b'apple-mobile-web-app-capable', b"manifest.webmanifest",
+                               b'id="zAuto"', b'id="zAtKart"', b'id="zAtKartSel"', b'id="zSnap"', b'id="zUndo"'):
                     self.assertIn(marker, body, (path, marker))
+            code, body, _ = st.request("GET", "/")                 # operator page: the same editor controls
+            for marker in (b'id="zoneBar"', b'id="zAuto"', b'id="zAtKart"', b'id="zAtKartSel"', b'id="zSnap"', b'id="zUndo"'):
+                self.assertIn(marker, body, ("/", marker))
             code, body, h = st.request("GET", "/static/manifest.webmanifest")
             self.assertEqual(code, 200)
             self.assertEqual(json.loads(body)["start_url"], "/m")
@@ -288,6 +292,7 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(st.request("GET", "/map/zones.json")[0], 200)     # kart Pis: public too
             self.assertEqual(st.request("POST", "/zones", {"zones": []})[0], 401)
             self.assertEqual(st.request("POST", "/zones/enable", {"enabled": True})[0], 401)
+            self.assertEqual(st.request("POST", "/zones/auto_boxes", {"n": 3})[0], 401)
             self.assertEqual(st.request("POST", "/laps/reset", {})[0], 401)
             self.assertEqual(st.request("POST", "/race/start", {"secs": 5})[0], 401)
             self.assertEqual(st.request("GET", "/m")[2].get("Location"), "/login?next=/m")
@@ -320,6 +325,36 @@ class EndToEnd(unittest.TestCase):
             s = st.wait(done)
             self.assertEqual(s["commands"]["last_fleet"]["outcomes"]["8"], "offline")
             self.assertEqual(s["fleet"]["karts"][7]["link"], "never")
+
+            # AUTO BOXES (logged in): every item box replaced by n boxes along the saved track
+            cur = json.loads(st.request("GET", "/map/zones.json")[1])
+            self.assertTrue(cur.get("track"), "repo zones.json is expected to carry a track")
+            code, body, _ = st.request("POST", "/zones/auto_boxes", {"n": 4})
+            self.assertEqual(code, 200, body)
+            doc = json.loads(body)["zones"]
+            self.assertEqual(doc["version"], cur["version"] + 1)
+            items = [z for z in doc["zones"] if z["type"] == "item"]
+            self.assertEqual([(z["name"], z["r_m"], z["cooldown_s"]) for z in items], [(f"Box {i}", 4.0, 15) for i in range(1, 5)])
+            self.assertEqual(json.loads(body)["boxes"], [z["id"] for z in items])
+            self.assertEqual([z["id"] for z in doc["zones"] if z["type"] != "item"],
+                             [z["id"] for z in cur["zones"] if z["type"] != "item"])            # others kept
+            self.assertEqual(doc["track"], cur["track"])
+            self.assertEqual(json.loads(st.request("GET", "/map/zones.json")[1])["version"], doc["version"])
+            self.assertEqual(json.loads(st.request("GET", "/map/package.json")[1])["zones_version"], doc["version"])
+            self.assertEqual(st.request("POST", "/zones/auto_boxes", {"n": 0})[0], 409)
+            code, body, _ = st.request("POST", "/zones/auto_boxes", {"n": 2})
+            self.assertEqual(len([z for z in json.loads(body)["zones"]["zones"] if z["type"] == "item"]), 2)
+            code, body, _ = st.request("POST", "/zones", {"zones": cur["zones"], "track": None})
+            self.assertEqual(code, 200, body)
+            v = json.loads(body)["zones"]["version"]
+            code, body, _ = st.request("POST", "/zones/auto_boxes", {"n": 3})
+            self.assertEqual(code, 409, body)
+            self.assertIn("no track", json.loads(body)["error"])
+            self.assertEqual(json.loads(st.request("GET", "/map/zones.json")[1])["version"], v)      # refused: unchanged
+            rows = json.loads(st.request("GET", "/api/log/recent?n=200")[1])
+            auto = [r for r in rows if r.get("action") == "zones_auto_boxes"]
+            self.assertEqual([r["n"] for r in auto], [4, 2])
+            self.assertTrue(auto[0]["who"].startswith("colin@"))
         finally:
             st.close()
 

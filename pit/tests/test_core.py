@@ -708,6 +708,7 @@ class PhonePageParity(unittest.TestCase):
               "raceChip gameChip sndBtn simBanner connBanner fOnline fEntered hiddenNote cards map mapNote "
               "zoneEdit zoneBar zHint zSel zName zRadius zRadiusVal tUndo tClose tClear zCounts zCancel zSave "
               "paceBar pcKart pcWidth pcLapline pcRec pcStop pcClear pcStatus pcLaps "
+              "zAtKartSel zAtKart zAuto zAutoN zAutoHint zSnap zUndo zPaceGo "
               "race laps outcomes log baseStat").split()
 
     def ids(self, name):
@@ -1280,6 +1281,67 @@ class PaceCar(unittest.TestCase):
         self.assertEqual(out[0], list(pts[0]))
         line = [at(i, 0) for i in range(50)]
         self.assertEqual(len(pc.douglas_peucker(line, 0.5)), 2)              # a straight line -> its ends
+
+
+class AutoBoxes(unittest.TestCase):
+    """pitcore.boxes_along_track: N item boxes spread by arc length along the track (ZONES editor AUTO BOXES)."""
+
+    def along(self, boxes, track):
+        proj = pc.local_en(LAT0, LON0)
+        return [proj(b["lat"], b["lon"]) for b in boxes]
+
+    def test_open_track_spacing_names_radius(self):
+        trk = {"points": [at(0, 0), at(60, 0), at(60, 30)], "closed": False, "width_m": 6}   # 90 m, an L
+        boxes = pc.boxes_along_track(trk, 3)
+        self.assertEqual(len(boxes), 3)
+        self.assertEqual([b["name"] for b in boxes], ["Box 1", "Box 2", "Box 3"])
+        self.assertEqual([b["id"] for b in boxes], ["i1", "i2", "i3"])
+        for b in boxes:
+            self.assertEqual((b["type"], b["shape"], b["r_m"], b["cooldown_s"]), ("item", "circle", 4.0, 15))
+        xy = self.along(boxes, trk)
+        # spacing 30 m, the first half a spacing (15 m) in: 15 and 45 m east, then 15 m up the leg
+        for (e, n), (we, wn) in zip(xy, [(15, 0), (45, 0), (60, 15)]):
+            self.assertAlmostEqual(e, we, delta=0.05)
+            self.assertAlmostEqual(n, wn, delta=0.05)
+        doc = pc.validate_zones({"enabled": True, "zones": boxes, "track": trk})
+        self.assertEqual(len(doc["zones"]), 3)
+
+    def test_closed_track_counts_closing_segment(self):
+        sq = [at(0, 0), at(40, 0), at(40, 40), at(0, 40)]                  # 160 m loop
+        for n in (2, 4, 6):
+            xy = self.along(pc.boxes_along_track({"points": sq, "closed": True}, n, 5), None)
+            self.assertEqual(len(xy), n)
+            gaps = [abs(xy[i + 1][0] - xy[i][0]) + abs(xy[i + 1][1] - xy[i][1]) for i in range(n - 1)]
+            for g in gaps:                                                 # equal Manhattan gaps on a square
+                self.assertAlmostEqual(g, 160 / n, delta=0.1)
+        xy = self.along(pc.boxes_along_track({"points": sq, "closed": True}, 4), None)
+        self.assertAlmostEqual(xy[0][0], 20, delta=0.05)                   # 20 m in, then one per side
+        self.assertAlmostEqual(xy[3][1], 20, delta=0.05)                   # the 4th sits on the closing side
+        self.assertAlmostEqual(xy[3][0], 0, delta=0.05)
+        open_xy = self.along(pc.boxes_along_track({"points": sq, "closed": False}, 4), None)
+        self.assertAlmostEqual(open_xy[0][0], 15, delta=0.05)              # open: 120 m, 30 m spacing
+        self.assertEqual(pc.boxes_along_track({"points": sq, "closed": True}, 2, 6)[0]["r_m"], 6.0)
+
+    def test_refusals_and_ids(self):
+        trk = {"points": [at(0, 0), at(50, 0)]}
+        for bad in (0, 21, 2.5, True, "3"):
+            with self.assertRaises(pc.ZoneError):
+                pc.boxes_along_track(trk, bad)
+        with self.assertRaises(pc.ZoneError):
+            pc.boxes_along_track(trk, 3, 2)                                 # below the 3 m minimum
+        with self.assertRaises(pc.ZoneError):
+            pc.boxes_along_track(None, 3)
+        with self.assertRaises(pc.ZoneError):
+            pc.boxes_along_track({"points": [at(0, 0), at(0.2, 0)]}, 3)     # too short
+        self.assertEqual([b["id"] for b in pc.boxes_along_track(trk, 3, taken=["i1", "i3"])], ["i2", "i4", "i5"])
+        cur = {"enabled": True, "track": trk, "zones": [
+            dict(LAPLINE), {"id": "i1", "type": "item", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 4},
+            {"id": "b1", "type": "boost", "shape": "circle", "lat": LAT0, "lon": LON0, "r_m": 5}]}
+        body, boxes = pc.auto_boxes_body(cur, 2)
+        self.assertEqual([z["id"] for z in body["zones"]], ["lap", "b1", "i1", "i2"])     # old box replaced
+        self.assertEqual(body["track"], trk)
+        with self.assertRaises(pc.ZoneError):
+            pc.auto_boxes_body({"enabled": True, "zones": []}, 3)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
