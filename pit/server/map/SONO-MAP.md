@@ -1,14 +1,18 @@
 # SoNo GUI map
 
 `map.sono.json` is a separate preview preset for Hunter's graphics branch. Select
-it with `python3 -I kart/sim/run-sim.py --map pit/server/map/map.sono.json` from the
+it with `python3 -I kart/sim/run-gui.py` from the
 repository root. It does not replace the active map, shop or Manresa presets.
-There is no course baked into the artwork; the simulator supplies a test route.
+There is no course baked into the artwork; `kart/sim/zones.gui.json` supplies a
+sample street loop to the overlay and every simulated kart. These are graphics
+fixtures, not a designated driving course. The original simulator engine and
+production server are unchanged.
 
 The 2026-11-10 refinement adds 2,024 building-outline features from the same cached
-OSM extract, including relation-member outlines. They have no fill, a thin muted
-stroke and lower contrast than streets. No address metadata is included. Map
-package version 1002 updates the PNG fallback; the active operational map remains unchanged.
+OSM extract, including relation-member outlines. Closed footprints have a faint
+6% fill (9% in high contrast), with thin muted strokes below street contrast.
+Place labels are drawn by the driver at a fixed screen size; each rail corridor uses two thin, lightly dashed lines. No address metadata is included. Map package version 1003 updates the
+PNG fallback and preview origin; the active operational map remains unchanged.
 
 `sono-map.geojson` is the local South Norwalk OpenStreetMap extract, with source
 and license metadata. Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),

@@ -4,9 +4,9 @@ Coordinates are projected linearly to the exact WGS84 outer bounds in map.sono.j
 matching the existing renderer. No route or vehicle positions are baked in.
 Source geometry and ODbL notice: sono-map.geojson and SONO-MAP.md.
 """
-import html
 import json
 import math
+import statistics
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -33,6 +33,46 @@ def path(points, closed=False):
                     for i, (x, y) in enumerate(map(project, points))) + (" Z" if closed else "")
 
 
+def rail_corridors(features):
+    """Generalize parallel OSM rail ways into two quiet corridor symbols.
+
+    Keep the original geometry in the GeoJSON; this is only cartographic styling.
+    The main line runs east/west, the branch north/south. Sample before taking
+    medians so short OSM ways do not get more weight than long ways.
+    """
+    for name, axis in (("New Haven Line", 0), ("Danbury Branch", 1)):
+        bins = {}
+        for f in features:
+            if f["properties"]["kind"] != "rail" or f["properties"].get("name") != name:
+                continue
+            points = [project(p) for p in f["geometry"]["coordinates"]]
+            for a, b in zip(points, points[1:]):
+                count = max(1, math.ceil(math.dist(a, b) / 4))
+                for i in range(count):
+                    p = [a[j] + (b[j] - a[j]) * i / count for j in (0, 1)]
+                    bins.setdefault(round(p[axis] / 8), []).append(p[1 - axis])
+        points = []
+        for k in sorted(bins):
+            p = [0, 0]
+            p[axis], p[1 - axis] = k * 8, statistics.median(bins[k])
+            points.append(p)
+        # A small moving average removes sampling steps, preserving the corridor.
+        smooth = [[sum(p[j] for p in points[max(0, i-1):i+2]) / len(points[max(0, i-1):i+2])
+                   for j in (0, 1)] for i in range(len(points))]
+        yield smooth
+
+
+def rail_pair(points, offset):
+    for side in (-1, 1):
+        out = []
+        for i, p in enumerate(points):
+            a, b = points[max(0, i-1)], points[min(len(points)-1, i+1)]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            length = math.hypot(dx, dy) or 1
+            out.append((p[0] - side * offset * dy / length, p[1] + side * offset * dx / length))
+        yield " ".join(("M" if i == 0 else "L") + f"{x:.2f},{y:.2f}" for i, (x, y) in enumerate(out))
+
+
 def render():
     features = json.loads((HERE / "sono-map.geojson").read_text())["features"]
     for name, (bg, water, road, major, rail, ink, accent) in PALETTES.items():
@@ -43,29 +83,29 @@ def render():
                  '<desc>Data: https://www.openstreetmap.org/copyright · ODbL 1.0. Area reference; no course route.</desc>',
                  f'<rect width="{WIDTH}" height="{HEIGHT}" fill="{bg}"/>']
         for kind in ("water", "building", "road", "rail", "label"):
+            if kind == "rail":
+                for corridor in rail_corridors(features):
+                    for d in rail_pair(corridor, .55 * scale):
+                        parts.append(f'<path class="rail-corridor" d="{d}" fill="none" stroke="{rail}" stroke-width="{.24*scale}" stroke-opacity="{.4 if high else .28}" stroke-dasharray="{2.5*scale} {3.5*scale}" stroke-linecap="butt"/>')
+                continue
             for f in features:
                 p, g = f["properties"], f["geometry"]
                 if p["kind"] != kind:
                     continue
                 if kind == "label":
-                    x, y = project(g["coordinates"])
-                    station = "station" in p["name"]
-                    if station:
-                        parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{4*scale}" fill="{accent}" stroke="{bg}" stroke-width="{1.5*scale}"/>')
-                        y += 18 * scale
-                    parts.append(f'<text x="{x:.2f}" y="{y:.2f}" fill="{ink}" stroke="{bg}" stroke-width="{5*scale}" paint-order="stroke" stroke-linejoin="round" text-anchor="middle" dominant-baseline="middle" font-family="Arial,sans-serif" font-size="{14*scale}">{html.escape(p["name"])}</text>')
+                    # Labels are painted by the driver at a fixed screen size.
                     continue
                 polygon = g["type"] == "Polygon"
                 d = " ".join(path(ring, True) for ring in g["coordinates"]) if polygon else path(g["coordinates"])
                 if kind == "building":
-                    parts.append(f'<path class="building-outline" d="{d}" fill="none" stroke="{rail}" stroke-width="{.32*scale}" stroke-opacity="{.4 if high else .28}" stroke-linejoin="round"/>')
+                    parts.append(f'<path class="building-outline" d="{d}" fill="{rail if polygon else "none"}" fill-opacity="{.09 if high else .06}" stroke="{rail}" stroke-width="{.32*scale}" stroke-opacity="{.4 if high else .28}" stroke-linejoin="round"/>')
                     continue
                 is_major = p["class"] in ("primary", "secondary", "tertiary", "motorway")
                 color = water if kind == "water" else rail if kind == "rail" else major if is_major else road
-                width = 1.2 if kind == "rail" else (4.5 if high else 3.5) if is_major else (2.5 if high else 2)
+                width = .7 if kind == "rail" else (4.5 if high else 3.5) if is_major else (2.5 if high else 2)
                 style = f'fill="{water}" stroke="none"' if kind == "water" and polygon else f'fill="none" stroke="{color}" stroke-width="{width*scale}"'
                 if kind == "rail":
-                    style += f' stroke-dasharray="{4*scale} {3*scale}"'
+                    style += f' stroke-dasharray="{4*scale} {3*scale}" stroke-opacity=".45"'
                 parts.append(f'<path d="{d}" {style} stroke-linecap="round" stroke-linejoin="round"/>')
         parts.append('</svg>')
         (HERE.parents[2] / "kart/server/static" / f"sono-{name}.svg").write_text("\n".join(parts) + "\n")
