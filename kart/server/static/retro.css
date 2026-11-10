@@ -147,6 +147,7 @@
 :root[data-theme] body .driver-sidebar .chips { margin-top: 0; }
 :root[data-theme="light"] body .driver-sidebar .mbtn.actual { color: #1d3e50; background: rgba(var(--mode-rgb),.65); }
 @media (max-height: 700px) and (min-width: 800px) {
+  .mapctl { gap: 5px; }
   .driver-sidebar { padding: 8px 10px; gap: 4px; }
   .driver-title, .driver-title .chip.id { min-height: 32px; height: 32px; }
   .driver-title button { min-height: 34px; }
