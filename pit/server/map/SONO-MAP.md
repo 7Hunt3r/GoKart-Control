@@ -5,6 +5,11 @@ it with `python3 -I kart/sim/run-sim.py --map pit/server/map/map.sono.json` from
 repository root. It does not replace the active map, shop or Manresa presets.
 There is no course baked into the artwork; the simulator supplies a test route.
 
+The 2026-11-10 refinement adds 2,024 building-outline features from the same cached
+OSM extract, including relation-member outlines. They have no fill, a thin muted
+stroke and lower contrast than streets. No address metadata is included. Map
+package version 1002 updates the PNG fallback; the active operational map remains unchanged.
+
 `sono-map.geojson` is the local South Norwalk OpenStreetMap extract, with source
 and license metadata. Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 available under the [Open Database License 1.0](https://opendatacommons.org/licenses/odbl/1-0/).

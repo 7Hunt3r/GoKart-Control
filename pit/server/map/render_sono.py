@@ -42,7 +42,7 @@ def render():
                  '<title>South Norwalk, Connecticut — map data © OpenStreetMap contributors</title>',
                  '<desc>Data: https://www.openstreetmap.org/copyright · ODbL 1.0. Area reference; no course route.</desc>',
                  f'<rect width="{WIDTH}" height="{HEIGHT}" fill="{bg}"/>']
-        for kind in ("water", "road", "rail", "label"):
+        for kind in ("water", "building", "road", "rail", "label"):
             for f in features:
                 p, g = f["properties"], f["geometry"]
                 if p["kind"] != kind:
@@ -57,6 +57,9 @@ def render():
                     continue
                 polygon = g["type"] == "Polygon"
                 d = " ".join(path(ring, True) for ring in g["coordinates"]) if polygon else path(g["coordinates"])
+                if kind == "building":
+                    parts.append(f'<path class="building-outline" d="{d}" fill="none" stroke="{rail}" stroke-width="{.32*scale}" stroke-opacity="{.4 if high else .28}" stroke-linejoin="round"/>')
+                    continue
                 is_major = p["class"] in ("primary", "secondary", "tertiary", "motorway")
                 color = water if kind == "water" else rail if kind == "rail" else major if is_major else road
                 width = 1.2 if kind == "rail" else (4.5 if high else 3.5) if is_major else (2.5 if high else 2)
