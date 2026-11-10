@@ -7,13 +7,16 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="GoKart Pit">
-<meta name="theme-color" content="#111111">
+<meta name="theme-color" content="#293744">
 <meta name="format-detection" content="telephone=no">
 <title>GoKart Pit</title>
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/icon-180.png">
 <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/font-segments.css">
+<link rel="stylesheet" href="/static/display-theme.css">
+<link rel="stylesheet" href="/static/retro.css">
 </head>
 <body class="mobile" data-page="mobile">
 <!-- phone page (/m): every feature of the operator page, one-handed, portrait and landscape.
@@ -35,7 +38,8 @@
     </div>
     <div class="mpin">
       <button id="gameChip" class="chip gamechip off">GAME OFF</button>
-      <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
+      <button type="button" class="display-open" data-display-open>Display</button>
+  <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
     </div>
     <span id="clock" class="hidden"></span>
   </div>
@@ -126,5 +130,6 @@
 <script src="/static/watch.js"></script>
 <script src="/static/sound.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/display.js"></script>
 </body>
 </html>

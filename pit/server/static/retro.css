@@ -1,0 +1,200 @@
+/* Pit presentation only. Palette, fonts and Display controls are shared with the driver. */
+:root {
+  --bg: #0c1213; --panel: var(--display-panel); --line: var(--display-line); --radius: 6px;
+  --ok: #83d6a8; --warn: #f1c55f; --bad: #ff7970; --stale: #93a29d; --info: #83c9ed;
+  --map-ground: #202b33;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+:root[data-theme="light"] { --bg: #e5e9df; --ok: #246643; --warn: #77520a; --bad: #b12e26; --stale: #65756e; --info: #1d5877; --map-ground: #e5e9df; }
+:root[data-contrast="high"] { --panel: var(--hud); --stats-bg: var(--hud); --ink: var(--display-text); --muted: var(--display-muted); }
+body { font: 400 16px/1.35 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+button, input, select, textarea { font-family: inherit; }
+button { border-width: 1px; font-weight: 600; letter-spacing: .015em; border-radius: 5px; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--retro-cyan); outline-offset: 3px; }
+button.sel, .racegrid button.sel, .zgroup button.sel, body.mobile .mtabs button.sel { background: var(--retro-cyan); color: var(--display-selected); border-color: var(--retro-cyan); }
+input, select, textarea { color: var(--ink); background: var(--stats-bg); accent-color: var(--retro-cyan); border-color: var(--line); }
+a { color: var(--retro-cyan); }
+.topbar, body.kiosk .topbar { background: var(--panel); color: var(--ink); border-bottom: 1px solid var(--line); min-height: 56px; gap: 8px; padding: 8px 12px; }
+.topbar .title { font-size: 24px; font-weight: 700; letter-spacing: -.035em; }
+.topbar .sm { color: var(--muted); }
+.chip, body.kiosk .chip, body.mobile .mstrip .chip, .badge {
+  font-family: inherit; font-weight: 600; letter-spacing: .025em; border-width: 1px; border-radius: 4px;
+}
+.chip, .topbar .chip, body.mobile .mstrip .chip { background: transparent; color: var(--muted); border-color: var(--line); }
+.chip.ok, body.mobile .mstrip .chip.ok { color: var(--ok); background: color-mix(in srgb,var(--ok) 10%,transparent); border-color: color-mix(in srgb,var(--ok) 50%,transparent); }
+.chip.warn, body.mobile .mstrip .chip.warn { color: var(--warn); background: color-mix(in srgb,var(--warn) 10%,transparent); border-color: var(--warn); }
+.chip.bad, body.mobile .mstrip .chip.bad { color: var(--bad); background: color-mix(in srgb,var(--bad) 10%,transparent); border-color: var(--bad); }
+.chip.stale, body.mobile .mstrip .chip.stale { color: var(--stale); background: var(--stats-bg); border-color: var(--line); }
+.chip.info, body.mobile .mstrip .chip.info { color: var(--info); background: color-mix(in srgb,var(--info) 10%,transparent); border-color: var(--info); }
+.chip.gamechip.on, body.mobile .mstrip .chip.gamechip.on { background: #f1c55f; color: #172a27; border-color: #f1c55f; }
+.chip.gamechip.off { color: var(--muted); border-color: var(--line); }
+.toggle, body.kiosk .topbar > .toggle { background: var(--stats-bg); color: var(--ink); border-color: var(--line); min-height: 44px; }
+.toggle.sel { background: var(--retro-cyan); color: var(--display-selected); }
+.display-open { min-height: 44px; flex: none; padding: 6px 10px; font-size: 14px; font-weight: 500; }
+.banner.bad { background: #b12e26; color: #fff; }
+.banner.sim { font-size: 13px; padding: 3px 10px; }
+.fleetbar, body.mobile .mfleet { background: var(--stats-bg); border-bottom: 1px solid var(--line); gap: 8px; padding: 8px 12px; }
+.fleetbar button, body.kiosk .fleetbar button { min-height: 60px; min-width: 0; padding: 6px 16px; }
+.stopall, .hold.stopall, .kbtns .b-stop { background: #b12e26; border-color: #e76b63; color: #fff; }
+.startall, .hold.startall, .kbtns .b-start, .zsave, .confirm .cgo { background: #286248; border-color: #83d6a8; color: #fff; }
+.hold.slowall, .b-slow { background: #f1c55f; border-color: #f1c55f; color: #172a27; }
+.hold.boostall, .b-boost { background: #ffad7c; border-color: #ffad7c; color: #172a27; }
+.hold small { margin-top: 3px; font-weight: 400; letter-spacing: .02em; }
+/* The same green / blue / orange profile family as the driver screen. */
+[data-allmode="0"], [data-c="mode"][data-a="0"], [data-racemode="0"] { --mode-color: var(--mode-eco); --mode-rgb: var(--mode-eco-rgb); }
+[data-allmode="1"], [data-c="mode"][data-a="1"], [data-racemode="1"] { --mode-color: var(--mode-normal); --mode-rgb: var(--mode-normal-rgb); }
+[data-allmode="2"], [data-c="mode"][data-a="2"], [data-racemode="2"] { --mode-color: var(--mode-sport); --mode-rgb: var(--mode-sport-rgb); }
+body [data-allmode], body.mobile [data-allmode], body [data-c="mode"], body [data-racemode] {
+  position: relative; background: rgba(var(--mode-rgb),.1); color: var(--mode-color); border-color: rgb(var(--mode-rgb));
+}
+body [data-allmode]::before, body [data-c="mode"]::before, body [data-racemode]::before { content: ''; position: absolute; width: 16px; height: 2px; top: 5px; left: 8px; background: currentColor; }
+body [data-c="mode"].sel, body [data-racemode].sel { color: var(--display-text); background: linear-gradient(135deg,rgba(var(--mode-rgb),.45),rgba(var(--mode-rgb),.18)); border-color: rgb(var(--mode-rgb)); }
+/* Instrument cards: an ample reading row, fine rules and calmer supporting text. */
+.card, body.kiosk .card, body.mobile .card { background: repeating-linear-gradient(0deg,var(--scan) 0 1px,transparent 1px 4px),var(--panel); border: 1px solid var(--line); border-top: 2px solid var(--retro-cyan); padding: 14px; min-width: 0; border-radius: 8px; }
+.card.offline, .card.never { background: var(--stats-bg); border-top-color: var(--stale); }
+.card.stale { border-style: dashed; }
+.card .hdr, body.kiosk .card .hdr { min-height: 32px; gap: 7px; }
+.swatch, body.kiosk .swatch, body.mobile .swatch { width: 32px; height: 32px; flex: none; font-size: 20px; font-weight: 600; border: 2px solid #132320; border-radius: 50%; text-shadow: none; color: #071410; }
+.card .chip, body.kiosk .card .chip { height: 27px; font-size: 12px; padding: 0 6px; }
+.card .bigrow { background: var(--stats-bg); margin: 12px 0; padding: 14px 0; border-block: 1px solid var(--line); gap: 10px; }
+.card .big, body.kiosk .card .big, body.mobile .card .big { font: 400 30px/1.2 DSEG7,monospace; letter-spacing: -.02em; }
+.card .bigrow > span { min-width: 0; }
+.card .bigrow > span:first-child { display: flex; flex-direction: column; gap: 8px; }
+.card .bigrow .spd .big { font-weight: 700; }
+.card .unit { font-size: 13px; font-weight: 500; color: var(--retro-amber); margin-left: 7px; text-transform: uppercase; letter-spacing: .045em; }
+.card .wtag { display: block; font-size: 10px; font-weight: 500; border: 0; padding: 0; margin: 6px 0 0; text-align: right; }
+.card .stat, body.kiosk .card .stat { font-size: 13px; line-height: 1.55; gap: 8px; }
+.card .stat > * { white-space: normal; overflow-wrap: anywhere; }
+.card .stat + .stat { margin-top: 4px; }
+.card .faultline, .outcome { font-weight: 500; }
+.card .stat b, .mmode b { font-weight: 600; }
+.badge { height: 24px; font-size: 11px; padding: 0 5px; }
+.badge.fault, .badge.stopped, .badge.grid { background: #b12e26; border-color: #e76b63; color: #fff; }
+.badge.grey, .badge.lap { background: var(--stats-bg); border-color: var(--line); color: var(--ink); }
+.badge.entered { background: var(--info); color: var(--display-selected); }
+.badge.slow, .badge.unknown, .badge.warnb { background: #f1c55f; color: #172a27; }
+.lbl { font-size: 13px; font-weight: 500; letter-spacing: .045em; line-height: 1.4; }
+.sm, .note { font-size: 14px; line-height: 1.5; }
+.note { color: var(--muted); }
+.panel, .sheet .inner, body.login form, .confirm .cbox { border: 1px solid var(--line); border-top: 2px solid var(--retro-cyan); border-radius: 8px; background: var(--panel); padding: 16px; }
+.panel h3, .laph { font-size: 20px; font-weight: 600; letter-spacing: -.015em; margin-bottom: 12px; }
+.mapwrap { overflow: hidden; }
+canvas.map { background: var(--map-ground); }
+.mapctl { top: 12px; right: 12px; gap: 6px; }
+.mapctl button { background: var(--hud-soft); color: var(--ink); min-height: 46px; min-width: 46px; font-size: 18px; font-weight: 500; }
+.maplaps { box-shadow: 0 4px 16px rgba(20,24,51,.14); top: 12px; left: 12px; background: var(--hud-soft); color: var(--ink); border: 1px solid var(--line); min-width: 170px; max-width: calc(100% - 185px); }
+.maplaps .mlhead { background: transparent; color: var(--muted); font-size: 14px; font-weight: 500; letter-spacing: .06em; min-height: 42px; border-bottom: 1px solid var(--line); }
+.maplaps .mlrow { grid-template-columns: 20px 30px 38px 1fr; padding: 5px 8px; gap: 6px; font-size: 15px; font-weight: 500; }
+.maplaps .mlrow .lsw, .lsw, table.laps .lsw { border-radius: 50%; width: 28px; min-width: 28px; height: 28px; line-height: 24px; font-size: 16px; font-weight: 600; text-shadow: none; }
+.map-attribution { position: absolute; bottom: 5px; right: 50px; background: var(--hud-soft); padding: 2px 5px; font-size: 10px; color: var(--muted); z-index: 1; }
+/* Kiosk keeps the track prominent; the fleet scrolls instead of shrinking readings. */
+body.kiosk { cursor: auto; height: 100dvh; }
+body.kiosk .main { grid-template-columns: minmax(0,38fr) minmax(0,62fr); gap: 10px; padding: 10px; }
+body.kiosk .cards { grid-template-columns: minmax(0,1fr); grid-template-rows: none; grid-auto-rows: min-content; align-content: start; overflow-y: auto; gap: 10px; padding: 0 4px 0 0; scrollbar-color: var(--line) transparent; }
+body.kiosk .card { overflow: visible; }
+body.kiosk .right { padding: 0; gap: 8px; min-width: 0; }
+body.kiosk .tabs button { min-height: 46px; letter-spacing: .05em; font-size: 14px; font-weight: 500; }
+body.kiosk .tabpane { scrollbar-color: var(--line) transparent; }
+body.kiosk .log { height: auto; }
+@media (min-width: 1400px) {
+  body.kiosk .main { grid-template-columns: minmax(0,42fr) minmax(0,58fr); }
+  body.kiosk .cards { grid-template-columns: repeat(2,minmax(0,1fr)); grid-auto-rows: minmax(235px,1fr); }
+  body.kiosk .card .big { font-size: 34px; }
+  body.kiosk .card .stat { font-size: 14px; line-height: 1.6; }
+}
+body.op .cards { grid-template-columns: repeat(auto-fill,minmax(320px,1fr)); padding: 12px; gap: 12px; }
+body.op .lower { grid-template-columns: minmax(0,1.6fr) minmax(360px,1fr); padding: 0 12px 12px; gap: 12px; }
+body.op .mapwrap { height: 650px; }
+/* Tables, race controls, editor and detail surfaces share the same type hierarchy. */
+table.cmds, table.laps, .pclaps table { font-size: 15px; }
+table.cmds th, table.laps th, .pclaps th { font-size: 12px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+table.cmds td, table.cmds th, table.laps td, table.laps th, .pclaps td, .pclaps th { border-color: var(--line); padding: 9px 6px; }
+table.laps td { font-weight: 500; }
+table.laps td.pos { font-size: 24px; font-weight: 600; }
+table.laps td.fast { color: var(--retro-cyan); }
+table.laps tr.lead td.gap { color: var(--retro-amber); font-weight: 600; }
+.ocells { gap: 8px; margin: 12px 0; }
+.ocell { background: var(--stats-bg); border: 1px solid var(--line); padding: 10px; font-size: 15px; font-weight: 500; }
+.ocell .k { font-size: 13px; margin-bottom: 8px; }
+.racegrid, .racesecs { gap: 8px; }
+.racegrid button, .racesecs button { min-height: 56px; }
+.racestartbtn, .newrace, body.mobile .mdetail, body.mobile .sheet [data-close] { background: var(--retro-cyan); color: var(--display-selected); border-color: var(--retro-cyan); }
+.racestopbtn { background: var(--panel); color: var(--bad); border: 1px solid var(--bad); }
+.resetlaps { background: var(--stats-bg); }
+.results { border: 1px solid var(--line); }
+.log { font: 400 14px/1.65 Menlo,monospace; color: var(--muted); }
+.sheet .inner { max-height: 92dvh; overflow: auto; width: 900px; padding: 20px; }
+.sheet .grid2, body.mobile .sheet .grid2 { gap: 0; border: 1px solid var(--line); margin: 16px 0; background: var(--stats-bg); }
+.sheet .grid2 > div { padding: 14px 10px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.sheet .grid2 .lbl { margin-bottom: 8px; font-size: 12px; }
+.sheet .grid2 > div > div:last-child { font-size: 18px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.sheet .kbtns button { min-height: 60px; font-size: 17px; }
+.zonebar, body.mobile .mdrawer, body.mobile .mdhead { background: var(--stats-bg); border-color: var(--line); }
+.zgroup { background: var(--panel); border-width: 1px; }
+.zgroup button, .zgroup select, .zauto input, .zchip, .pacebar select { background: var(--panel); color: var(--ink); border-color: var(--line); font-weight: 500; }
+.zgroup .zglbl { background: var(--stats-bg); border-right: 1px solid var(--line); font-weight: 500; }
+.zhint, .zradval { background: var(--display-text); color: var(--display-selected); font-weight: 500; }
+.zprops label, .pacebar label, .zsel, .mdtitle { font-weight: 500; }
+.pacebar, .kexp { border-color: var(--line); }
+.confirm .ctitle { font-weight: 600; }
+.confirm .cgo { font-weight: 700; font-style: normal; }
+.countdown { font-family: inherit; }
+.cdtext { font-family: DSEG7,monospace; font-weight: 700; }
+/* Phone: generous touch targets and the same surfaces in both orientations. */
+body.mobile .mhead, body.mobile .mstrip, body.mobile .mpin, body.mobile .mtabs { background: var(--panel); color: var(--ink); }
+body.mobile .mpin { box-shadow: -10px 0 10px -4px var(--panel); gap: 4px; padding-left: 4px; }
+body.mobile .mstrip { height: 50px; }
+body.mobile .display-open { min-height: 40px; padding: 4px 7px; font-size: 12px; }
+body.mobile .mpin .chip { font-size: 11px; padding: 0 6px; }
+body.mobile .mtabs button { background: var(--stats-bg); color: var(--ink); border-color: var(--line); font-weight: 500; }
+body.mobile .card .mrow { background: var(--stats-bg); border-block: 1px solid var(--line); padding: 16px 0; margin: 10px 0; align-items: center; }
+body.mobile .mvolts { display: block; font-size: 14px; font-weight: 400; margin-top: 8px; }
+body.mobile .mmode { max-width: 48%; font-size: 14px; text-align: right; }
+body.mobile .card .row.sm { font-size: 14px; margin-top: 6px; }
+body.mobile .chev { border-top-color: var(--muted); }
+body.mobile .sheet .inner { border-width: 2px 1px 0; }
+body.mobile .sheet .inner > .hdr { border-bottom: 1px solid var(--line); }
+body.mobile .mlinks a { border-width: 1px; font-weight: 500; }
+body.mobile .maplaps { max-width: calc(100% - 82px); min-width: 150px; }
+body.mobile #tab-map .mapctl { flex-direction: column; }
+body.mobile .mdrawer { border-width: 1px; }
+body.login form { width: 420px; padding: 28px; gap: 16px; }
+body.login h2 { font-size: 32px; font-weight: 600; letter-spacing: -.035em; }
+body.login input { background: var(--stats-bg); border: 1px solid var(--line); border-radius: 4px; min-height: 54px; }
+body.login button[type="submit"] { background: var(--retro-cyan); color: var(--display-selected); min-height: 56px; }
+.login-display { position: fixed; right: 16px; top: 16px; font-weight: 500; }
+.display-dialog { width: 360px; }
+@media (max-width: 820px) { body.op .lower { grid-template-columns: minmax(0,1fr); } body.op .mapwrap { height: 480px; } }
+@media (max-width: 600px) { .sheet .grid2 { grid-template-columns: repeat(2,minmax(0,1fr)); } .sheet .inner { padding: 12px; } .sheet .kbtns button { font-size: 14px; } }
+@media (orientation: landscape) and (max-height: 500px) { body.mobile .mstrip { height: 44px; } }
+:root[data-contrast="high"] .card, :root[data-contrast="high"] .panel, :root[data-contrast="high"] button { border-width: 2px; }
+
+:root[data-theme="dark"][data-contrast="standard"] .card .big { color: var(--num); text-shadow: 0 0 6px rgba(164,229,238,.16); }
+:root[data-theme="dark"][data-contrast="standard"] .card .big.old { color: var(--stale); text-shadow: none; }
+:root[data-theme="dark"][data-contrast="standard"] [data-c="mode"],
+:root[data-theme="dark"][data-contrast="standard"] [data-allmode] { box-shadow: inset 0 0 8px rgba(var(--mode-rgb),.08); }
+
+@media (max-height: 760px) {
+  .maplaps { min-width: 154px; }
+  .maplaps .mlrow { font-size: 13px; grid-template-columns: 16px 26px 32px 1fr; gap: 4px; padding: 3px 6px; }
+  #mapLapsBody { max-height: 145px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+}
+
+body [data-allmode], body [data-c="mode"], body [data-racemode] { border-radius: 8px; font-weight: 500; }
+body [data-allmode]::before, body [data-c="mode"]::before, body [data-racemode]::before { display: none; }
+:root[data-theme="light"] [data-c="mode"].sel, :root[data-theme="light"] [data-racemode].sel { color: #1d3e50; background: rgba(var(--mode-rgb),.65); }
+/* Standings have their own strip above the canvas, never covering the course. */
+.mapwrap:has(> .maplaps:not(.hidden)) { padding-top: 88px !important; }
+body .maplaps, body.mobile .maplaps {
+  left: 12px; right: 12px; top: 10px; width: auto; min-width: 0; max-width: none;
+  height: 68px; display: flex; align-items: stretch; overflow: hidden;
+  background: var(--hud); box-shadow: none;
+}
+body .maplaps .mlhead { flex: 0 0 80px; width: 80px; border-bottom: 0; border-right: 1px solid var(--line); border-radius: 0; font-size: 12px; }
+body .maplaps #mapLapsBody { display: flex; min-width: 0; overflow-x: auto; overflow-y: hidden; max-height: none; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+body .maplaps .mlrow { flex: 0 0 auto; grid-template-columns: 18px 28px 36px auto; font-size: 13px; gap: 5px; padding: 10px; border-right: 1px solid var(--line); }
+.mapwrap:has(> .maplaps:not(.hidden)) .mapctl { top: 100px; }
+.mapwrap:has(> .maplaps:not(.hidden) #mapLapsBody.hidden) { padding-top: 56px !important; }
+.maplaps:has(#mapLapsBody.hidden) { height: 40px; }
+body .maplaps:has(#mapLapsBody.hidden) .mlhead { width: 100%; flex: 1; border: 0; }
+.mapwrap:has(> .maplaps:not(.hidden) #mapLapsBody.hidden) .mapctl { top: 68px; }

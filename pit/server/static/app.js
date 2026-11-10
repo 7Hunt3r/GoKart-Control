@@ -517,6 +517,23 @@ function drPosition(k, now, en) {
 }
 let mapImg = null, mapImgSrc = null;
 const bgCache = { key: null, cv: null };
+// Canvas colors follow the same display tokens as the driver, without changing map data.
+let mapPalette;
+function refreshMapPalette() {
+  const css = getComputedStyle(document.documentElement);
+  mapPalette = { ink: css.getPropertyValue("--ink").trim(), hud: css.getPropertyValue("--hud").trim(),
+    muted: css.getPropertyValue("--muted").trim(), cyan: css.getPropertyValue("--retro-cyan").trim() };
+}
+refreshMapPalette();
+window.addEventListener("gokart-display-change", () => {
+  refreshMapPalette(); bgCache.key = null;
+  if (S) drawMap();
+});
+function pitMapImage(map) {
+  if (!map.image || !map.image.endsWith("/sono-light.png")) return map.image;
+  const root = document.documentElement;
+  return `/static/sono-${root.dataset.theme === "light" ? "light" : "dark"}${root.dataset.contrast === "high" ? "-high" : ""}.svg`;
+}
 const R_EARTH = 6371000;
 function niceStep(m) { const steps = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000]; return steps.find((s) => s >= m) || 5000; }
 
@@ -532,7 +549,7 @@ function drawMap() {
   const o = S.fleet.origin;
   const note = $("mapNote");
   if (!o) {
-    ctx.fillStyle = "#333"; ctx.font = "bold 16px sans-serif";
+    ctx.fillStyle = mapPalette.muted; ctx.font = '500 16px "Helvetica Neue", Helvetica, Arial, sans-serif';
     ctx.fillText("No position yet: waiting for a base or kart GPS fix", 12, 30);
     if (note) note.textContent = "";
     return;
@@ -567,7 +584,12 @@ function drawMap() {
   // every frame was the kiosk's main CPU cost on the Pi 4: it is drawn once per view into an
   // offscreen canvas the size of the map and copied from there.
   if (M.image && M.bounds) {
-    if (mapImgSrc !== M.image) { mapImgSrc = M.image; mapImg = new Image(); mapImg.src = M.image; bgCache.key = null; }
+    const imageSource = pitMapImage(M);
+    if (mapImgSrc !== imageSource) {
+      mapImgSrc = imageSource; mapImg = new Image();
+      mapImg.onload = () => { bgCache.key = null; if (S) drawMap(); };
+      mapImg.src = imageSource; bgCache.key = null;
+    }
     if (mapImg && mapImg.complete && mapImg.naturalWidth) {
       const a = px(en(M.bounds.north, M.bounds.west)), b = px(en(M.bounds.south, M.bounds.east));
       const key = [mapImgSrc, cv.width, cv.height, a.map((v) => v.toFixed(1)), b.map((v) => v.toFixed(1))].join();
@@ -577,14 +599,14 @@ function drawMap() {
         const bx = bgCache.cv.getContext("2d");
         bx.setTransform(dpr, 0, 0, dpr, 0, 0);
         bx.clearRect(0, 0, W, H);
-        bx.globalAlpha = 0.9; bx.drawImage(mapImg, a[0], a[1], b[0] - a[0], b[1] - a[1]);
+        bx.globalAlpha = 1; bx.drawImage(mapImg, a[0], a[1], b[0] - a[0], b[1] - a[1]);
         bgCache.key = key;
       }
       ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(bgCache.cv, 0, 0); ctx.restore();
     }
   }
   if (M.course && M.course.length > 1) {
-    ctx.strokeStyle = "#111"; ctx.lineWidth = 3; ctx.setLineDash([8, 6]); ctx.beginPath();
+    ctx.strokeStyle = mapPalette.muted; ctx.lineWidth = 2; ctx.setLineDash([8, 6]); ctx.beginPath();
     M.course.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
     ctx.stroke(); ctx.setLineDash([]);
   }
@@ -593,45 +615,68 @@ function drawMap() {
   drawPaceTrail(ctx, px, en);
   if (base && base.fix && !nul(base.lat)) {
     const b = px(en(base.lat, base.lon));
-    ctx.fillStyle = "#000"; ctx.fillRect(b[0] - 7, b[1] - 7, 14, 14);
-    ctx.font = "bold 12px sans-serif"; ctx.fillText("PIT", b[0] + 10, b[1] + 4);
+    ctx.fillStyle = mapPalette.ink; ctx.fillRect(b[0] - 7, b[1] - 7, 14, 14);
+    ctx.font = '600 14px "Helvetica Neue", Helvetica, Arial, sans-serif'; ctx.fillText("PIT", b[0] + 10, b[1] + 4);
   }
-  // karts: fresh = online + fresh fix; otherwise frozen at last fix and greyed
+  // Paint every trail and heading first, then all opaque number discs. A later
+  // kart's trail can never cross an earlier kart's number (including stale fixes).
+  const positions = new Map(shown.map((k) => {
+    const f = k.gps.last_fix;
+    return [k.id, px(drPosition(k, performance.now(), en) || en(f.lat, f.lon))];
+  }));
   shown.forEach((k) => {
     const fresh = k.link === "online" && k.gps.fix_fresh;
-    const gone = k.link === "offline" || k.link === "never";
     if (k.trail.length > 1) {
-      ctx.strokeStyle = fresh ? k.color : "#999"; ctx.globalAlpha = 0.55; ctx.lineWidth = 3; ctx.beginPath();
+      ctx.strokeStyle = fresh ? k.color : "#999"; ctx.globalAlpha = 0.38; ctx.lineWidth = 2; ctx.beginPath();
       k.trail.forEach((p, i) => { const q = px(en(p[0], p[1])); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
       ctx.stroke(); ctx.globalAlpha = 1;
     }
-    const f = k.gps.last_fix, p = px(drPosition(k, performance.now(), en) || en(f.lat, f.lon));
+    const f = k.gps.last_fix, p = positions.get(k.id);
     if (fresh && !nul(f.heading)) {
       const r = f.heading * Math.PI / 180;
-      ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath();
-      ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0] + Math.sin(r) * 20, p[1] - Math.cos(r) * 20); ctx.stroke();
+      ctx.strokeStyle = mapPalette.ink; ctx.lineWidth = 2; ctx.beginPath();
+      ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0] + Math.sin(r) * 24, p[1] - Math.cos(r) * 24); ctx.stroke();
     }
-    ctx.beginPath(); ctx.arc(p[0], p[1], 10, 0, 2 * Math.PI);
-    ctx.fillStyle = fresh ? k.color : (gone ? "rgba(200,200,200,0.6)" : "#bbb"); ctx.fill();
-    ctx.lineWidth = fresh ? 2 : 3; ctx.strokeStyle = fresh ? "#000" : k.color;
+  });
+  shown.forEach((k) => {
+    const fresh = k.link === "online" && k.gps.fix_fresh;
+    const gone = k.link === "offline" || k.link === "never";
+    const f = k.gps.last_fix, p = positions.get(k.id);
+    ctx.beginPath(); ctx.arc(p[0], p[1], 15, 0, 2 * Math.PI);
+    ctx.fillStyle = fresh ? k.color : (gone ? "#c8ceca" : "#adb9b3"); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = fresh ? "#101c18" : k.color;
     if (!fresh) ctx.setLineDash([3, 3]);
     ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = "#000"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(k.id), p[0], p[1] + 5);
-    ctx.textAlign = "left";
-    if (!fresh) { ctx.font = "bold 11px sans-serif"; ctx.fillStyle = "#444"; ctx.fillText(ageText(k.gps.fix_age_s), p[0] + 13, p[1] - 8); }
+    ctx.fillStyle = "#071410"; ctx.font = '600 16px "Helvetica Neue", Helvetica, Arial, sans-serif';
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(k.id), p[0], p[1] + 0.5);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    if (!fresh) {
+      const age = ageText(k.gps.fix_age_s);
+      ctx.font = '500 12px "Helvetica Neue", Helvetica, Arial, sans-serif';
+      ctx.fillStyle = mapPalette.hud; ctx.fillRect(p[0] + 18, p[1] - 24, ctx.measureText(age).width + 8, 18);
+      ctx.fillStyle = mapPalette.ink; ctx.fillText(age, p[0] + 22, p[1] - 11);
+    }
   });
   // scale bar + north
   const step = niceStep(80 / view.scale);
   const len = step * view.scale;
-  ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.fillRect(6, H - 30, len + 70, 24);
-  ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(12, H - 12); ctx.lineTo(12 + len, H - 12); ctx.stroke();
-  ctx.fillStyle = "#000"; ctx.font = "bold 12px sans-serif"; ctx.fillText(`${step} m`, 18 + len, H - 8);
-  ctx.font = "bold 14px sans-serif"; ctx.fillText("N ↑", W - 34, H - 10);
+  ctx.fillStyle = mapPalette.hud; ctx.fillRect(6, H - 30, len + 70, 24);
+  ctx.strokeStyle = mapPalette.ink; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(12, H - 12); ctx.lineTo(12 + len, H - 12); ctx.stroke();
+  ctx.fillStyle = mapPalette.ink; ctx.font = '500 13px "Helvetica Neue", Helvetica, Arial, sans-serif'; ctx.fillText(`${step} m`, 18 + len, H - 8);
+  ctx.font = '600 14px "Helvetica Neue", Helvetica, Arial, sans-serif'; ctx.fillText("N ↑", W - 34, H - 10);
   if (zed.on && zed.lapA) {
     const a = px(en(zed.lapA[0], zed.lapA[1]));
     ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(a[0], a[1], 6, 0, 2 * Math.PI); ctx.fill();
     ctx.font = "bold 12px sans-serif"; ctx.fillText("tap the other end", a[0] + 10, a[1] - 8);
   }
+  let credit = cv.parentElement.querySelector(".map-attribution");
+  const sono = M.image && M.image.endsWith("/sono-light.png");
+  if (sono && !credit) {
+    credit = document.createElement("a"); credit.className = "map-attribution";
+    credit.href = "https://www.openstreetmap.org/copyright"; credit.target = "_blank"; credit.rel = "noopener";
+    credit.textContent = "© OpenStreetMap contributors"; cv.parentElement.appendChild(credit);
+  }
+  if (credit) credit.hidden = !sono;
   if (note) setText(note, `origin: ${o.source === "base" ? "base GPS" : o.source === "kart" ? "first kart fix" : "configured"}`
     + (M.image ? (M.attribution ? ` | imagery: ${M.attribution}` : " | imagery loaded") : " | no imagery")
     + (S.server.zones_error ? ` | ZONES FILE UNREADABLE (${S.server.zones_error}): game off until zones are saved` : ""));
@@ -842,19 +887,21 @@ function paceAction(b) {
   }
 }
 
-/* course centreline (ZONES.md "Track route"): thin dashed line + direction chevrons every ~15 m */
+/* Course presentation: cyan ribbon and quiet, evenly spaced direction chevrons. */
 function drawTrack(ctx, trk, px, en, off) {
   if (!trk || !Array.isArray(trk.points) || !trk.points.length) return;
   const ps = trk.points.map((p) => px(en(p[0], p[1])));
   ctx.save();
   if (off) ctx.globalAlpha = 0.4;
   const path = () => { ctx.beginPath(); ps.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); if (trk.closed && ps.length > 2) ctx.closePath(); };
-  path(); ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.lineWidth = 4; ctx.stroke();
-  path(); ctx.strokeStyle = "#0b4fb3"; ctx.lineWidth = 2; ctx.setLineDash([7, 5]); ctx.stroke(); ctx.setLineDash([]);
+  const width = Math.max(8, Math.min(28, (trk.width_m || 6) * view.scale));
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  path(); ctx.strokeStyle = "#174d5b"; ctx.lineWidth = width + 3; ctx.stroke();
+  path(); ctx.strokeStyle = document.documentElement.dataset.theme === "light" ? "#33a9c2" : "#9fdeef"; ctx.lineWidth = width; ctx.stroke();
   const segs = ps.map((q, i) => [q, ps[i + 1] || (trk.closed && ps.length > 2 ? ps[0] : null)]).filter((sg) => sg[1]);
-  const every = Math.max(24, 15 * view.scale);           // px between chevrons (~15 m, never cluttered)
+  const every = Math.max(72, 15 * view.scale);           // px between chevrons (~15 m, never cluttered)
   let next = every / 2, acc = 0;                          // distance along the route of the next chevron
-  ctx.strokeStyle = "#0b4fb3"; ctx.lineWidth = 2.5; ctx.lineJoin = "miter";
+  ctx.strokeStyle = "#e6fbf7"; ctx.lineWidth = 2; ctx.lineJoin = "miter";
   for (const [a, b] of segs) {
     const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
     const ux = L ? (b[0] - a[0]) / L : 0, uy = L ? (b[1] - a[1]) / L : 0;
@@ -937,7 +984,7 @@ function drawZones(ctx, zones, px, en, off) {
       [[-0.5, 0.2], [0.1, -0.35], [0.45, 0.3]].forEach(([dx, dy]) => { ctx.beginPath(); ctx.arc(c[0] + dx * g, c[1] + dy * g, Math.max(2, g / 5), 0, 2 * Math.PI); ctx.fill(); });
     }
     if (rpx > 22 || sel) {
-      ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = "#000";
+      ctx.font = '500 13px "Helvetica Neue", Helvetica, Arial, sans-serif'; ctx.textAlign = "center"; ctx.fillStyle = mapPalette.ink;
       ctx.fillText(z.name || z.type, c[0], c[1] + rpx + 12); ctx.textAlign = "left";
     }
   }

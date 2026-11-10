@@ -6,6 +6,9 @@
 <link rel="icon" href="data:,">
 <title>GoKart Pit</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/font-segments.css">
+<link rel="stylesheet" href="/static/display-theme.css">
+<link rel="stylesheet" href="/static/retro.css">
 </head>
 <body class="op" data-page="op">
 <div id="simBanner" class="banner sim hidden">SIMULATION &mdash; data comes from the simulator, not real karts</div>
@@ -22,13 +25,14 @@
   <span id="raceChip" class="chip">race off</span>
   <button id="gameChip" class="chip gamechip off">GAME OFF</button>
   <span class="spacer"></span>
+  <button type="button" class="display-open" data-display-open>Display</button>
   <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
   <button id="fOnline" class="toggle">Online only</button>
   <button id="fEntered" class="toggle">Entered only</button>
   <span id="hiddenNote" class="sm"></span>
   <span id="clock" class="sm"></span>
-  <a href="/api/log/download" style="color:#fff" class="sm">Download log</a>
-  <a href="/logout" style="color:#fff" class="sm">Log out</a>
+  <a href="/api/log/download" class="sm">Download log</a>
+  <a href="/logout" class="sm">Log out</a>
 </div>
 <div class="fleetbar">
   <button id="stopAll" class="hold stopall">STOP ALL<small>hold 1 s</small></button>
@@ -93,5 +97,6 @@
 <script src="/static/watch.js"></script>
 <script src="/static/sound.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/display.js"></script>
 </body>
 </html>

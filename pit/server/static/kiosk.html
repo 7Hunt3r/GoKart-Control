@@ -6,6 +6,9 @@
 <link rel="icon" href="data:,">
 <title>GoKart Pit Kiosk</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/font-segments.css">
+<link rel="stylesheet" href="/static/display-theme.css">
+<link rel="stylesheet" href="/static/retro.css">
 </head>
 <body class="kiosk" data-page="kiosk">
 <div class="topbar">
@@ -20,6 +23,7 @@
   <span id="raceChip" class="chip">race off</span>
   <button id="gameChip" class="chip gamechip off">GAME OFF</button>
   <span class="spacer"></span>
+  <button type="button" class="display-open" data-display-open>Display</button>
   <button id="sndBtn" class="chip sndchip" aria-label="sound">SOUND</button>
   <button id="fOnline" class="toggle">Online</button>
   <button id="fEntered" class="toggle">Entered</button>
@@ -56,5 +60,6 @@
 <script src="/static/watch.js"></script>
 <script src="/static/sound.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/display.js"></script>
 </body>
 </html>

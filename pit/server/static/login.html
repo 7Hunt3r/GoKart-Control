@@ -7,14 +7,18 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="GoKart Pit">
-<meta name="theme-color" content="#111111">
+<meta name="theme-color" content="#293744">
 <title>GoKart Pit Login</title>
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/icon-180.png">
 <link rel="icon" href="/static/icon.svg">
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/font-segments.css">
+<link rel="stylesheet" href="/static/display-theme.css">
+<link rel="stylesheet" href="/static/retro.css">
 </head>
 <body class="login">
+<button type="button" class="login-display" data-display-open>Display</button>
 <form method="post" action="/login">
   <h2 style="margin:0">GoKart Pit</h2>
   <div id="bad" class="faultline hidden">Wrong password.</div>
@@ -30,5 +34,6 @@ var q = new URLSearchParams(location.search);
 if (q.get("bad") === "1") document.getElementById("bad").classList.remove("hidden");
 document.getElementById("next").value = q.get("next") || "";
 </script>
+<script src="/static/display.js"></script>
 </body>
 </html>
