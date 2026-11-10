@@ -134,6 +134,7 @@ function render() {
   if (fresh && !nul(d.gps_mph)) { txt("mph", Math.round(d.gps_mph)); svgCls(mphEl, "mphnum"); txt("mphSrc", "GPS"); arcMph = d.gps_mph; }
   else if (wheel !== null) { txt("mph", Math.round(wheel)); svgCls(mphEl, "mphnum"); txt("mphSrc", "WHEEL"); arcMph = wheel; }
   else { txt("mph", !fresh ? "NO DATA" : "NO FIX"); svgCls(mphEl, "mphnum na"); txt("mphSrc", "GPS"); }
+  mphEl.dataset.digits = String(mphEl.textContent.length);
   txt("mphNote", fresh && !g.fix_fresh
     ? (wheel !== null ? "NO GPS FIX: wheel speed" : !nul(g.fix_age_s) ? `last fix ${ageText(g.fix_age_s)} ago` : "")
     : (wheel !== null ? `wheel ${wheel.toFixed(0)} mph` : ""));
@@ -145,7 +146,7 @@ function render() {
   const battFresh = me.vesc_fresh && fresh;
   document.querySelector(".batt").classList.toggle("stale", !battFresh);
   txt("battPct", nul(d.battery_pct) ? "--" : Math.round(d.battery_pct) + "%");
-  txt("battV", nul(v.volts) ? "-- V" : Number(v.volts).toFixed(1) + " V");
+  txt("battV", nul(v.volts) ? "--" : Number(v.volts).toFixed(1));
   const bar = $("battBar");
   sty(bar, "width", nul(d.battery_pct) ? "0" : d.battery_pct + "%");
   sty(bar, "background", !battFresh ? "var(--stale)" : d.battery_pct < 20 ? "var(--bad)" : d.battery_pct < 40 ? "var(--warn)" : "var(--ok)");
@@ -214,7 +215,7 @@ function render() {
 let pulse = false;
 
 /* ------------------------------------------------------- game: speedo */
-const SPEEDO = { cx: 180, cy: 150, r: 128, a0: 160, a1: 380, max: 30 };
+const SPEEDO = { cx: 180, cy: 154, r: 126, a0: 180, a1: 360, max: 30 };
 function polar(a, r) { const t = a * Math.PI / 180; return [SPEEDO.cx + r * Math.cos(t), SPEEDO.cy + r * Math.sin(t)]; }
 function arcPath(a0, a1, r) {
   const p0 = polar(a0, r), p1 = polar(a1, r);
@@ -224,10 +225,10 @@ function arcPath(a0, a1, r) {
   $("arcBg").setAttribute("d", arcPath(SPEEDO.a0, SPEEDO.a1, SPEEDO.r));
   let svg = "";
   for (let v = 0; v <= SPEEDO.max; v += 5) {
-    const a = SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * v / SPEEDO.max, major = v % 15 === 0;   // labels clear of the number
-    const p = polar(a, SPEEDO.r - 14), q = polar(a, SPEEDO.r - (major ? 30 : 24));
+    const a = SPEEDO.a0 + (SPEEDO.a1 - SPEEDO.a0) * v / SPEEDO.max, major = v % 15 === 0;   // seven radial ticks on one exact semicircle
+    const p = polar(a, SPEEDO.r - 10), q = polar(a, SPEEDO.r - (major ? 22 : 17));
     svg += `<line class="tick${major ? "" : " minor"}" x1="${p[0].toFixed(1)}" y1="${p[1].toFixed(1)}" x2="${q[0].toFixed(1)}" y2="${q[1].toFixed(1)}"/>`;
-    if (major) { const l = polar(a, SPEEDO.r - 44); svg += `<text class="ticklbl" x="${l[0].toFixed(1)}" y="${(l[1] + 5).toFixed(1)}" text-anchor="middle">${v}</text>`; }
+    if (major) { const l = v === 0 ? [34, 159] : v === 15 ? [180, 17] : [326, 159]; svg += `<text class="ticklbl" x="${l[0]}" y="${l[1]}" text-anchor="middle">${v}</text>`; }
   }
   $("ticks").innerHTML = svg;
 })();
@@ -979,8 +980,8 @@ $("itemBtn").addEventListener("click", () => {
 
 /* ------------------------------------------------------------------ map */
 const R_EARTH = 6371000;
-const view = { follow: true, pausedUntil: 0, all: false, scale: null, cx: 0, cy: 0, rot: 0 };
-let userFollow = true;               // the FOLLOW button; touching the map pauses it
+const view = { follow: false, pausedUntil: 0, all: false, scale: null, cx: 0, cy: 0, rot: 0, overview: true, northUp: false, cameraKey: null };
+const userFollow = false;            // default camera is fixed to the course, not to a moving kart
 let mapImg = null, mapImgSrc = null, mapImgReady = null;
 function isSonoMap(pkg) { return !!(pkg && pkg.image && pkg.image.endsWith("/sono-light.png")); }
 function mapImageSource(pkg) {
@@ -1051,36 +1052,23 @@ function drawMap() {
   const meGood = meFresh && (!mf || !mf.quality || mf.quality === "good");    // poor / outlier: drawn greyed
   const mePos = mf ? drPosition("self", mf, now, en, meFresh) : null;
 
-  // follow resumes follow_resume_s after the last touch
-  if (userFollow && !view.follow && Date.now() >= view.pausedUntil) { view.follow = true; view.all = false; view.scale = null; }
-  const resumeIn = userFollow && !view.follow ? Math.ceil((view.pausedUntil - Date.now()) / 1000) : 0;
-  show("resumeNote", resumeIn > 0);
-  if (resumeIn > 0) txt("resumeNote", `follow in ${resumeIn} s`);
-  $("followBtn").classList.toggle("sel", userFollow);
-
-  if (view.scale === null || view.all || (view.follow && !mePos)) fitAll(en, pkg, W, H);
-  if (view.follow && mePos) {
-    view.cx = mePos[0]; view.cy = mePos[1];
-    view.scale = view.all ? view.scale : (view.followScale || H / cfg("follow_span_m", 70));
+  // Fit only when the course, viewport or orientation changes. Telemetry never moves the camera.
+  const cameraKey = JSON.stringify([S.game && S.game.track, pkg && pkg.course, pkg && pkg.version, W, H, view.northUp]);
+  if (view.overview && view.cameraKey !== cameraKey) {
+    fitTrack(en, pkg, W, H); view.cameraKey = cameraKey;
+  } else if (view.scale === null || view.all) {
+    fitAll(en, pkg, mapClearWidth(W), H); view.all = false;
   }
-  // heading-up: slew at most 120 deg/s; below 1.5 m/s hold the last heading (Doppler heading is noise)
-  const headingUp = view.follow && !view.all && cfg("map_orientation", "heading_up") === "heading_up" && !!mePos;
-  const tNow = performance.now(), dtS = view.lastT ? Math.min(0.5, (tNow - view.lastT) / 1000) : 0;
-  view.lastT = tNow;
-  if (headingUp) {
-    const tgt = meFresh && !nul(mf.heading) && (mf.gps_kph || 0) / 3.6 >= 1.5 ? mf.heading : null;
-    const prev = view.hdg;
-    view.hdg = slewHeading(view.hdg, tgt, dtS, 120);
-    view.slewing = !nul(tgt) && !nul(view.hdg) && Math.abs(angleDiffDeg(tgt, view.hdg)) > 0.5;
-    view.rot = nul(view.hdg) ? 0 : view.hdg * Math.PI / 180;
-    if (prev === undefined) view.slewing = true;
-  } else { view.rot = 0; view.hdg = null; view.slewing = false; }
-  const cyS = headingUp && view.rot !== 0 ? H * 0.6 : H / 2;     // own kart ~60 % down: more track ahead
-  view.cyS = cyS;
+  show("resumeNote", false);
+  $("followBtn").classList.toggle("sel", view.overview);
+  $("northBtn").classList.toggle("sel", view.northUp);
+  $("northBtn").setAttribute("aria-pressed", String(view.northUp));
+  const headingUp = false, cyS = H / 2, cxS = mapClearWidth(W) / 2;
+  view.cyS = cyS; view.cxS = cxS; view.slewing = false;
   const cr = Math.cos(view.rot), sr = Math.sin(view.rot);
   const px = (p) => {
     const dx = (p[0] - view.cx) * view.scale, dy = (p[1] - view.cy) * view.scale;
-    return [W / 2 + dx * cr - dy * sr, cyS - (dx * sr + dy * cr)];
+    return [cxS + dx * cr - dy * sr, cyS - (dx * sr + dy * cr)];
   };
 
   // imagery, course, track band, zone shapes, lap line: one cached north-up layer, turned with the map
@@ -1100,7 +1088,7 @@ function drawMap() {
     const k = view.scale / L.s;                 // != 1 only for a moment while zooming (rebuild pending)
     ctx.save();
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "low";
-    ctx.translate(W / 2, cyS); ctx.rotate(-view.rot);
+    ctx.translate(cxS, cyS); ctx.rotate(-view.rot);
     ctx.drawImage(L.cv, (L.cx - view.cx) * view.scale - L.half * k, -(L.cy - view.cy) * view.scale - L.half * k, 2 * L.half * k, 2 * L.half * k);
     ctx.restore();
   }
@@ -1112,25 +1100,29 @@ function drawMap() {
     ctx.fillStyle = "#fff"; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center"; ctx.fillText("PIT", b[0], b[1] + 4); ctx.textAlign = "left";
   }
 
+  // Every trail is behind every marker, including the driver's own trail.
+  S.fleet.forEach((k) => {
+    if (k.gps && k.gps.last_fix && k.trail.length > 1) trail(ctx, k.trail, en, px, k.link === "online" && k.gps.fix_fresh ? k.color : "#888", 4, 0.6);
+  });
+  if (mePos && me.trail.length > 1) trail(ctx, me.trail, en, px, "#0b4fb3", 5, 0.75);
+
   // other karts: dots with numbers; stale = grey dashed + age; offline = faded
   S.fleet.forEach((k) => {
     if (!k.gps || !k.gps.last_fix) return;
     const fresh = k.link === "online" && k.gps.fix_fresh;
     const gone = k.link === "offline";
-    if (k.trail.length > 1) trail(ctx, k.trail, en, px, fresh ? k.color : "#888", 4, 0.6);
     const p = px(drPosition(k.id, k.gps.last_fix, now, en, fresh) || en(k.gps.last_fix.lat, k.gps.last_fix.lon));
     ctx.beginPath(); ctx.arc(p[0], p[1], 15, 0, 2 * Math.PI);
-    ctx.fillStyle = fresh ? k.color : gone ? "rgba(210,210,210,.6)" : "#bbb"; ctx.fill();
+    ctx.fillStyle = fresh ? k.color : gone ? "#89948e" : "#bbc5be"; ctx.fill();
     ctx.lineWidth = 3; ctx.strokeStyle = fresh ? "#000" : "#555";
     if (!fresh) ctx.setLineDash([4, 3]);
     ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = "#000"; ctx.font = "900 18px sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(k.id), p[0], p[1] + 6); ctx.textAlign = "left";
+    ctx.fillStyle = "#000"; ctx.font = '600 16px "Helvetica Neue", Helvetica, Arial, sans-serif'; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(k.id), p[0], p[1] + .5); ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
     if (!fresh) label(ctx, ageText(k.link === "online" ? k.gps.fix_age_s : k.age_s), p[0] + 18, p[1] - 10);
   });
 
   // own kart: big arrow along the GPS heading (grey + age when not fresh)
   if (mePos) {
-    if (me.trail.length > 1) trail(ctx, me.trail, en, px, "#0b4fb3", 5, 0.75);
     const p = px(mePos);
     const hd = nul(mf.heading) ? null : mf.heading * Math.PI / 180 - view.rot;
     ctx.save(); ctx.translate(p[0], p[1]);
@@ -1186,7 +1178,7 @@ function layerKey(pkg, headingUp, dpr) {
     headingUp, dpr, sunOn, pkg && pkg.origin ? pkg.origin.lat + "," + pkg.origin.lon : ""].join(";");
 }
 function ensureLayer(en, pkg, W, H, cyS, dpr, headingUp) {
-  const reach = Math.hypot(W / 2, Math.max(cyS, H - cyS));        // view centre -> farthest screen corner
+  const reach = Math.hypot(Math.max(view.cxS || W / 2, W - (view.cxS || W / 2)), Math.max(cyS, H - cyS));        // view centre -> farthest screen corner
   const half = Math.max(reach + 64, Math.min(1024 / dpr, reach + 420));
   const key = layerKey(pkg, headingUp, dpr), now = performance.now();
   const drift = Math.hypot(view.cx - layer.cx, view.cy - layer.cy) * view.scale;
@@ -1299,6 +1291,30 @@ function fitAll(en, pkg, W, H) {
   view.cx = (Math.max(...xs) + Math.min(...xs)) / 2;
   view.cy = (Math.max(...ys) + Math.min(...ys)) / 2;
 }
+function mapClearWidth(W) { return window.matchMedia("(min-width: 800px)").matches ? W * .7 : W; }
+function courseAngle(en, pkg) {
+  const points = (S.game && S.game.track && S.game.track.points) || (pkg && pkg.course) || [];
+  if (points.length < 2) return 0;
+  const a = en(points[0][0], points[0][1]);
+  for (const point of points.slice(1)) {
+    const b = en(point[0], point[1]);
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 1) return Math.atan2(b[0] - a[0], b[1] - a[1]);
+  }
+  return 0;
+}
+function fitTrack(en, pkg, W, H) {
+  const track = (S.game && S.game.track && S.game.track.points) || [];
+  const points = [...track, ...((pkg && pkg.course) || [])];
+  if (points.length < 2) { fitAll(en, pkg, mapClearWidth(W), H); view.rot = 0; return; }
+  view.rot = view.northUp ? 0 : courseAngle(en, pkg);
+  const c = Math.cos(view.rot), s = Math.sin(view.rot);
+  const projected = points.map(p => en(p[0], p[1])).map(p => [p[0] * c - p[1] * s, p[0] * s + p[1] * c]);
+  const xs = projected.map(p => p[0]), ys = projected.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  view.scale = Math.min(mapClearWidth(W) * .76 / Math.max(90, x1 - x0), H * .76 / Math.max(90, y1 - y0));
+  const x = (x0 + x1) / 2, y = (y0 + y1) / 2;
+  view.cx = x * c + y * s; view.cy = -x * s + y * c;
+}
 function mapNoteText() {
   const m = S.map || {}, pkg = m.package, sy = m.sync || {};
   const pit = sy.reachable === true ? "pit reachable" : sy.reachable === false ? "pit not reachable" : "pit not checked yet";
@@ -1307,7 +1323,7 @@ function mapNoteText() {
     + (isSonoMap(pkg) ? "" : pkg.attribution ? ` | imagery: ${pkg.attribution}` : "");
 }
 
-/* map input: one finger pans, two fingers pinch-zoom, both pause auto-follow */
+/* Map input only: stationary course camera, manual pan/zoom, optional north-up. */
 // Preview the whole street-map area; this changes the camera only.
 $("areaBtn").addEventListener("click", () => {
   const pkg = S && S.map && S.map.package, en = S && projection();
@@ -1317,12 +1333,11 @@ $("areaBtn").addEventListener("click", () => {
   view.scale = Math.max(W / (se[0] - nw[0]), H / (nw[1] - se[1])) * 1.04;
   view.cx = (nw[0] + se[0]) / 2;
   view.cy = nw[1] * .4 + se[1] * .6; // favor southern SoNo, including the simulator's shop loop
-  userFollow = false; view.follow = false; view.all = false; view.rot = 0;
+  view.overview = false; view.follow = false; view.all = false; view.rot = 0; view.northUp = true;
   requestDraw();
 });
 function touched() {
-  view.follow = false; view.all = false;
-  view.pausedUntil = Date.now() + cfg("follow_resume_s", 10) * 1000;
+  view.follow = false; view.all = false; view.overview = false;
 }
 (function setupMapInput() {
   const cv = $("map");
@@ -1331,13 +1346,16 @@ function touched() {
   const MIN_SCALE = 0.02, MAX_SCALE = 40;
   const local = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   const clampScale = (v) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
-  const world = (x, y) => [view.cx + (x - cv.clientWidth / 2) / view.scale, view.cy - (y - cv.clientHeight / 2) / view.scale];
-  const unrotate = () => { view.rot = 0; };     // free pan is always north-up
+  const world = (x, y) => {
+    const dx = (x - mapClearWidth(cv.clientWidth) / 2) / view.scale, dy = (cv.clientHeight / 2 - y) / view.scale;
+    const c = Math.cos(view.rot), s = Math.sin(view.rot);
+    return [view.cx + dx * c + dy * s, view.cy - dx * s + dy * c];
+  };
   cv.addEventListener("pointerdown", (e) => {
     if (!S || view.scale === null) return;
     cv.setPointerCapture(e.pointerId);
     ptrs.set(e.pointerId, local(e));
-    touched(); unrotate();
+    touched();
     if (ptrs.size === 1) { const [x, y] = local(e); drag = { x, y, cx: view.cx, cy: view.cy, moved: false }; pinch = null; }
     else if (ptrs.size === 2) {
       drag = null;
@@ -1355,14 +1373,18 @@ function touched() {
       const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
       view.scale = clampScale(pinch.scale0 * d / pinch.d0);
       view.followScale = view.scale;
-      view.cx = pinch.anchor[0] - (mx - cv.clientWidth / 2) / view.scale;
-      view.cy = pinch.anchor[1] + (my - cv.clientHeight / 2) / view.scale;
+      const point = world(mx, my);
+      view.cx += pinch.anchor[0] - point[0]; view.cy += pinch.anchor[1] - point[1];
       requestDraw();
     } else if (drag && ptrs.size === 1) {
       const [x, y] = local(e);
       const dx = x - drag.x, dy = y - drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true;
-      if (drag.moved) { view.cx = drag.cx - dx / view.scale; view.cy = drag.cy + dy / view.scale; requestDraw(); }
+      if (drag.moved) {
+        const c = Math.cos(view.rot), s = Math.sin(view.rot);
+        view.cx = drag.cx - (dx * c - dy * s) / view.scale;
+        view.cy = drag.cy + (dx * s + dy * c) / view.scale; requestDraw();
+      }
     }
   });
   const release = (e) => {
@@ -1373,7 +1395,7 @@ function touched() {
   };
   ["pointerup", "pointercancel", "lostpointercapture"].forEach((ev) => cv.addEventListener(ev, release));
   cv.addEventListener("wheel", (e) => {
-    e.preventDefault(); touched(); unrotate();
+    e.preventDefault(); touched();
     view.scale = clampScale(view.scale * Math.pow(1.0015, -e.deltaY)); view.followScale = view.scale; requestDraw();
   }, { passive: false });
 })();
@@ -1388,10 +1410,10 @@ document.querySelector(".mapctl").addEventListener("click", (e) => {
   }
   if (!b || !S) return;
   if (b.id === "followBtn") {
-    userFollow = !userFollow;
-    try { localStorage.setItem("gk_follow", userFollow ? "1" : "0"); } catch (err) { /* ignore */ }
-    if (userFollow) { view.follow = true; view.all = false; } else { view.follow = false; }
-  } else if (b.dataset.zoom === "all") { touched(); view.all = true; view.rot = 0; }
+    view.overview = true; view.cameraKey = null; view.all = false;
+  } else if (b.id === "northBtn") {
+    view.northUp = !view.northUp; view.overview = true; view.cameraKey = null; view.all = false;
+  } else if (b.dataset.zoom === "all") { touched(); view.all = true; view.rot = 0; view.northUp = true; }
   else {
     if (view.scale === null) return;
     const f = b.dataset.zoom === "in" ? 1.5 : 1 / 1.5;
@@ -1401,7 +1423,7 @@ document.querySelector(".mapctl").addEventListener("click", (e) => {
   requestDraw();
 });
 sunApply();                                      // before the first frame: no flash of the night theme
-try { if (localStorage.getItem("gk_follow") === "0") { userFollow = false; view.follow = false; } } catch (err) { /* ignore */ }
+// Course overview and North up off are intentional defaults on every page load.
 
 /* -------------------------------------------------------------- wiring */
 /* One draw scheduler: SSE frames, touches and dead reckoning only mark the map dirty; it is drawn at

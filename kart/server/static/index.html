@@ -43,7 +43,8 @@
     <div id="inviteCard" class="invite hidden"></div>
     <div id="itemBox" class="itembox hidden"><div id="itemGlyph" class="iglyph">?</div><small id="itemName"></small><small id="itemSub" class="isub"></small></div>
     <div class="mapctl">
-      <button id="followBtn" class="sel">FOLLOW</button>
+      <button id="followBtn" class="sel" aria-label="Fit the whole track">TRACK</button>
+      <button id="northBtn" aria-label="North up" aria-pressed="false">N ↑</button>
       <button data-zoom="in">+</button>
       <button data-zoom="out">&minus;</button>
       <button data-zoom="all">ALL</button>
@@ -59,13 +60,13 @@
   <aside class="driver-sidebar" aria-label="Driver instruments and controls">
     <header class="driver-title"><span id="kartChip" class="chip id">KART ?</span><div class="link-expression"><svg id="linkFace" class="link-face" viewBox="0 0 32 32" role="img" aria-label="Kart link not checked"><rect x="2" y="2" width="28" height="28" rx="7"/><path class="face-eyes" d="M10 10v4m12-4v4"/><path class="face-mouth" d="M10 21h12"/></svg></div><button type="button" data-display-open>Display</button></header>
     <div id="speedo" class="speedo">
-      <div class="instrument-label">GROUND SPEED <span class="signal-bars" id="pitSignal" role="img" aria-label="Pit signal unavailable"><i></i><i></i><i></i><i></i><i></i></span></div>
+      <div class="instrument-label speed-heading"><span>GROUND SPEED</span><span class="speed-meta"><span id="mphSrc">GPS</span><span class="signal-bars" id="pitSignal" role="img" aria-label="Pit signal unavailable"><i></i><i></i><i></i><i></i><i></i></span></span></div>
       <svg id="speedoSvg" viewBox="0 0 360 196" preserveAspectRatio="xMidYMid meet" aria-label="speed">
         <path id="arcBg" class="arcbg" d=""/>
         <path id="arcFg" class="arcfg" d=""/>
         <g id="ticks"></g>
-        <text id="mph" class="mphnum" x="180" y="152" text-anchor="middle">--</text>
-        <text id="mphUnit" class="mphunit" x="180" y="180" text-anchor="middle">MPH <tspan id="mphSrc">GPS</tspan></text>
+        <text id="mph" class="mphnum" x="180" y="144" text-anchor="middle">--</text>
+        <text id="mphUnit" class="mphunit" x="180" y="178" text-anchor="middle">MPH</text>
       </svg>
       <div class="batt">
         <div class="battrow"><span class="lbl">BATT</span><span id="battPct" class="mid">--</span></div>
@@ -75,7 +76,7 @@
       <div id="mphNote" class="note"></div>
     </div>
     <section class="telemetry-grid" aria-label="Supporting measurements">
-      <div><span class="instrument-label">PACK VOLTAGE</span><b id="battV" class="reading">-- V</b></div>
+      <div><span class="instrument-label">PACK VOLTAGE</span><b class="reading"><span id="battV">--</span><small>V</small></b></div>
       <div><span class="instrument-label">INPUT POWER</span><b class="reading"><span id="inputPower">--</span><small>kW</small></b></div>
       <div><span class="instrument-label">VESC eRPM</span><b class="reading" id="motorErpm">--</b></div>
       <div><span class="instrument-label">ESC TEMP</span><b class="reading"><span id="escTemp">--</span><small>°C</small></b></div>
@@ -90,9 +91,9 @@
       <button id="itemBtn" class="itembtn hidden"><span id="itemBtnGlyph" class="ibglyph"></span><b id="itemBtnText"></b></button>
       <div class="mode-heading"><span class="instrument-label">DRIVE MODE</span><div id="gear" class="gear"><b id="gearLetter">-</b><span id="modeNow">--</span></div></div>
       <div class="modebtns">
-        <button class="mbtn" data-mode="0"><small>E</small>ECO<span class="cap"></span></button>
-        <button class="mbtn" data-mode="1"><small>N</small>NORMAL<span class="cap"></span></button>
-        <button class="mbtn" data-mode="2"><small>S</small>SPORT<span class="cap"></span></button>
+        <button class="mbtn" data-mode="0"><small>E</small><span class="mode-name">ECO</span><span class="cap"></span></button>
+        <button class="mbtn" data-mode="1"><small>N</small><span class="mode-name">NORMAL</span><span class="cap"></span></button>
+        <button class="mbtn" data-mode="2"><small>S</small><span class="mode-name">SPORT</span><span class="cap"></span></button>
       </div>
     </div>
     <div id="chips" class="chips">
