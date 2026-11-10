@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from collections import deque
 
 KART_IDS = tuple(range(1, 9))
@@ -437,10 +438,13 @@ class CommandTracker:
 
 # --- game layer (Mario Kart zones) ----------------------------------------------
 # Contract: pit/server/map/ZONES.md. The kart evaluates the zone file against its own
-# GPS (self lines, 2 Hz) so the game works with no radio and no Wi-Fi. The only thing
-# it ever sends is `boost SECS SCALE` (timed current-scale override in the Heltec,
-# never above 1.0, auto-reverting, cancelled by STOP/START). Pure logic: the server
-# sends the returned command lines and logs every returned record.
+# GPS (self lines, 2 Hz) so the game works with no radio and no Wi-Fi. The only lines
+# the game ever sends are `boost SECS SCALE` (timed current-scale override in the Heltec,
+# never above 1.0, auto-reverting, cancelled by STOP/START) and, for mud on firmware
+# kart-0.2.4+, `slow MPH SECS` (timed speed cap that reverts to the previous cap by itself).
+# Freeplay adds one `mode 0` when it is switched on (through the server's POST /cmd path,
+# not as a game record). Pure logic: the server sends the returned command lines and logs
+# every returned record.
 R_EARTH = 6371000.0
 ZONE_EXIT_HYST_M = 3.0       # "outside" again only > 3 m outside the edge
 LAP_REARM_M = 6.0            # lap line: after a crossing, the next one counts only once the kart has been
@@ -453,11 +457,18 @@ GAME_TIMING_EVENTS = ("lap_start", "lap", "lap_reset", "race_countdown", "race_g
                       "race_released", "zones_lap_restored")
 NO_FIX_EXIT_S = 5.0          # no fix for this long: leave every zone, forget the previous fix
 MUD_REPEAT_S = 2.0           # mud: re-send while inside
-MUD_SECS = 3                 # each mud command lasts 3 s (so the cap ends <= 3 s after leaving)
+MUD_SLOW_SECS = 4            # each mud command lasts this long (config mud_slow_secs 1-30; zone mud: the cap
+                             # ends <= this after leaving)
+MUD_SLOW_MPH = 5             # mud on firmware kart-0.2.4+: `slow 5 SECS` (a real speed cap, not a scale)
+MUD_SECS = MUD_SLOW_SECS     # old name
+FW_TIMED_SLOW = (0, 2, 4)    # first firmware with `slow MPH SECS`; older ones read it as a PERMANENT slow
+BOOST_STACK_MAX_S = 30       # stacked boosts: firmware `boost` SECS limit
 BOOST_DEFAULTS = {"secs": 5, "scale": 1.0, "cooldown_s": 20.0}
 ITEM_COOLDOWN_S = 15.0
 # Item box roll (ZONES.md "Item boxes"): (name, probability, secs, scale); empty = nothing sent
-ITEM_TABLE = (("boost", 0.45, 5, 1.0), ("super", 0.15, 8, 1.0), ("mud", 0.25, 3, 0.5), ("empty", 0.15, None, None))
+# (mud: secs is the engine's mud_secs, MUD_SLOW_SECS by default; the scale is only used on firmware < 0.2.4)
+ITEM_TABLE = (("boost", 0.45, 5, 1.0), ("super", 0.15, 8, 1.0), ("mud", 0.25, MUD_SLOW_SECS, 0.5),
+              ("empty", 0.15, None, None))
 RACE_GO_GRACE_S = 0.0        # the overlay/laps follow the computed GO instant; the go line only confirms it
 RACE_STATES = {0: "idle", 1: "countdown", 2: "running", 3: "finished"}
 HEADING_SLEW_DPS = 120.0     # heading-up map: max rotation rate
@@ -531,6 +542,28 @@ def boost_line(secs, scale):
     """The Heltec USB command. secs 1-30, scale 0.10-1.00, never above 1.0."""
     secs = int(max(1, min(30, round(float(secs)))))
     return f"boost {secs} {clamp_scale(scale):.2f}"
+
+
+def slow_line(mph, secs):
+    """Timed SLOW (firmware kart-0.2.4+): cap MPH for SECS (1-60) s, then back to the previous cap."""
+    mph = int(max(1, min(40, round(float(mph)))))
+    secs = int(max(1, min(60, round(float(secs)))))
+    return f"slow {mph} {secs}"
+
+
+_FW_RE = re.compile(r"kart-(\d+)\.(\d+)\.(\d+)")
+
+
+def fw_version(fw):
+    """"kart-0.2.4" (also "sim-kart-0.2.4", "kart-0.2.4-dev") -> (0, 2, 4); anything else -> None."""
+    m = _FW_RE.search(fw) if isinstance(fw, str) else None
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def fw_at_least(fw, want):
+    """True only when fw parses and is >= want; unknown firmware is never assumed new."""
+    v = fw_version(fw)
+    return v is not None and v >= tuple(want)
 
 
 def _num(v):
@@ -983,12 +1016,16 @@ class GameEngine:
 
     on_self(msg, now) / tick(now) / set_zones(doc, now) return a list of records;
     every record is logged by the caller, and records with "ev": "cmd" carry the
-    "line" to send to the Heltec. Rules: ZONES.md. Extra kart-side rules:
+    "line" to send to the Heltec (`boost SECS SCALE`, or `slow MPH SECS` for mud on firmware
+    kart-0.2.4+; nothing else). Rules: ZONES.md. Extra kart-side rules:
     no zone commands while the kart reports STOPPED (a boost entered while stopped
-    is used up, not saved for later); mud wins over boost when they overlap."""
+    is used up, not saved for later); mud wins over boost when they overlap or while a mud
+    is still running; a boost during a running boost stacks (remaining + new, <= 30 s)."""
 
-    def __init__(self, local_enabled=True, gps_correction=False, rng=None):
+    def __init__(self, local_enabled=True, gps_correction=False, rng=None, mud_secs=MUD_SLOW_SECS):
         self.local_enabled = bool(local_enabled)
+        self.mud_secs = int(max(1, min(30, int(mud_secs))))
+        self.fw = None              # Heltec firmware string from its status reply (None = unknown)
         self.rng = rng or random.Random()
         self.race = {"hold": False, "go_at": None, "secs": None, "rx": None, "go_mono": None,
                      "go_confirmed": False, "how": None, "go_utc": None,
@@ -1015,11 +1052,11 @@ class GameEngine:
         self.stopped = None
         self.scale = None
         self.mode_req = None
-        self.override = None        # {"kind", "scale", "until"} as last sent
+        self.override = None        # {"kind", "scale", "until", "zone", "via"} as last sent (until = stacked end)
         self.events = deque(maxlen=12)
         self.seq = 0
         self.cmds_sent = 0
-        self.last_result = None     # {"result", "result_name", "mono"} of the last boost echo
+        self.last_result = None     # {"result", "result_name", "mono"} of the last boost/slow echo
         self.source = None          # the zones document's "source" (e.g. "freeplay"), tagged on its records
         self._reset_lap()
 
@@ -1053,13 +1090,51 @@ class GameEngine:
             self.events.append(dict(r, mono=now))
         return r
 
+    def set_fw(self, fw):
+        """The Heltec's firmware string (status reply), or None when unknown (link change, reboot)."""
+        self.fw = fw if isinstance(fw, str) and fw else None
+
+    def timed_slow(self):
+        """Mud as a real timed SLOW (`slow MPH SECS`) only on firmware kart-0.2.4+: older firmware reads
+        `slow 5 4` as a PERMANENT slow 5 that only START releases, so it keeps `boost SECS 0.5`."""
+        return fw_at_least(self.fw, FW_TIMED_SLOW)
+
+    def _drop_override(self, slow_too):
+        if self.override is not None and (slow_too or self.override.get("via") != "slow"):
+            self.override = None
+
+    def _ov_running(self, now, kind=None):
+        ov = self.override
+        return ov is not None and now < ov["until"] and (kind is None or ov["kind"] == kind)
+
     def _cmd(self, recs, now, zone, kind, secs, scale):
+        if kind == "mud":
+            secs = self.mud_secs
+            if self.timed_slow():
+                line, via = slow_line(MUD_SLOW_MPH, secs), "slow"
+            else:
+                line, via = boost_line(secs, scale), "boost"
+            self.cmds_sent += 1
+            self.override = {"kind": "mud", "scale": clamp_scale(scale), "until": now + int(secs), "zone": zone.id,
+                             "via": via}
+            self._rec(recs, "cmd", now, line=line, zone=zone.id, effect=kind)
+            return
+        secs, scale = int(max(1, min(BOOST_STACK_MAX_S, round(float(secs))))), clamp_scale(scale)
+        stacked = None
+        if self._ov_running(now, "boost"):
+            # boosts stack: the remaining time of the running boost + this one, <= 30 s (firmware SECS limit,
+            # it simply re-arms), at the stronger of the two scales (never above 1.0)
+            left = self.override["until"] - now
+            total = int(max(1, min(BOOST_STACK_MAX_S, round(left + secs))))
+            stacked = {"left_s": round(left, 1), "added_s": secs, "total_s": total}
+            secs, scale = total, clamp_scale(max(scale, self.override["scale"]))
         line = boost_line(secs, scale)
         self.cmds_sent += 1
-        self.override = {"kind": kind, "scale": clamp_scale(scale), "until": now + int(secs), "zone": zone.id}
+        self.override = {"kind": kind, "scale": scale, "until": now + secs, "zone": zone.id, "via": "boost"}
         self._rec(recs, "cmd", now, line=line, zone=zone.id, effect=kind)
-        if kind == "boost":
-            self._rec(recs, "boost", now, zone=zone.id, name=zone.name, scale=clamp_scale(scale), secs=int(secs))
+        if stacked:
+            self._rec(recs, "boost_stacked", now, zone=zone.id, scale=scale, **stacked)
+        self._rec(recs, "boost", now, zone=zone.id, name=zone.name, scale=scale, secs=secs)
 
     # -- zones file ---------------------------------------------------------------
     def set_zones(self, doc, now):
@@ -1104,6 +1179,8 @@ class GameEngine:
 
     def _on_self(self, msg, now):
         self.stopped = msg.get("stopped")
+        if self.stopped is True:
+            self._drop_override(slow_too=False)     # STOP cancels the scale override: nothing to stack on later
         self.mode_req = msg.get("mode_req")
         self.scale = msg.get("scale") if msg.get("vesc_link") is True else None
         if _num(msg.get("gps_hz")):
@@ -1191,6 +1268,7 @@ class GameEngine:
                 self._exit_state(z.id, now)
                 self._rec(recs, "zone_exit", now, zone=z.id, type=z.type, name=z.name)
         in_mud = any(z.type == "mud" for z in self.areas if z.id in self.inside)
+        mud_running = self._ov_running(now, "mud")      # a mud item's slow still running: mud wins too
         fire = []                   # (zone, kind, secs, scale): at most ONE goes to the Heltec per sample
         for z in entered:
             if z.type not in ("boost", "item"):
@@ -1200,8 +1278,8 @@ class GameEngine:
                 self._rec(recs, "suppressed", now, zone=z.id, why="kart STOPPED")
             elif self.race["hold"]:
                 self._rec(recs, "suppressed", now, zone=z.id, why="grid hold")
-            elif in_mud:
-                self._rec(recs, "suppressed", now, zone=z.id, why="inside mud")
+            elif in_mud or mud_running:
+                self._rec(recs, "suppressed", now, zone=z.id, why="inside mud" if in_mud else "mud running")
             elif st["cool_until"] is not None and now < st["cool_until"]:
                 self._rec(recs, "suppressed", now, zone=z.id, why=f"cooldown {st['cool_until'] - now:.0f} s")
             elif z.type == "item":
@@ -1243,7 +1321,7 @@ class GameEngine:
         if self.stopped is True or self.race["hold"]:
             return          # stays due: resumes on the first tick after START / GO if still inside
         z = min(muds, key=lambda m: m.scale)
-        self._cmd(recs, now, z, "mud", MUD_SECS, z.scale)
+        self._cmd(recs, now, z, "mud", self.mud_secs, z.scale)
         self.next_mud = now + MUD_REPEAT_S
         if entered:
             self._rec(recs, "mud", now, zone=z.id, name=z.name, scale=z.scale)
@@ -1337,6 +1415,7 @@ class GameEngine:
             r.update(hold=True, go_at=now + go_in, secs=msg.get("secs"), rx=now, go_confirmed=False, how=None,
                      go_utc=msg.get("go_utc"), finished=False, position=None, finish_mono=None, finish_lap=None,
                      position_source=None)
+            self._drop_override(slow_too=False)     # the firmware drops a BOOST (scale) override at the grid hold
             self._rec(recs, "race_countdown", now, go_in_s=round(go_in, 2), secs=msg.get("secs"))
             if go_in <= 0:
                 self._go(now, now, "clock", recs)
@@ -1422,7 +1501,11 @@ class GameEngine:
 
     def on_cmd(self, msg, now):
         """A {"t":"cmd"} line: STOP/START end a grid hold (the firmware clears it);
-        remember the result of our last boost (src 254, cmd 6)."""
+        remember the result of our last boost/slow (src 254, cmd 6 or 5)."""
+        if msg.get("cmd") == CMD_CODES["stop"] and msg.get("result") in (1, 2, 5):
+            self._drop_override(slow_too=False)     # firmware STOP cancels a scale override (a timed slow stays)
+        elif msg.get("cmd") == CMD_CODES["start"] and msg.get("result") in (1, 2, 3, 5):
+            self._drop_override(slow_too=True)      # firmware START cancels every override and every SLOW
         if msg.get("cmd") in (CMD_CODES["stop"], CMD_CODES["start"]) and msg.get("result") in (1, 2, 5) \
                 and self.race["hold"]:
             self.race.update(hold=False, how="stop" if msg.get("cmd") == CMD_CODES["stop"] else "start")
@@ -1430,7 +1513,7 @@ class GameEngine:
             if msg.get("cmd") == CMD_CODES["start"]:
                 self.race["go_mono"] = now
                 self._reset_lap()
-        if msg.get("src") != SRC_USB or msg.get("cmd") != CMD_CODES["boost"]:
+        if msg.get("src") != SRC_USB or msg.get("cmd") not in (CMD_CODES["boost"], CMD_CODES["slow"]):
             return None
         res = msg.get("result")
         self.last_result = {"result": res, "result_name": CMD_RESULT_NAMES.get(res), "arg": msg.get("arg"), "mono": now}
@@ -1448,6 +1531,8 @@ class GameEngine:
             kind = "grid"                  # held at zero power for the start: not MUD, not STOPPED
         elif sc is None or ms is None:
             kind = ov["kind"] if ov else "unknown"
+        elif ov and ov["kind"] == "mud":
+            kind = "mud"                   # timed SLOW (0.2.4+) caps speed, not the scale: the override says mud
         elif sc > ms + SCALE_TOL or (ov and ov["kind"] == "boost" and sc >= ms - SCALE_TOL):
             kind = "boost"
         elif sc < ms - SCALE_TOL:
@@ -1495,6 +1580,8 @@ class GameEngine:
             "events": [{k: v for k, v in e.items() if k != "mono"} | {"age_s": _age(e["mono"], now)}
                        for e in list(self.events)[-8:]],
             "cmds_sent": self.cmds_sent,
+            "fw": self.fw,
+            "mud_cmd": "slow" if self.timed_slow() else "boost",
             "source": self.source,
             "race": self.race_snapshot(now),
             "track": self.track,
@@ -1515,7 +1602,9 @@ class GameEngine:
 # "enabled": true, "source": "freeplay", "zones": [item boxes], "track": {...}}); the server hands it
 # to the same GameEngine.set_zones, so collection, rolls, effects, cooldowns, the HUD roulette and
 # every safety rule (nothing while STOPPED or in grid hold, mud wins, scale <= 1.0) are the existing
-# code. Freeplay itself never produces a command line. The course is one lap of this kart's own
+# code. Freeplay itself produces one command only: switching it on asks for ECO (`mode 0`, take_eco(),
+# sent by the server through its POST /cmd path), so the 15 mph ECO cap is the base and a BOOST, which
+# lifts the cap one mode up (firmware BOOST_LIFTS_CAP), is felt. The course is one lap of this kart's own
 # filtered GPS positions (the loop-closing logic is a port of pit/server/pitcore.TrackRecorder).
 FREEPLAY_BOXES = 3           # config freeplay_boxes, 1-6
 FREEPLAY_BOXES_MAX = 6
@@ -1701,6 +1790,8 @@ class FreeplayGame:
         self._doc = None
         self._fill_at = 0.0
         self.changed = True          # persistence: the server saves export() when this is set
+        self.eco_due = False         # switched on: one `mode 0` request is owed (take_eco())
+        self.eco = None              # outcome of the last one {"outcome", "why"/"id"/"error", "mono"}
 
     @staticmethod
     def _rec(recs, ev, **kw):
@@ -1722,12 +1813,35 @@ class FreeplayGame:
         if on == self.on:
             return recs
         self.on = on
+        self.eco_due = on            # only the off -> on transition (button or API); never a restore
         self.boxes, self.pending = [], []
         self.rec = LoopRecorder() if on and self.course is None else None
         self._fill_at = 0.0
         self._touch(persist=True)
         self._rec(recs, "freeplay_on" if on else "freeplay_off", course_m=self.course["length_m"] if self.course else None)
         return recs
+
+    FREEPLAY_MODE = 0            # ECO
+
+    def take_eco(self, stopped, grid_hold):
+        """The ECO request owed by the last switch-on, at most once: None (nothing owed) or
+        {"send": True, "line": "mode 0"} | {"send": False, "why": ...}. Skipped while the kart is
+        STOPPED or in a grid hold (the game's own rule for those states), and while freeplay is not
+        the running game (pit game on, demo). Later ticks never ask again."""
+        if not self.eco_due:
+            return None
+        self.eco_due = False
+        if stopped is True:
+            return {"send": False, "why": "kart STOPPED"}
+        if grid_hold:
+            return {"send": False, "why": "grid hold"}
+        if not self.running():
+            return {"send": False, "why": self.pause_reason or self.phase}
+        return {"send": True, "line": f"mode {self.FREEPLAY_MODE}"}
+
+    def note_eco(self, outcome, now, **kw):
+        self.eco = {"outcome": outcome, "mono": now, **kw}
+        return {"ev": "freeplay_mode", "source": "freeplay", "mode": self.FREEPLAY_MODE, "outcome": outcome, **kw}
 
     def reset_course(self, now):
         recs = []
@@ -1933,6 +2047,8 @@ class FreeplayGame:
                 "boxes": [{"id": b["id"], "name": b["name"], "lat": b["lat"], "lon": b["lon"], "r_m": b["r_m"]}
                           for b in self.boxes],
                 "respawning": len(self.pending),
+                "eco": ({k: v for k, v in self.eco.items() if k != "mono"} | {"age_s": _age(self.eco["mono"], now)})
+                       if self.eco else None,
                 "collected": self.collected,
                 "record": {"distance_m": round(r.travel, 1), "points": len(r.points)}
                           if r is not None and self.course is None and self.on else None}

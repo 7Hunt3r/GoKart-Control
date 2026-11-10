@@ -31,12 +31,15 @@ every game event and every game command).
 
 Game layer (pit/server/map/ZONES.md): the zones file arrives with the map package;
 kartcore.GameEngine evaluates it against this kart's own fixes and the server sends
-the resulting `boost SECS SCALE` lines to the Heltec. Nothing else is ever sent by
-the game (no STOP/START/mode), and nothing above scale 1.0.
+the resulting `boost SECS SCALE` lines (stacked up to 30 s) to the Heltec, plus `slow 5 SECS`
+for mud when the Heltec's status fw is kart-0.2.4+ (older/unknown: `boost SECS 0.5`). Nothing
+else is ever sent by the game (no STOP/START/mode), and nothing above scale 1.0.
 
 Freeplay (kartcore.FreeplayGame): with no pit game running, the kart records one lap of its
 own path and keeps random item boxes on it; its zones document goes through the same engine.
-The pit's own game always wins (freeplay pauses). State in freeplay.json next to game-state.json.
+Switching it on sends one `mode 0` (ECO) through the POST /cmd path (skipped while STOPPED /
+grid hold / paused). The pit's own game always wins (freeplay pauses). State in freeplay.json
+next to game-state.json.
 """
 from __future__ import annotations
 
@@ -92,6 +95,7 @@ DEFAULTS = {
     "sun_mode": True,                   # driver page: opaque high-contrast SUN theme (the SUN button overrides it per device)
     "freeplay": True,                   # allow freeplay (FREEPLAY map button / POST /api/freeplay): kart-local item boxes, no pit
     "freeplay_boxes": 3,                # item boxes kept on the freeplay course (1-6)
+    "mud_slow_secs": 4,                 # each mud command (zone repeat / MUD item): `slow 5 N` on Heltec kart-0.2.4+, else `boost N 0.5`
     "rotate": 0,                        # install.sh only: 180 = panel mounted ports-down (kernel + touch rotation)
     "health_period_s": health.PERIOD_S, # vcgencmd get_throttled + CPU temp sample period (Pi only)
     "health_file": None,                # tests/dev: read the get_throttled text from this file instead of vcgencmd
@@ -103,6 +107,7 @@ CONFIG_RULES = {
     "http_port": (int, 1, 65535), "status_poll_s": (float, 5, 3600), "max_log_mb": (float, 10, 100000),
     "demo_max_s": (float, 10, 3600), "sound_volume": (float, 0, 1), "rotate": (int, 0, 180),
     "health_period_s": (float, 0.2, 3600), "freeplay_boxes": (int, 1, 6),
+    "mud_slow_secs": (int, 1, 30),
 }
 CONFIG_BOOLS = ("beginner_mode", "remote_cmd", "game", "gps_correction", "demo", "sound", "sun_mode", "freeplay")
 CONFIG_CHOICES = {"map_orientation": ("heading_up", "north_up"), "rotate": (0, 180)}
@@ -318,7 +323,8 @@ class App:
         self.disp = kartcore.KartDisplay(configured_id=self.configured_id)
         self.cmds = kartcore.CommandTracker()
         self.game = kartcore.GameEngine(local_enabled=bool(self.cfg.get("game", True)),
-                                        gps_correction=bool(self.cfg.get("gps_correction", False)))
+                                        gps_correction=bool(self.cfg.get("gps_correction", False)),
+                                        mud_secs=int(self.cfg.get("mud_slow_secs", kartcore.MUD_SLOW_SECS)))
 
     # -- demo mode -------------------------------------------------------------------
     def _demo_zones(self):
@@ -443,6 +449,7 @@ class App:
             if self.disp.heltec_reboots != self._reboots_seen:     # Heltec rebooted mid-session
                 self._reboots_seen = self.disp.heltec_reboots
                 self._status_due = now + 1.0                        # re-read fw/radio/gps details
+                self.game.set_fw(None)                              # maybe reflashed: old mud until the reply
                 self.log.write("event", what="heltec_reboot", uptime_s=msg.get("uptime_s"))
             if not self._mismatch_logged and self.configured_id and self.disp.heltec_id \
                     and self.disp.heltec_id != self.configured_id:
@@ -451,6 +458,8 @@ class App:
                 print(f"{wall_iso()} WARNING: config kart_id {self.configured_id} but the Heltec says kart "
                       f"{self.disp.heltec_id}; showing the Heltec's id (fix config.json or the Heltec's `id`)", flush=True)
             game = []
+            if t == "status":
+                self.game.set_fw(msg.get("fw"))     # mud as a timed SLOW only on kart-0.2.4+ (kartcore.FW_TIMED_SLOW)
             if t == "cmd":
                 rec = self.cmds.on_cmd_line(msg, wall)
                 if rec:
@@ -485,6 +494,7 @@ class App:
                 self.log.write("event", what="link_up" if connected else "link_down", desc=desc, during="demo")
                 return
             self.disp.on_link_change()
+            self.game.set_fw(None)                    # another Heltec / a reflash: unknown until its status reply
             if connected:
                 self.disp.simulation = False
                 self._status_due = time.monotonic() + 1.0     # ask for fw/radio/gps details soon
@@ -624,11 +634,31 @@ class App:
                     raise ValueError('expected {"on": true|false}, {"toggle": true} or {"reset": true}')
                 recs = fp.set_on(on, now)
             recs += fp.select(self.maps.zones(), now, demo=self.demo is not None)[1]   # phase for the reply
+            eco = fp.take_eco(self.game.stopped, self.game.grid_hold())       # switched on: ECO is the base
         self.log.write("op", who=who, action="freeplay", request=body)
         self._game_out(recs)
+        if eco is not None:
+            self._freeplay_eco(eco)
         self._save_freeplay()
         with self.lock:
             return self.freeplay.snapshot(now)
+
+    def _freeplay_eco(self, eco):
+        """Freeplay switched on: `mode 0` through the same path as POST /cmd mode (CommandTracker, op log;
+        the firmware treats it as the driver's own mode request). Outcome -> a freeplay_mode record."""
+        now = time.monotonic()
+        if not eco["send"]:
+            with self.lock:
+                rec = self.freeplay.note_eco("skipped", now, why=eco["why"])
+        else:
+            try:
+                out = self.command({"cmd": "mode", "arg": kartcore.FreeplayGame.FREEPLAY_MODE}, "freeplay")
+                with self.lock:
+                    rec = self.freeplay.note_eco("sent", now, line=out["line"], id=out["id"])
+            except kartcore.CommandError as e:
+                with self.lock:
+                    rec = self.freeplay.note_eco("failed", now, error=str(e))
+        self._game_out([rec])
 
     def _save_game_state(self):
         with self.lock:

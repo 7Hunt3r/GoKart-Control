@@ -387,7 +387,7 @@ class Game(unittest.TestCase):
                     sent.append((round(t, 2), r["line"]))
             t = round(t + 0.25, 2)
         times = [x[0] for x in sent]
-        self.assertTrue(all(x[1] == "boost 3 0.50" for x in sent), sent)
+        self.assertTrue(all(x[1] == "boost 4 0.50" for x in sent), sent)
         self.assertEqual(times[0], 2.0)                    # entry at e = -10 (t = 2.0)
         gaps = [b - a for a, b in zip(times, times[1:])]
         self.assertTrue(all(abs(gp - 2.0) < 0.26 for gp in gaps), gaps)
@@ -401,7 +401,7 @@ class Game(unittest.TestCase):
     def test_mud_wins_over_boost(self):
         g, _ = self.engine(mud_zone(), boost_zone(e=8, r=8))
         r = g.on_self(fix(0, 0), 1.0)                      # inside both at once
-        self.assertEqual(lines(r), ["boost 3 0.50"])
+        self.assertEqual(lines(r), ["boost 4 0.50"])
         self.assertEqual(evs(r, "suppressed")[0]["why"], "inside mud")
 
     def test_lap_timing_both_directions_and_min_lap(self):
@@ -500,7 +500,7 @@ class Game(unittest.TestCase):
         self.assertEqual(evs(r, "suppressed")[0]["why"], "kart STOPPED")
         # START while still inside the mud: the (safe) slowdown resumes; the boost was used up
         r = g.on_self(fix(56, 0, stopped=False), t) + g.tick(t + 0.25)
-        self.assertEqual(lines(r), ["boost 3 0.50"])
+        self.assertEqual(lines(r), ["boost 4 0.50"])
 
     def test_disabled_sends_nothing(self):
         g, recs = self.engine(boost_zone(), mud_zone(x0=40, x1=60), lap_zone(), enabled=False)
@@ -864,7 +864,7 @@ class Items(unittest.TestCase):
 
     def test_each_outcome_command(self):
         for x, item, line in ((0.10, "boost", ["boost 5 1.00"]), (0.50, "super", ["boost 8 1.00"]),
-                              (0.70, "mud", ["boost 3 0.50"]), (0.95, "empty", [])):
+                              (0.70, "mud", ["boost 4 0.50"]), (0.95, "empty", [])):
             g = kc.GameEngine(rng=FixedRng(x))
             g.set_zones(zones_doc(item_zone()), 0.0)
             g.on_self(fix(-20, 0), 1.0)
@@ -1339,7 +1339,8 @@ class Freeplay(unittest.TestCase):
         self.assertEqual(fp.collected, len(got))
         items = evs(recs, "item")
         self.assertTrue(items and all(r["source"] == "freeplay" for r in items))
-        self.assertTrue(set(lines(recs)) <= {"boost 5 1.00"}, lines(recs))      # only the item effect, never above 1.0
+        # only the item effect (5 s, or more when it stacks on a running boost), never above 1.0
+        self.assertTrue(all(re.fullmatch(r"boost ([5-9]|[12]\d|30) 1\.00", x) for x in lines(recs)), lines(recs))
         self.assertTrue(all(r["source"] == "freeplay" for r in recs if r["ev"] == "cmd"))
         spawns = [r for r in evs(recs, "freeplay_spawn") if r.get("respawn")]
         self.assertGreaterEqual(len(spawns), 2)
@@ -1465,7 +1466,7 @@ class Freeplay(unittest.TestCase):
         fp, _ = self.ready(seed=9)
         s = fp.snapshot(2.0)
         self.assertEqual(set(s), {"allowed", "on", "phase", "pause_reason", "boxes_target", "course", "boxes",
-                                  "respawning", "collected", "record"})
+                                  "respawning", "collected", "record", "eco"})
         self.assertIn(s["phase"], kc.FP_PHASES)
         self.assertEqual(set(s["course"]), {"points", "length_m", "source"})
         self.assertEqual(set(s["boxes"][0]), {"id", "name", "lat", "lon", "r_m"})
@@ -1495,6 +1496,197 @@ console.log(JSON.stringify([
             "FREEPLAY: drive one lap to set the course · 45 m", "FREEPLAY: waiting for GPS",
             "FREEPLAY PAUSED (pit game on)", None, None])
         self.assertEqual(out[7:], [True, False])
+
+
+# --- 2026-11-09 night: freeplay starts in ECO, boosts stack, mud = timed SLOW on kart-0.2.4+ ----------
+class FwVersion(unittest.TestCase):
+    def test_parse_and_compare(self):
+        self.assertEqual(kc.fw_version("kart-0.2.4"), (0, 2, 4))
+        self.assertEqual(kc.fw_version("sim-kart-0.2.10"), (0, 2, 10))
+        self.assertEqual(kc.fw_version("kart-0.2.4-dev"), (0, 2, 4))
+        for bad in (None, "", "kart", "kart-0.2", "0.2.4", 24, "pit-0.3.0"):
+            self.assertIsNone(kc.fw_version(bad), bad)
+        want = kc.FW_TIMED_SLOW
+        self.assertEqual(want, (0, 2, 4))
+        for fw, ok in (("kart-0.2.4", True), ("kart-0.2.5", True), ("kart-0.3.0", True), ("kart-1.0.0", True),
+                       ("kart-0.2.10", True), ("sim-kart-0.2.4", True), ("kart-0.2.3", False),
+                       ("kart-0.1.9", False), ("sim-kart-0.1.0", False), (None, False), ("garbage", False)):
+            self.assertEqual(kc.fw_at_least(fw, want), ok, fw)
+        self.assertEqual(kc.slow_line(5, 4), "slow 5 4")
+        self.assertEqual(kc.slow_line(5, 99), "slow 5 60")
+
+
+def fx(e, n, **kw):
+    """fix() fast enough (400 km/h) that the long test hops between pads are never GPS outliers."""
+    return fix(e, n, **{"gps_kph": 400.0, **kw})
+
+
+def pad(zid, e, secs=5, scale=1.0, r=3):
+    return boost_zone(e=e, r=r, secs=secs, scale=scale, cooldown_s=60) | {"id": zid, "name": zid}
+
+
+class BoostStacking(unittest.TestCase):
+    def engine(self, *zones, rng=None, fw=None):
+        g = kc.GameEngine(rng=rng)
+        g.set_zones(zones_doc(*zones), 0.0)
+        g.set_fw(fw)
+        g.on_self(fx(-50, 0), 0.5)
+        return g
+
+    def test_stack_remaining_plus_new(self):
+        g = self.engine(pad("p1", 0), pad("p2", 30, scale=0.8))
+        r = g.on_self(fx(0, 0), 1.0)
+        self.assertEqual(lines(r), ["boost 5 1.00"])
+        self.assertEqual(evs(r, "boost_stacked"), [])
+        self.assertEqual(g.override["until"], 6.0)
+        r = g.on_self(fx(30, 0), 3.0)                       # 3 s left + 5 = 8, scale max(1.0, 0.8)
+        self.assertEqual(lines(r), ["boost 8 1.00"])
+        st = evs(r, "boost_stacked")[0]
+        self.assertEqual((st["total_s"], st["left_s"], st["added_s"], st["scale"]), (8, 3.0, 5, 1.0))
+        self.assertEqual(evs(r, "boost")[0]["secs"], 8)
+        self.assertEqual(g.override["until"], 11.0)          # the HUD counts down the extended end
+        self.assertEqual(g.meter(3.0)["override"]["left_s"], 8.0)
+        self.assertEqual(g.meter(10.5)["override"]["left_s"], 0.5)
+        self.assertIsNone(g.meter(11.0)["override"])
+
+    def test_stack_scale_is_the_max_and_never_above_1(self):
+        g = self.engine(pad("p1", 0, scale=0.8), pad("p2", 30, scale=0.9))
+        self.assertEqual(lines(g.on_self(fx(0, 0), 1.0)), ["boost 5 0.80"])
+        self.assertEqual(lines(g.on_self(fx(30, 0), 2.0)), ["boost 9 0.90"])
+        g = self.engine(pad("p1", 0, scale=1.0), pad("p2", 30, scale=5.0))
+        g.on_self(fx(0, 0), 1.0)
+        self.assertEqual(lines(g.on_self(fx(30, 0), 2.0)), ["boost 9 1.00"])
+
+    def test_stack_caps_at_30(self):
+        g = self.engine(pad("p1", 0, secs=20), pad("p2", 30, secs=20), pad("p3", 60, secs=8))
+        g.on_self(fx(0, 0), 1.0)
+        r = g.on_self(fx(30, 0), 2.0)                       # 19 + 20 = 39 -> 30
+        self.assertEqual(lines(r), ["boost 30 1.00"])
+        self.assertEqual(evs(r, "boost_stacked")[0]["total_s"], 30)
+        self.assertEqual(g.override["until"], 32.0)
+        self.assertEqual(lines(g.on_self(fx(60, 0), 3.0)), ["boost 30 1.00"])   # still 30, re-armed from now
+        self.assertEqual(g.override["until"], 33.0)
+
+    def test_item_boost_and_super_stack_too(self):
+        g = self.engine(pad("p1", 0), item_zone(e=30, r=3), rng=FixedRng(0.5))   # 0.5 = SUPER (8 s)
+        g.on_self(fx(0, 0), 1.0)
+        r = g.on_self(fx(30, 0), 2.0)                       # 4 left + 8
+        self.assertEqual(evs(r, "item")[0]["item"], "super")
+        self.assertEqual(lines(r), ["boost 12 1.00"])
+
+    def test_no_stack_after_it_ended_or_after_stop_start(self):
+        g = self.engine(pad("p1", 0), pad("p2", 30))
+        g.on_self(fx(0, 0), 1.0)
+        self.assertEqual(lines(g.on_self(fx(30, 0), 6.0)), ["boost 5 1.00"])    # ended at 6.0: fresh
+        g = self.engine(pad("p1", 0), pad("p2", 30))
+        g.on_self(fx(0, 0), 1.0)
+        g.on_cmd({"t": "cmd", "src": 0, "cmd": 2, "arg": 0, "result": 2}, 1.5)     # pit STOP: firmware dropped it
+        g.on_cmd({"t": "cmd", "src": 0, "cmd": 3, "arg": 0, "result": 2}, 2.0)
+        self.assertEqual(lines(g.on_self(fx(30, 0), 3.0)), ["boost 5 1.00"])
+
+    def test_mud_running_does_not_stack_and_wins(self):
+        g = self.engine(item_zone(e=0, r=3), pad("p1", 30), rng=FixedRng(0.7), fw="kart-0.2.4")   # 0.7 = MUD
+        r = g.on_self(fx(0, 0), 1.0)
+        self.assertEqual(lines(r), ["slow 5 4"])
+        r = g.on_self(fx(30, 0), 3.0)                       # boost pad while the mud slow runs
+        self.assertEqual(lines(r), [])
+        self.assertEqual(evs(r, "suppressed")[0]["why"], "mud running")
+        self.assertEqual(g.override["kind"], "mud")
+        # mud during a boost replaces it (mud wins; nothing stacks onto a mud)
+        g = self.engine(pad("p1", 0), item_zone(e=30, r=3), rng=FixedRng(0.7), fw="kart-0.2.4")
+        g.on_self(fx(0, 0), 1.0)
+        r = g.on_self(fx(30, 0), 2.0)
+        self.assertEqual(lines(r), ["slow 5 4"])
+        self.assertEqual(evs(r, "boost_stacked"), [])
+        self.assertEqual((g.override["kind"], g.override["until"]), ("mud", 6.0))
+
+
+class MudSlow(unittest.TestCase):
+    def item_mud(self, fw, **kw):
+        g = kc.GameEngine(rng=FixedRng(0.7), **kw)
+        g.set_zones(zones_doc(item_zone()), 0.0)
+        g.set_fw(fw)
+        g.on_self(fx(-20, 0), 1.0)
+        return g, g.on_self(fx(-4, 0), 1.5)
+
+    def test_item_mud_by_firmware(self):
+        for fw, line in (("kart-0.2.4", "slow 5 4"), ("kart-0.3.1", "slow 5 4"), ("sim-kart-0.2.4", "slow 5 4"),
+                         ("kart-0.2.3", "boost 4 0.50"), ("kart-0.2.2", "boost 4 0.50"), (None, "boost 4 0.50"),
+                         ("sim-kart-0.1.0", "boost 4 0.50"), ("who knows", "boost 4 0.50")):
+            g, r = self.item_mud(fw)
+            self.assertEqual(lines(r), [line], fw)
+            self.assertEqual(evs(r, "cmd")[0]["effect"], "mud")
+            ov = g.override
+            self.assertEqual((ov["kind"], ov["until"], ov["via"]), ("mud", 5.5, line.split()[0]), fw)
+            self.assertEqual(g.snapshot(1.5)["mud_cmd"], line.split()[0])
+
+    def test_mud_secs_config(self):
+        _, r = self.item_mud("kart-0.2.4", mud_secs=6)
+        self.assertEqual(lines(r), ["slow 5 6"])
+        _, r = self.item_mud("kart-0.2.3", mud_secs=6)
+        self.assertEqual(lines(r), ["boost 6 0.50"])
+        self.assertEqual(kc.GameEngine(mud_secs=99).mud_secs, 30)
+
+    def test_meter_shows_mud_while_the_scale_is_unchanged(self):
+        g, _ = self.item_mud("kart-0.2.4")
+        g.on_self(fx(-4, 0, scale=0.75, mode_req=1), 2.0)   # timed SLOW: the scale stays at NORMAL's
+        m = g.meter(2.0)
+        self.assertEqual((m["kind"], m["override"]["kind"], m["override"]["left_s"]), ("mud", "mud", 3.5))
+        self.assertEqual(g.meter(6.0)["kind"], "normal")
+
+    def test_mud_zone_repeats_slow_on_new_firmware(self):
+        g = kc.GameEngine()
+        g.set_zones(zones_doc(mud_zone()), 0.0)
+        g.set_fw("kart-0.2.4")
+        r = g.on_self(fx(0, 0), 1.0) + g.tick(2.0) + g.tick(3.1)
+        self.assertEqual(lines(r), ["slow 5 4", "slow 5 4"])
+        g.set_fw(None)                                       # link change / reboot: unknown -> old behaviour
+        self.assertEqual(lines(g.tick(5.2)), ["boost 4 0.50"])
+
+    def test_stop_keeps_a_timed_slow_start_clears_it(self):
+        g, _ = self.item_mud("kart-0.2.4")
+        g.on_cmd({"t": "cmd", "src": 0, "cmd": 2, "arg": 0, "result": 2}, 2.0)      # firmware STOP keeps SLOW
+        self.assertEqual(g.override["kind"], "mud")
+        g.on_cmd({"t": "cmd", "src": 0, "cmd": 3, "arg": 0, "result": 2}, 2.5)      # START clears every SLOW
+        self.assertIsNone(g.override)
+        res = g.on_cmd({"t": "cmd", "src": 254, "cmd": 5, "arg": 5, "result": 1}, 3.0)
+        self.assertEqual(res["result_name"], "accepted")     # our slow's echo is remembered like a boost's
+
+
+class FreeplayEco(unittest.TestCase):
+    def test_eco_once_on_switch_on(self):
+        fp = kc.FreeplayGame(rng=__import__("random").Random(1))
+        self.assertIsNone(fp.take_eco(False, False))         # never switched on: nothing owed
+        fp.set_on(True, 0.0)
+        fp.select(None, 0.0)
+        self.assertEqual(fp.take_eco(False, False), {"send": True, "line": "mode 0"})
+        self.assertIsNone(fp.take_eco(False, False))         # not duplicated
+        for t in (0.25, 0.5, 1.0, 5.0):                      # later ticks never ask again
+            fp.select(None, t)
+            fp.tick(t)
+            self.assertIsNone(fp.take_eco(False, False))
+        fp.set_on(True, 6.0)                                 # already on: no transition
+        self.assertIsNone(fp.take_eco(False, False))
+        rec = fp.note_eco("sent", 6.0, line="mode 0", id=3)
+        self.assertEqual((rec["ev"], rec["outcome"], rec["mode"], rec["source"]), ("freeplay_mode", "sent", 0, "freeplay"))
+        self.assertEqual(fp.snapshot(7.0)["eco"], {"outcome": "sent", "line": "mode 0", "id": 3, "age_s": 1.0})
+        fp.set_on(False, 8.0)
+        fp.set_on(True, 9.0)                                 # off -> on again: owed again
+        fp.select(None, 9.0)
+        self.assertTrue(fp.take_eco(None, False)["send"])    # STOPPED unknown (no self line yet): send
+
+    def test_eco_skipped_when_stopped_grid_or_not_running(self):
+        for stopped, hold, pit, why in ((True, False, None, "kart STOPPED"), (False, True, None, "grid hold"),
+                                        (False, False, zones_doc(boost_zone()), "pit game on")):
+            fp = kc.FreeplayGame(rng=__import__("random").Random(1))
+            fp.set_on(True, 0.0)
+            fp.select(pit, 0.0)
+            self.assertEqual(fp.take_eco(stopped, hold), {"send": False, "why": why})
+            self.assertIsNone(fp.take_eco(False, False))     # skipped means skipped: not sent later either
+        fp = kc.FreeplayGame(rng=__import__("random").Random(1))
+        fp.load({"v": 1, "on": True}, 0.0)                   # restored on after a restart: no ECO
+        fp.select(None, 0.0)
+        self.assertIsNone(fp.take_eco(False, False))
 
 
 if __name__ == "__main__":

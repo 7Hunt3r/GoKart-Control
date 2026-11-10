@@ -189,9 +189,14 @@ with a fix, plus a 4 Hz tick):
 - **boost** (circle or polygon): on entry, sends the Heltec `boost <secs> <scale>`
   once. Re-armed only after leaving the zone (> 3 m outside the edge) and
   `cooldown_s` (default 20) after that exit.
-- **mud**: on entry `boost 3 <scale>`, repeated every 2 s while inside; leaving
-  just stops repeating (the Heltec reverts within 3 s). Inside mud, a boost
-  entry is suppressed (mud wins).
+- **mud**: on entry a timed mud command, repeated every 2 s while inside; leaving
+  just stops repeating (it ends within `mud_slow_secs`, default 4 s). Heltec
+  kart-0.2.4+ (status `fw`): `slow 5 4`, a real 5 mph cap that reverts by itself;
+  older or unknown firmware: `boost 4 <scale>`. Inside mud, or while a mud is
+  still running, a boost entry is suppressed (mud wins).
+- **stacking**: a boost while our previous boost still runs sends the remaining +
+  new seconds (<= 30) at the larger scale (<= 1.0); `boost_stacked` record, and the
+  HUD meter counts down the extended end.
 - **lapline**: the path between consecutive fixes (<= 5 s apart) crossing a-b in
   either direction counts if `min_lap_s` (default 20) has passed since the last
   crossing. The first crossing starts lap 1; crossing time is interpolated
@@ -251,7 +256,7 @@ with a fix, plus a 4 Hz tick):
 
 - **Item boxes** (`type: "item"`, circle or polygon): on entry the kart rolls
   locally (seedable RNG): 45 % BOOST (`boost 5 1.0`), 15 % SUPER (`boost 8 1.0`),
-  25 % MUD (`boost 3 0.5`), 15 % empty (nothing sent). Same exit/cooldown rules as
+  25 % MUD (`slow 5 4`, or `boost 4 0.5` before kart-0.2.4), 15 % empty (nothing sent). Same exit/cooldown rules as
   a boost pad (`cooldown_s`, default 15) and the same gates. Logged as
   `ev: "item"` with `item: boost|super|mud|empty`.
 - **Race start** (`{"t":"race","event":"countdown","go_in_ms":N,...}` /
@@ -433,10 +438,16 @@ stack, headless screenshots); not yet driven on kart 2.
 **What it is.** `kartcore.FreeplayGame` builds a zones document in the same shape mapsync delivers
 (`{"version": "freeplay-N", "enabled": true, "source": "freeplay", "zones": [item boxes], "track": {...}}`)
 and the server hands it to the normal `GameEngine.set_zones`. Everything after that is the existing game
-layer: the item roll (45 % BOOST `boost 5 1.0`, 15 % SUPER `boost 8 1.0`, 25 % MUD `boost 3 0.5`, 15 %
-empty), the roulette, sounds, cooldown/hysteresis, nothing while STOPPED or in a grid hold, mud wins,
-scale never above 1.0. Freeplay itself never sends anything to the Heltec (no mode/start/stop/slow); the
-only line is the engine's timed `boost`. Engine records from a freeplay document carry
+layer: the item roll (45 % BOOST `boost 5 1.0`, 15 % SUPER `boost 8 1.0`, 25 % MUD `slow 5 4` on Heltec
+kart-0.2.4+ / `boost 4 0.5` before, 15 % empty), boosts stacking up to 30 s, the roulette, sounds,
+cooldown/hysteresis, nothing while STOPPED or in a grid hold, mud wins, scale never above 1.0.
+
+**Starts in ECO** (2026-11-09 night). Switching freeplay ON (button or API, not a restart restore) sends
+one `mode 0` through the same path as `POST /cmd` mode (it shows in `commands` with `who: "freeplay"`),
+unless the kart is STOPPED, in a grid hold, or freeplay is paused/demo; outcome in the session log
+(`freeplay_mode`: sent / skipped / failed) and in `/api/state` `freeplay.eco`. ECO's 15 mph cap is the
+base and a BOOST lifts it to 25 mph for its time (firmware `BOOST_LIFTS_CAP`). Apart from that one ECO
+request freeplay sends nothing itself (no start/stop/slow); the other lines are the engine's. Engine records from a freeplay document carry
 `"source": "freeplay"` in the session log, as do freeplay's own records (`freeplay_on/off`,
 `freeplay_phase`, `freeplay_course`, `freeplay_spawn`, `freeplay_collected`, `freeplay_course_reset`).
 
@@ -474,7 +485,7 @@ off for the demo and comes back after it.
 **`/api/state` `freeplay`:** `{"allowed", "on", "phase": "recording"|"ready"|"paused_pit"|"off"|"no_gps",
 "pause_reason", "boxes_target", "course": {"points", "length_m", "source": "recorded"|"pit"} | null,
 "boxes": [{"id", "name", "lat", "lon", "r_m"}], "respawning", "collected", "record": {"distance_m",
-"points"} | null}`. While freeplay runs, `map.zones` is its document (the HUD draws the boxes) and
+"points"} | null, "eco": {"outcome", "line"/"id" | "why" | "error", "age_s"} | null}`. While freeplay runs, `map.zones` is its document (the HUD draws the boxes) and
 `game.source` is `"freeplay"`; `/map/zones.json` stays the pit's file. The pit never sees freeplay boxes.
 
 **Config + files.** `freeplay` (default true = allowed; false hides the button and refuses the API; it
@@ -610,6 +621,7 @@ by the default and reported in the journal (`CONFIG: ...`), the session log and 
 | `sound` / `sound_volume` | true / 0.8 | page sounds |
 | `sun_mode` | true | SUN theme by default (the SUN button overrides it per device) |
 | `freeplay` / `freeplay_boxes` | true / 3 | FREEPLAY allowed (kart-local item boxes, see Freeplay); boxes on the course (1-6) |
+| `mud_slow_secs` | 4 | seconds per mud command (1-30): `slow 5 N` on Heltec kart-0.2.4+, else `boost N 0.5` |
 | `rotate` | 0 | install.sh only: 180 = ports-down mount |
 
 ### Troubleshooting

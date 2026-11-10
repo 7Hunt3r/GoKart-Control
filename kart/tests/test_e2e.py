@@ -241,8 +241,11 @@ class EndToEnd(unittest.TestCase):
                 recs = [json.loads(x) for x in f]
             tx = [r["line"] for r in recs if r["kind"] == "tx"]
             self.assertIn("boost 5 1.00", tx)
-            self.assertIn("boost 3 0.50", tx)
-            self.assertFalse([x for x in tx if x.split()[0] in ("stop", "start", "mode", "slow")], tx)
+            self.assertIn("slow 5 4", tx)                             # mud = timed SLOW (sim reports kart-0.2.4)
+            self.assertNotIn("boost 4 0.50", tx)
+            self.assertEqual((g["fw"], g["mud_cmd"]), ("sim-kart-0.2.4", "slow"))
+            self.assertFalse([x for x in tx if x.split()[0] in ("stop", "start", "mode")], tx)
+            self.assertFalse([x for x in tx if x.split()[0] == "slow" and x != "slow 5 4"], tx)
             game = [r for r in recs if r["kind"] == "game"]
             evs = {r["ev"] for r in game}
             self.assertTrue({"game_on", "zone_enter", "zone_exit", "cmd", "boost", "mud", "lap_start", "lap"} <= evs, evs)
@@ -250,7 +253,8 @@ class EndToEnd(unittest.TestCase):
             # the simulator applied the override: a self line with scale 1.0 while in NORMAL
             rx = [json.loads(r["line"]) for r in recs if r["kind"] == "rx" and '"t":"self"' in r["line"]]
             self.assertTrue(any(x["scale"] == 1.0 and x["mode_req"] == 1 for x in rx))
-            self.assertTrue(any(x["scale"] == 0.5 for x in rx))
+            self.assertTrue(any(x["slow_mph"] == 5 for x in rx))     # the Heltec's own SLOW (banner source)
+            self.assertFalse(any(x["scale"] == 0.5 for x in rx))     # mud no longer touches the scale
         finally:
             st.close()
 
@@ -265,6 +269,13 @@ class EndToEnd(unittest.TestCase):
             code, body = st.request("POST", "/api/freeplay", {"on": True})
             self.assertEqual(code, 200, body)
             self.assertEqual(json.loads(body)["freeplay"]["phase"], "recording")
+            eco = json.loads(body)["freeplay"]["eco"]                       # switched on: ECO through POST /cmd's path
+            self.assertEqual((eco["outcome"], eco["line"]), ("sent", "mode 0"))
+            s = st.wait(lambda s: s["self"]["status"]["mode_actual"] == 0 and s["self"]["status"]["mode_confirmed"],
+                        what="freeplay ECO applied")
+            c = next(c for c in s["commands"] if c["id"] == eco["id"])
+            self.assertEqual((c["who"], c["line"], c["result_name"]), ("freeplay", "mode 0", "applied"))
+            self.assertEqual(st.request("POST", "/api/freeplay", {"on": True})[0], 200)   # already on: no 2nd ECO
             self.assertEqual(st.request("POST", "/api/freeplay", {"on": "yes"})[0], 400)
             s = st.wait(lambda s: s["freeplay"]["phase"] == "ready" and len(s["freeplay"]["boxes"]) == 3,
                         timeout=45, what="course recorded + 3 boxes")
@@ -284,7 +295,12 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue([r for r in game if r["ev"] == "item" and r.get("source") == "freeplay"])
             self.assertTrue([r for r in game if r["ev"] == "freeplay_collected"])
             tx = [r["line"] for r in recs if r["kind"] == "tx"]
-            self.assertFalse([x for x in tx if x.split()[0] not in ("boost", "status")], tx)
+            # the game sends boost (and slow for mud on 0.2.4+); freeplay sent ECO exactly once
+            self.assertFalse([x for x in tx if x.split()[0] not in ("boost", "slow", "mode", "status")], tx)
+            self.assertEqual([x for x in tx if x.split()[0] == "mode"], ["mode 0"], tx)
+            self.assertFalse([x for x in tx if x.split()[0] == "slow" and x != "slow 5 4"], tx)
+            fm = [r for r in game if r["ev"] == "freeplay_mode"]
+            self.assertEqual([(r["outcome"], r["mode"]) for r in fm], [("sent", 0)])
             self.assertTrue(os.path.exists(os.path.join(st.tmp.name, "freeplay.json")))   # next to game-state.json (dirname of --cache-dir)
             code, body = st.request("POST", "/api/freeplay", {"toggle": True})
             self.assertEqual(json.loads(body)["freeplay"]["phase"], "off")
@@ -411,6 +427,48 @@ class DemoMode(unittest.TestCase):
             self.assertEqual(dirs, ["new", "up", "up"])
         finally:
             st.close()
+
+
+class SimTimedSlow(unittest.TestCase):
+    """The simulator's SLOW against the firmware kart-0.2.4 contract, in-process (no processes)."""
+
+    def sim(self, **kw):
+        sys.path.insert(0, os.path.join(KART, "sim"))
+        import sim_heltec
+        sim = sim_heltec.Sim(sim_heltec.sim_args(**kw))
+        out = []
+        sim.out.append(lambda b: out.append(json.loads(b)))
+        return sim, out
+
+    def test_timed_slow_reverts_and_old_firmware_keeps_it(self):
+        sim, out = self.sim()
+        sim.status()
+        self.assertEqual(out[-1]["fw"], "sim-kart-0.2.4")
+        sim.handle_line("slow 5 4")
+        self.assertEqual((out[-1]["t"], out[-1]["cmd"], out[-1]["arg"], out[-1]["src"]), ("cmd", 5, 5, 254))
+        k = sim.me
+        self.assertEqual(k.slow_mph, 5.0)
+        sim.expire_slow(k.slow_until - 0.1)
+        self.assertEqual(k.slow_mph, 5.0)
+        sim.expire_slow(k.slow_until)
+        self.assertIsNone(k.slow_mph)                                 # timed slow over: no cap
+        sim.command(0, 5, 8)                                          # pit SLOW 8 (untimed)
+        sim.handle_line("slow 5 4")
+        self.assertEqual(k.slow_mph, 5.0)
+        sim.expire_slow(k.slow_until)
+        self.assertEqual(k.slow_mph, 8.0)                             # the pit's cap comes back
+        self.assertIsNone(k.slow_until)
+        sim.command(0, 5, 3)                                          # pit SLOW 3, lower than mud's 5
+        sim.handle_line("slow 5 4")
+        self.assertEqual((k.slow_mph, k.slow_until), (3.0, None))     # a timed slow never lifts it
+        self.assertIn('"slow_mph": 3', json.dumps(k.tele("self", extra={"slow_mph": int(k.slow_mph)})))
+        old, out = self.sim(fw_old=True)
+        old.status()
+        self.assertEqual(out[-1]["fw"], "sim-kart-0.2.3")
+        old.handle_line("slow 5 4")
+        self.assertEqual((old.me.slow_mph, old.me.slow_until), (5.0, None))    # 0.2.3: a PERMANENT slow 5
+        old.handle_line("start")
+        self.assertIsNone(old.me.slow_mph)
 
 
 class ServerPieces(unittest.TestCase):

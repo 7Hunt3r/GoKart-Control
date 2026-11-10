@@ -13,7 +13,7 @@ What it prints (same shapes as the real firmware's USB output):
   log    occasional firmware-style log lines; ble every ~6 s; cmd for every command
   status in reply to "status"
 Text commands honoured like the firmware's usbCommand(): mode 0|1|2, stop, start,
-slow [mph], ping, status, boost SECS SCALE (src 254, own ++usbSeq). Mode changes are
+slow [MPH] [SECS], ping, status, boost SECS SCALE (src 254, own ++usbSeq). Mode changes are
 "accepted" at once and "applied" (mode_actual + mode_confirmed) about 0.6 s later.
 `boost SECS SCALE` (SECS 1-30, SCALE 0.10-1.00, else a usage log line and no cmd) is
 a timed current-scale override like the firmware's GK_CMD_BOOST: cmd line with cmd 6,
@@ -21,6 +21,11 @@ arg = scale percent; rejected (4) while stopped, no_vesc (3) without a VESC; the
 `scale` field follows it and reverts to the mode scale after SECS ("boost over" log);
 STOP/START cancel it. Speed follows the live scale (17 mph at 1.0) under the mode's speed cap
 (MODE_TOP_MPH, lifted one mode by a boost, like firmware 0.2.2+).
+SLOW like firmware kart-0.2.4: `slow MPH SECS` (SECS 1-60) caps MPH for SECS s and then returns to
+the previous cap (an untimed pit SLOW that was in force comes back; a timed slow never lifts a lower
+pit cap); `slow [MPH]` is untimed (until START). The self line reports `slow_mph` (0 = none) and the
+status reply fw "sim-kart-0.2.4". --fw-old acts like kart-0.2.3: fw "sim-kart-0.2.3" and `slow 5 4`
+reads as a PERMANENT slow 5 (the firmware's atoi), which is why the kart only sends it to 0.2.4+.
 GPS like firmware 2026-11-06+: a {"t":"gps"} line per fix at 5 Hz (--nogpsline = off,
 like `gpsline off`), and the self line's USB-only hdop / fix_age_ms / gps_hz /
 base_lat / base_lon / base_fix_age_s (the pit radio's fix: 3 m east, 2 m north of the
@@ -62,7 +67,8 @@ import threading
 import time
 import tty
 
-FW = "sim-kart-0.1.0"
+FW = "sim-kart-0.2.4"            # "sim-" = the display's SIMULATION banner; kart-0.2.4 = timed `slow MPH SECS`
+FW_OLD = "sim-kart-0.2.3"        # --fw-old: before timed slow
 ORIGIN = (41.0940, -73.4167)     # near the shop; not a surveyed course
 COURSE_ORIGIN = (41.09399, -73.41637)   # --course: shop preset origin (map.shop.json)
 R_EARTH = 6371000.0
@@ -161,6 +167,8 @@ class SimKart:
         self.mph = 0.0
         self.stopped = False
         self.slow_mph = None
+        self.slow_until = None          # mono end of a timed slow (firmware 0.2.4 slowTimed / slowUntilMs)
+        self.slow_prev = None           # the untimed cap a timed slow replaced (None = none)
         self.nofix, self.novesc, self.fault = nofix, novesc, fault
         self.volts = 82.0 - k * 0.7
         self.ah = 0.0
@@ -268,6 +276,8 @@ class Sim:
         self.t0 = time.monotonic()
         self.usb_seq = 0
         self.boost_secs = 0
+        self.slow_secs = 0
+        self.fw = FW_OLD if getattr(args, "fw_old", False) else FW
         self.pos_seq = parse_pos_seq(getattr(args, "race_pos", None))
         self.pos_step = float(getattr(args, "race_pos_step", None) or 10.0)
         self.pos_t0 = time.monotonic()
@@ -382,6 +392,7 @@ class Sim:
                     self.log(f"vesc write scale {sc:.3f}")
         elif cmd == 3:
             k.stopped, k.slow_mph, k.ov, k.race_go = False, None, None, None
+            k.slow_until, k.slow_prev = None, None
             if k.novesc:
                 res = 3
             else:
@@ -392,8 +403,20 @@ class Sim:
                 res = 3
             else:
                 mph = arg or 5
-                k.slow_mph = float(mph)
-                self.log(f"slow: cap {mph} mph = {mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7:.0f} ERPM")
+                secs, self.slow_secs = self.slow_secs, 0
+                if secs and k.slow_mph and k.slow_until is None and k.slow_mph <= mph:
+                    self.log(f"slow {secs} s: pit cap {k.slow_mph:.0f} mph already lower, kept")
+                else:
+                    if secs:
+                        if k.slow_until is None:
+                            k.slow_prev = k.slow_mph
+                        k.slow_until = time.monotonic() + secs
+                    else:
+                        k.slow_until, k.slow_prev = None, None
+                    k.slow_mph = float(mph)
+                    erpm = mph * 1609.34 / 60 / (0.406 * math.pi) * 2.769 * 7
+                    self.log(f"slow: cap {mph} mph = {erpm:.0f} ERPM" + (f" for {secs} s" if secs else ""))
+            self.slow_secs = 0
         else:
             res = 4
         k.cmd_result = res
@@ -402,7 +425,7 @@ class Sim:
     def status(self):
         k = self.me
         lat, lon, _ = k.path.at(k.s)
-        self.emit({"t": "status", "kart": k.k, "fw": FW, "built": "sim", "writes": True, "transport": "ble",
+        self.emit({"t": "status", "kart": k.k, "fw": self.fw, "built": "sim", "writes": True, "transport": "ble",
                    "radio": True, "radio_status": 0, "lora_tx": self.uptime() * 2, "lora_rx": self.uptime(),
                    "lora_rx_bad": 0, "gps_locked": True, "gps_cfg": "9600", "pps_count": self.uptime(),
                    "vesc_fw": "6.05", "vesc_hw": "SIM", "vesc_packets": self.uptime() * 10, "vesc_crc_err": 0,
@@ -440,14 +463,36 @@ class Sim:
             self.command(254, 7, arg if rest else 5)
         elif word == "finish":                               # SIMULATION: as if the pit sent race 100+P
             self.command(254, 7, 100 + arg if rest and arg else 0)
-        elif word in ("stop", "start", "ping", "slow"):
+        elif word == "slow":
+            parts = rest.split()
+            try:
+                mph = int(parts[0]) if parts else 0
+                secs = int(parts[1]) if len(parts) > 1 else 0
+            except ValueError:
+                mph, secs = 0, 0
+            if self.fw == FW_OLD:
+                secs = 0                                     # kart-0.2.3: atoi("5 4") = 5, untimed
+            if secs < 0 or secs > 60:
+                self.log("usage: slow [MPH] [SECS 1-60]")
+            else:
+                self.slow_secs = secs
+                self.command(254, 5, mph)
+        elif word in ("stop", "start", "ping"):
             self.command(254, {"stop": 2, "start": 3, "ping": 4, "slow": 5}[word], arg)
         elif word == "help":
-            self.log("commands: status | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping (SIMULATION)")
+            self.log("commands: status | mode 0..2 | stop | start | slow [MPH] [SECS] | boost SECS SCALE | race [secs] | ping (SIMULATION)")
         else:
             self.log(f"unknown command: {line}")
 
     # -- main loop ---------------------------------------------------------------
+    def expire_slow(self, now):
+        """Timed slow over (firmware 0.2.4): back to the pit cap it replaced, or none."""
+        k = self.me
+        if k.slow_until is not None and now >= k.slow_until:
+            k.slow_until = None
+            k.slow_mph, k.slow_prev = k.slow_prev, None
+            self.log(f"timed slow over, pit cap {k.slow_mph:.0f} mph back" if k.slow_mph else "timed slow over")
+
     def pit_link_up(self, now):
         return not (self.args.pitloss and (now - self.t0) % 60.0 >= 40.0)
 
@@ -480,6 +525,7 @@ class Sim:
                     self.me.ov = None
                     self.log(f"boost over, back to {self.me.eff_scale():.2f}")
                     self.log(f"vesc write scale {self.me.eff_scale():.3f}")
+                self.expire_slow(now)
                 self.me.step(dt * self.args.warp, now)
                 for f in self.fleet:
                     f.step(dt, now)
@@ -494,7 +540,8 @@ class Sim:
                     extra = {"hdop": 99.0 if self.args.nofix else self.args.hdop, "fix_age_ms": 999999 if self.args.nofix else 150,
                              "gps_hz": 5, "base_lat": round(blat, 7) if up else None,
                              "base_lon": round(blon, 7) if up else None, "base_fix_age_s": 1 if up else None,
-                             "race_pos": self.race_pos, "race_state": self.race_state}
+                             "race_pos": self.race_pos, "race_state": self.race_state,
+                             "slow_mph": int(round(self.me.slow_mph or 0))}
                     self.emit(self.me.tele("self", rx_ms=int(el * 1000), uptime=self.uptime(),
                                            base_rssi=-71 + random.randint(-6, 6) if up else 0, extra=extra))
                 for i, f in enumerate(self.fleet):
@@ -594,6 +641,7 @@ def build_parser():
     ap.add_argument("--pit-slow-at", type=float)
     ap.add_argument("--uptime0", type=int, default=5, help="Heltec uptime at sim start (s)")
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--fw-old", action="store_true", help="act like kart-0.2.3: no timed `slow MPH SECS` (reads as untimed)")
     ap.add_argument("--course", action="store_true", help="drive the game course (kart/sim/zones.course.json)")
     ap.add_argument("--warp", type=float, default=1.0, help="own kart moves this many times faster (tests)")
     ap.add_argument("--nogpsline", action="store_true", help="no 5 Hz gps lines (firmware `gpsline off`)")

@@ -474,6 +474,11 @@ Condensed from the dated sections this file accumulated. Times are local (ET).
   `freeplay` / `freeplay_boxes`, state in `cache/freeplay.json`. Simulator + headless screenshots only; not
   deployed. Open for the owner: freeplay keeps running when the pit's game is switched OFF (the brief), so
   the pit master switch no longer silences a kart whose driver turned freeplay on.
+- 2026-11-09 (night, after the first freeplay drive, "lotta fun"): freeplay switch-on sends `mode 0` (ECO base,
+  so a BOOST's cap lift is felt; skipped while STOPPED / grid hold / paused); boosts stack (remaining + new,
+  <= 30 s, larger scale; `boost_stacked`); mud = `slow 5 4` (timed SLOW, `mud_slow_secs`) when the Heltec's
+  status `fw` is kart-0.2.4+, else the old `boost 4 0.5` (0.2.3 would read it as a permanent slow). Simulator
+  reports fw `sim-kart-0.2.4` (`--fw-old` = 0.2.3) and `slow_mph`. Tests only; not deployed or driven.
 
 ## Collaboration and delivery state
 

@@ -1,0 +1,7 @@
+[Unit]
+Description=GoKart kart Pi Wi-Fi self-heal (rejoin after range loss or a wedged radio)
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/gokart-kart/tools/wifi_watch.sh
