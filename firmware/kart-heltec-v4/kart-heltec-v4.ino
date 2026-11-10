@@ -213,6 +213,28 @@ uint8_t  usbSeq = 0;
 GkTelemetry fleet[GK_MAX_KARTS + 1];
 uint32_t    fleetMs[GK_MAX_KARTS + 1];
 
+// ---------------------------------------------------------------- freeplay multiplayer (docs/freeplay-multiplayer.md)
+// Karts hear each other's telemetry directly, so sessions, invites and kart-to-kart hits need no pit:
+// the kart Pi types `session host|join N|leave` and `attack N|all shell|lightning`; the game bytes in
+// GkTelemetry carry the rest. A hit is a timed SLOW through the same code as the USB `slow 5 SECS`
+// (never while STOPPED / grid hold / writes off; pit STOP, SLOW and mode commands still win).
+#define GAME_SRC             0xFD    // handleCommand source id for a hit's SLOW (USB history slot; echoed as src 253)
+#define GAME_PEER_MAX_AGE_MS 10000   // a session peer / host counts while heard this recently
+#define GAME_ATTACK_MS       5000    // an attack rides in telemetry this long (or until acked)
+#define GAME_ACK_HOLD_MS     5000    // ack_from/ack_seq stay in telemetry this long after a hit
+#define GAME_HIT_REPEAT_MS   60000   // the same (attacker, seq) counts as a new hit again after this long
+#define GAME_SHELL_SECS      4
+#define GAME_LIGHTNING_SECS  3
+#define GAME_SLOW_MPH        5
+uint8_t  gameSession = 0;                         // 0 or the host's id (mine while hosting)
+uint8_t  atkTo = 0, atkItem = 0, atkSeq = 0;      // the attack in flight (atkTo 0 = none); atkSeq = last seq used
+uint32_t atkStartMs = 0; uint8_t atkAckMask = 0;  // bit k-1: kart k acknowledged the attack in flight
+uint8_t  ackFrom = 0, ackSeq = 0; uint32_t ackMs = 0;
+uint8_t  hitSeq[GK_MAX_KARTS + 1]; uint32_t hitMs[GK_MAX_KARTS + 1];   // last hit accepted per attacker
+uint8_t  gameScore = 0;
+uint32_t gameLineMs = 0; bool gameLineDirty = false, gameLineQuiet = true;
+const char* gameEnded = nullptr;                  // "host lost" / "host left": carried by the next game line
+
 // ---------------------------------------------------------------- display / misc
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, PIN_OLED_RST, PIN_OLED_SCL, PIN_OLED_SDA);
 bool     oledOk = false;
@@ -306,7 +328,14 @@ static float modeCapErpm(uint8_t m) {
 // Boost lift (config.h BOOST_LIFTS_CAP): a timed override ABOVE mode m's scale moves the cap one mode up.
 static uint8_t capModeFor(uint8_t m) {
 #if BOOST_LIFTS_CAP
-  if (m < GK_MODE_COUNT - 1 && ovActive && ovScale > MODES[m].currentMaxScale + 0.001f) return m + 1;
+  // Owner 2026-11-09: freeplay starts in ECO; a BOOST is NORMAL for its duration (scale 0.75, 25 mph) and
+  // a ROCKET is SPORT (scale 1.0, uncapped): the cap follows the highest mode whose scale the boost
+  // reaches. A scale between two modes still lifts one mode (the old rule).
+  if (m < GK_MODE_COUNT - 1 && ovActive && ovScale > MODES[m].currentMaxScale + 0.001f) {
+    uint8_t j = m;
+    for (uint8_t i = m + 1; i < GK_MODE_COUNT; i++) if (MODES[i].currentMaxScale <= ovScale + 0.001f) j = i;
+    return j > m ? j : (uint8_t)(m + 1);
+  }
 #endif
   return m;
 }
@@ -371,6 +400,8 @@ static void fillTelemetry(GkTelemetry& t, bool forRadio) {
   t.mode_actual = ma;
   t.scale_x1000 = (scale < 0) ? 65535 : (uint16_t)(scale * 1000);
   t.slow_mph = slowActive ? slowMph : 0;
+  t.session = gameSession; t.atk_to = atkTo; t.atk_item = atkTo ? atkItem : 0; t.atk_seq = atkTo ? atkSeq : 0;
+  t.ack_from = ackFrom; t.ack_seq = ackFrom ? ackSeq : 0; t.score = gameScore;
   const CmdEnt* lc = lastCmd(forRadio ? 0 : lastSrcIdx);   // radio: pit commands only (see CmdEnt)
   t.last_cmd_seq = lc ? lc->seq : 0;
   t.cmd_result = lc ? lc->result : GK_RES_NONE;
@@ -869,9 +900,109 @@ static void serviceGps() {
   }
 }
 
+// ---------------------------------------------------------------- freeplay multiplayer
+static bool peerFresh(uint8_t k) { return k >= 1 && k <= GK_MAX_KARTS && k != kartId && fleetMs[k] && millis() - fleetMs[k] < GAME_PEER_MAX_AGE_MS; }
+static bool peerInMySession(uint8_t k) { return gameSession && peerFresh(k) && fleet[k].session == gameSession; }
+static bool kartHosting(uint8_t k) { return peerFresh(k) && fleet[k].session == k; }
+static size_t maskList(char* out, size_t n, uint8_t mask) {   // "3,5" for bits 2 and 4
+  size_t o = 0; out[0] = 0;
+  for (uint8_t k = 1; k <= GK_MAX_KARTS; k++) if (mask & (1 << (k - 1))) o += snprintf(out + o, n - o, "%s%u", o ? "," : "", k);
+  return o;
+}
+static void emitGame(uint8_t hosts, uint8_t peers) {
+  char pl[32], hl[32]; maskList(pl, sizeof pl, peers); maskList(hl, sizeof hl, hosts);
+  Serial.printf("{\"t\":\"game\",\"kart\":%u,\"session\":%u,\"hosting\":%s,\"peers\":[%s],\"hosts\":[%s],\"score\":%u,\"attack\":",
+                kartId, gameSession, gkBool(gameSession && gameSession == kartId), pl, hl, gameScore);
+  if (atkTo) Serial.printf("{\"to\":%u,\"item\":\"%s\",\"seq\":%u,\"age_ms\":%lu}", atkTo, gkItemName(atkItem), atkSeq, (unsigned long)(millis() - atkStartMs));
+  else Serial.print("null");
+  if (gameEnded) Serial.printf(",\"ended\":\"%s\"}\n", gameEnded); else Serial.print(",\"ended\":null}\n");
+}
+static void emitAttack(uint8_t to, uint8_t item, uint8_t seq, const char* result, const char* why, uint8_t acked) {
+  char al[32]; maskList(al, sizeof al, acked);
+  Serial.printf("{\"t\":\"attack\",\"kart\":%u,\"to\":%u,\"item\":\"%s\",\"seq\":%u,\"result\":\"%s\",\"acked\":[%s],\"why\":",
+                kartId, to, gkItemName(item), seq, result, al);
+  if (why) Serial.printf("\"%s\"}\n", why); else Serial.print("null}\n");
+}
+static void attackEnd(const char* result, const char* why) {
+  if (!atkTo) return;
+  emitAttack(atkTo, atkItem, atkSeq, result, why, atkAckMask);
+  logf("attack %s on %s: %s%s%s", gkItemName(atkItem), atkTo == GK_ADDR_ALL ? "all" : "one kart", result, why ? ": " : "", why ? why : "");
+  atkTo = 0; atkItem = 0; atkAckMask = 0; gameLineDirty = true;
+}
+static void gameLeave(const char* ended) {
+  if (!gameSession) return;
+  if (atkTo) attackEnd("timeout", "session ended");
+  gameSession = 0; gameScore = 0; gameEnded = ended; gameLineDirty = true;
+}
+static void gameAttack(uint8_t to, uint8_t item) {
+  const char* why = nullptr;
+  if (!gameSession) why = "no session";
+  else if (to != GK_ADDR_ALL && to == kartId) why = "that is me";
+  else if (to != GK_ADDR_ALL && !peerFresh(to)) why = "not heard";
+  else if (to != GK_ADDR_ALL && fleet[to].session != gameSession) why = "not in your game";
+  if (why) { emitAttack(to, item, 0, "rejected", why, 0); logf("attack rejected: %s", why); return; }
+  if (atkTo) attackEnd("replaced", nullptr);
+  atkSeq = (uint8_t)(atkSeq == 255 ? 1 : atkSeq + 1);
+  atkTo = to; atkItem = item; atkStartMs = millis(); atkAckMask = 0; gameLineDirty = true;
+  emitAttack(to, item, atkSeq, "sent", nullptr, 0);
+  logf("attack: %s at %s (seq %u)", gkItemName(item), to == GK_ADDR_ALL ? "everyone in the game" : "one kart", atkSeq);
+}
+// A hit on us: the item's timed SLOW through the command path (W-rules apply), acknowledged either way.
+static void applyHit(uint8_t from, uint8_t item, uint8_t seq) {
+  const uint8_t secs = item == GK_ITEM_LIGHTNING ? GAME_LIGHTNING_SECS : GAME_SHELL_SECS;
+  const char* why = nullptr;
+  if (stopActive) why = "stopped"; else if (raceHold) why = "grid hold";
+  else if (!writesEnabled()) why = "writes off"; else if (!vescUp() || !origValid) why = "no vesc";
+  if (!why) { slowSecs = secs; handleCommand(GAME_SRC, ++usbSeq, GK_CMD_SLOW, GAME_SLOW_MPH, 0, 0); }
+  Serial.printf("{\"t\":\"hit\",\"kart\":%u,\"from\":%u,\"item\":\"%s\",\"seq\":%u,\"secs\":%u,\"applied\":%s,\"why\":",
+                kartId, from, gkItemName(item), seq, secs, gkBool(why == nullptr));
+  if (why) Serial.printf("\"%s\"}\n", why); else Serial.print("null}\n");
+  if (why) logf("hit by kart %u (%s): no effect, %s", from, gkItemName(item), why);
+  else logf("hit by kart %u (%s): slow %u mph for %u s", from, gkItemName(item), GAME_SLOW_MPH, secs);
+}
+// A fresh telemetry copy from kart k: did it acknowledge our attack, is it attacking us?
+static void gameOnPeer(uint8_t k) {
+  if (!gameSession) return;
+  const GkTelemetry& p = fleet[k];
+  const uint32_t now = millis();
+  if (atkTo && (atkTo == k || atkTo == GK_ADDR_ALL) && p.ack_from == kartId && p.ack_seq == atkSeq && !(atkAckMask & (1 << (k - 1)))) {
+    atkAckMask |= (uint8_t)(1 << (k - 1));
+    if (gameScore < 255) gameScore++;
+    logf("hit landed: %s on kart %u (score %u)", gkItemName(atkItem), k, gameScore);
+    if (atkTo != GK_ADDR_ALL) attackEnd("acked", nullptr); else gameLineDirty = true;
+  }
+  if (p.session == gameSession && p.atk_seq && (p.atk_to == kartId || p.atk_to == GK_ADDR_ALL)
+      && (p.atk_seq != hitSeq[k] || now - hitMs[k] > GAME_HIT_REPEAT_MS)) {
+    hitSeq[k] = p.atk_seq; hitMs[k] = now;
+    ackFrom = k; ackSeq = p.atk_seq; ackMs = now;
+    applyHit(k, p.atk_item, p.atk_seq);
+  }
+}
+static void serviceGame() {
+  const uint32_t now = millis();
+  if (atkTo && now - atkStartMs >= GAME_ATTACK_MS) attackEnd(atkTo == GK_ADDR_ALL ? "done" : "timeout", nullptr);
+  if (ackFrom && now - ackMs >= GAME_ACK_HOLD_MS) { ackFrom = 0; ackSeq = 0; }
+  if (gameSession && gameSession != kartId) {                 // joined: the host must still be hosting
+    const uint8_t h = gameSession;
+    if (!peerFresh(h)) { gameLeave("host lost"); logf("freeplay: host kart %u not heard for 10 s, game over", h); }
+    else if (fleet[h].session != h) { gameLeave("host left"); logf("freeplay: host kart %u ended the game", h); }
+  }
+  uint8_t hosts = 0, peers = 0;
+  for (uint8_t k = 1; k <= GK_MAX_KARTS; k++) {
+    if (kartHosting(k)) hosts |= (uint8_t)(1 << (k - 1));
+    if (peerInMySession(k)) peers |= (uint8_t)(1 << (k - 1));
+  }
+  static uint8_t lastHosts = 0, lastPeers = 0;
+  if (hosts != lastHosts || peers != lastPeers) { lastHosts = hosts; lastPeers = peers; gameLineDirty = true; }
+  const bool active = gameSession || hosts;
+  if (gameLineDirty || (active && now - gameLineMs >= 1000) || (!active && !gameLineQuiet)) {
+    emitGame(hosts, peers); gameLineMs = now; gameLineDirty = false; gameLineQuiet = !active; gameEnded = nullptr;
+  }
+}
+
 // ---------------------------------------------------------------- lora
 static void emitFleet(uint8_t id, float rssi, float snr) {
-  char buf[640];
+  char buf[GK_TELE_JSON_MAX];
   gkTelemetryToJson(buf, sizeof buf, fleet[id], "fleet", rssi, snr, millis());
   Serial.println(buf);
 }
@@ -903,6 +1034,7 @@ static void serviceLoraRxOne() {
         // Repeater copy of a packet already heard directly: drop it (the kart Pi would count it twice).
         if (relayed && fleetMs[h->src] && millis() - fleetMs[h->src] < 400 && fleet[h->src].h.seq == h->seq) break;
         gkCopyTelemetry(fleet[h->src], buf, len); fleetMs[h->src] = millis(); emitFleet(h->src, rssi, snr);
+        gameOnPeer(h->src);
       }
       break;
     case GK_MSG_COMMAND: {
@@ -971,7 +1103,11 @@ static void serviceLoraTx() {
   if (!radioOk || !slotDue()) return;
   GkTelemetry t; fillTelemetry(t, true);
   digitalWrite(PIN_LED, HIGH);
-  int st = radio.transmit((uint8_t*)&t, sizeof t);
+  // Rollout: with no game bytes set (not in a session, no attack/ack, score 0) send the 0.2.4-length
+  // packet so a pit base or repeater still on 0.2.1 keeps decoding this kart; the game bytes it would
+  // carry are all 0 anyway (receivers on 0.2.2+ pad a short packet with zeros).
+  const bool gameIdle = !t.session && !t.atk_to && !t.ack_from && !t.score;
+  int st = radio.transmit((uint8_t*)&t, gameIdle ? GK_TELEMETRY_LEN_V1 : sizeof t);
   loraIrq = false;                       // the TX-done interrupt also raised DIO1
   radio.startReceive();
   digitalWrite(PIN_LED, LOW);
@@ -1009,7 +1145,7 @@ static void serviceWifi() {
 // ---------------------------------------------------------------- usb
 static void usbReport() {
   GkTelemetry t; fillTelemetry(t, false);
-  char buf[720];
+  char buf[GK_TELE_JSON_MAX + 240];
   int n = gkTelemetryToJson(buf, sizeof buf, t, "self", 0, 0, millis());
   if (n > 0 && n < (int)sizeof buf - 160 && buf[n - 1] == '}') {       // USB-only extras: fix quality and the pit radio's own fix
     uint32_t now = millis();
@@ -1032,7 +1168,7 @@ static void usbStatus() {
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
-                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
+                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"session\":%u,\"hosting\":%s,\"score\":%u,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
                 "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
                 "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"tx_dbm\":%d,\"tx_radiated_dbm\":%d,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
@@ -1040,7 +1176,7 @@ static void usbStatus() {
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
                 vesc.fwMajor, vesc.fwMinor, hw, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
-                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gkBool(baselineSuspect),
+                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gameSession, gkBool(gameSession && gameSession == kartId), gameScore, gkBool(baselineSuspect),
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, mac,
                 vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
@@ -1144,8 +1280,28 @@ static void usbCommand(char* line) {
     else { float c = atof(arg); if (c >= 0.3f && c <= 5.0f) { speedCal = c; prefs.putFloat("speedcal", c); logf("speed calibration %.3f stored (caps re-apply at the next mode command)", c); }
            else logf("speedcal must be 0.3..5 (real ERPM per configured-math ERPM)"); }
   }
+  else if (!strcmp(line, "session") && arg) {              // session host | join N | leave   (freeplay multiplayer, kart Pi)
+    if (!strcmp(arg, "host")) {
+      if (gameSession != kartId) { if (atkTo) attackEnd("timeout", "session ended"); gameSession = kartId; gameScore = 0; gameEnded = nullptr; gameLineDirty = true; }
+      logf("freeplay: hosting game %u", kartId);
+    } else if (!strncmp(arg, "join", 4)) {
+      int n = atoi(arg + 4);
+      if (n < 1 || n > GK_MAX_KARTS) logf("usage: session join 1..8");
+      else if (n == kartId) logf("session join %d: that is me (use session host)", n);
+      else if (!kartHosting((uint8_t)n)) { logf("session join %d: kart %d is not hosting a game (or not heard for 10 s)", n, n); gameLineDirty = true; }
+      else { if (gameSession != n) { if (atkTo) attackEnd("timeout", "session ended"); gameSession = (uint8_t)n; gameScore = 0; gameEnded = nullptr; gameLineDirty = true; } logf("freeplay: joined kart %d's game", n); }
+    } else if (!strcmp(arg, "leave")) { bool was = gameSession; gameLeave(nullptr); logf(was ? "freeplay: left the game" : "freeplay: not in a game"); gameLineDirty = true; }
+    else logf("usage: session host | join N | leave");
+  }
+  else if (!strcmp(line, "attack") && arg) {               // attack N|all shell|lightning
+    char* a2 = strchr(arg, ' '); if (a2) { *a2++ = 0; while (*a2 == ' ') a2++; }
+    uint8_t to = !strcmp(arg, "all") ? GK_ADDR_ALL : (uint8_t)atoi(arg);
+    uint8_t item = (a2 && !strcmp(a2, "lightning")) ? GK_ITEM_LIGHTNING : (a2 && !strcmp(a2, "shell")) ? GK_ITEM_SHELL : GK_ITEM_NONE;
+    if (!item || (to != GK_ADDR_ALL && (to < 1 || to > GK_MAX_KARTS))) logf("usage: attack 1..8|all shell|lightning");
+    else gameAttack(to, item);
+  }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | slow [MPH] [SECS] | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | slow [MPH] [SECS] | session host|join N|leave | attack N|all shell|lightning | reboot");
   else logf("unknown command '%s'", line);
 }
 
@@ -1285,6 +1441,7 @@ void loop() {
   serviceUsb();
   serviceVesc();
   serviceWrites();
+  serviceGame();
   serviceGps();
   serviceLoraRx();
   serviceLoraTx();

@@ -3,7 +3,7 @@
 // variant (which runs on this exact board). Everything else is this project's choice.
 #pragma once
 
-#define FW_VERSION      "kart-0.2.4"
+#define FW_VERSION      "kart-0.2.5"
 #define DEFAULT_KART_ID 1            // runtime override: USB command "id N" (stored in flash)
 
 // ---- VESC writes -----------------------------------------------------------
@@ -116,9 +116,9 @@ static const ModeDef MODES[3] = {
 // `speedcal X` (0.3..5, stored per kart) overrides it, `speedcal clear` returns to the default; the
 // status line reports speed_cal. The proper fix is the si_* values in VESC Tool; then set speedcal 1.0.
 #define SPEED_CAL_DEFAULT 2.48f
-// A BOOST (timed scale ABOVE the mode's) also lifts the speed cap one mode up for its duration
-// (ECO -> NORMAL's 25 mph, NORMAL -> uncapped, SPORT unchanged); MUD (scale at or below the mode's)
-// keeps the cap. Without this a boost pad on a straight does nothing to a kart already at its cap.
+// A BOOST (timed scale ABOVE the mode's) also lifts the speed cap for its duration, to the highest mode
+// whose scale the boost reaches (owner 2026-11-09: in ECO a 0.75 boost = NORMAL's 25 mph, a 1.0 ROCKET =
+// SPORT, uncapped; an in-between scale lifts one mode). The game only ever sends boost >= the mode's scale.
 #define BOOST_LIFTS_CAP 1
 
 // Stop = ramp the current scale down, then hold at 0. Mechanical brakes are untouched.

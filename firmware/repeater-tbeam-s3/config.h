@@ -4,7 +4,7 @@
 // and GNSS rails before either chip answers; the rail map is from Meshtastic Power.cpp.
 #pragma once
 
-#define FW_VERSION "repeater-0.2.1"
+#define FW_VERSION "repeater-0.2.2"
 
 // LoRa (SX1262 module on the Supreme; LR1121 variants exist and are NOT handled yet)
 #define PIN_LORA_CS    10

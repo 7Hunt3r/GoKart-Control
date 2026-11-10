@@ -114,6 +114,9 @@ digital-modulation rule that allows this power.
 | `txpower 0..22` | SX1262 drive into the front end in dBm (stored). Radiated is drive + gain from the table above: 10 = ~23 dBm, 14 = ~26, 16 = ~27 (default), 18+ = ~28. `status` shows `tx_dbm` and `tx_radiated_dbm` |
 | `mode 0..2`, `stop`, `start`, `ping`, `slow [mph]`, `race [secs]` | same as the pit command (USB source, own seq numbers) |
 | `boost SECS SCALE` | timed scale override, 1-30 s, 0.10-1.00 (game zones / mud) |
+| `slow MPH SECS` | timed speed cap, 1-60 s (the game's mud, kart-to-kart hits); reverts to the cap that was in force |
+| `session host\|join N\|leave` | freeplay multiplayer (kart 0.2.5, docs/freeplay-multiplayer.md): host a game, join kart N's game (N must be heard hosting within 10 s), leave. State comes back as `{"t":"game"}` lines |
+| `attack N\|all shell\|lightning` | fire a held item at kart N (must be in your game) or at everyone in it; rides in telemetry up to 5 s until the target acknowledges; `{"t":"attack"}` lines report sent/acked/timeout/done/rejected. A hit on us prints `{"t":"hit"}` and applies `slow 5` for 4 s (shell) / 3 s (lightning), never while STOPPED or in a grid hold |
 | `rate 1\|2` | report rate (default 2 Hz; use 1 Hz when the fleet relies on a repeater) |
 | `wifi SSID PASS`, `otapw PASS` | stored in flash for OTA; reboot to apply |
 | `vescmac AA:BB:..\|clear`, `blescan` | pin the VESC BLE address / list candidates |

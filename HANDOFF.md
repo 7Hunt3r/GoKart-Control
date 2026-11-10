@@ -109,6 +109,16 @@ Hardware in hand (from the bench logs):
   Then the antennas: a 3-6 dBi 915 MHz omni on a mast for the pit base (short low-loss coax), the
   repeater high on a pole mid-track with line of sight both ways, kart whips vertical on the dash
   hood. Height and placement are worth more than every firmware change made today.
+- **Base and repeater still on 0.2.1 (reflash owed, 2026-11-09 evening).** Kart firmware 0.2.5 adds 7 game
+  bytes to telemetry (54-byte packet, docs/freeplay-multiplayer.md); a 0.2.1 base/repeater rejects that
+  length, so 0.2.5 karts send the old 47-byte packet while they are not in a game (nothing lost until
+  someone hosts). Images are built: `firmware/releases/base-tbeam-s3-0.2.2.merged.bin` (copy it with
+  `scp firmware/releases/base-tbeam-s3-0.2.2.merged.bin pit@gokart-pit.local:` and run
+  `ssh pit@gokart-pit.local ./flash_base.sh base-tbeam-s3-0.2.2.merged.bin`; the Mac-side session policy
+  refused to run that flash itself) and
+  `firmware/releases/repeater-tbeam-s3-0.2.2.merged.bin` (USB from the Mac: `./build.sh repeater upload
+  /dev/cu.usbmodemXXXX`, or esptool with the merged image at 0x0). Until then the pit shows a kart as
+  offline while it is in a multiplayer game.
 - Touch, map redraw speed and demo mode by eye on the Pi 3 B panel.
 - Formal bench validation of link loss / reconnect (requirements acceptance checks) before
   enabling profile writes; saved-flash VESC baseline; controller commercial model and ratings.
@@ -247,6 +257,16 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
    display and pit log have both); the cap is only as right as `si_gear_ratio` / `si_wheel_diameter`
    in the controller. The kart logs `baseline_suspect` when the limits it reads at link-up look like
    its own caps left by a previous Heltec session (fix: key the kart off and on).
+8. **Kart-to-kart game bytes in telemetry** (2026-11-09 evening, owner request; protocol change for your
+   sign-off). Multiplayer freeplay (invite other karts, item boxes give a SHELL / LIGHTNING, fire it at a
+   kart within 25 m, the target gets a 4 s / 3 s timed SLOW 5) rides on seven bytes appended to
+   GkTelemetry (54 bytes, 25.7 ms on air; 46/47-byte packets still accepted everywhere; a kart sends the
+   47-byte packet while idle). Everything is kart-to-kart over the existing telemetry; the pit only
+   observes (`session`/`score` badges). Contract and rules: docs/freeplay-multiplayer.md. Open for you: whether
+   the fleet wants this at all, the 25 m / 4 s / 3 s numbers, and whether the pit should be able to end a game.
+   Also owner 2026-11-09: freeplay starts in ECO, a BOOST is NORMAL (0.75, 25 mph) for 5 s and a ROCKET (was
+   SUPER) is SPORT (1.0, uncapped) for 8 s; firmware 0.2.5 lifts the cap to the mode whose scale the boost
+   reaches (0.2.4 lifted exactly one mode).
 
 ## Doc drift to reconcile
 

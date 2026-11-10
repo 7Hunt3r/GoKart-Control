@@ -131,7 +131,9 @@ def _age(last_mono, now):
 VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "ah", "scale")
 STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "slow_mph", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
-                 "base_rssi", "rssi", "snr", "rx_ms")
+                 "base_rssi", "rssi", "snr", "rx_ms",
+                 # freeplay multiplayer (kart 0.2.5, docs/freeplay-multiplayer.md): absent/0 from older karts
+                 "session", "atk_to", "atk_item", "atk_seq", "ack_from", "ack_seq", "score")
 TRAIL_POINTS = 30
 LATE_WINDOW_S = 3.0      # a packet up to LATE_SEQS behind the last one, within this time, is a late copy
 LATE_SEQS = 16

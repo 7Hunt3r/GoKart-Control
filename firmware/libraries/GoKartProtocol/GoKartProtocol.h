@@ -17,6 +17,9 @@
 #define GK_ADDR_BASE       0      // pit base station
 #define GK_ADDR_ALL        0xFF   // broadcast
 #define GK_ADDR_REPEATER   0xF0   // first repeater (0xF0..0xF7); heartbeats only, never addressed
+// Telemetry packet length on the air today (sizeof(GkTelemetry), checked below). Older karts still send
+// 46 (before slow_mph) or 47 (before the freeplay game fields) bytes; every receiver accepts all three.
+#define GK_TELEMETRY_LEN   54
 // A repeater re-sends a packet it heard with this bit set in the version byte. Receivers
 // treat it like the original (dedupe by src+seq); repeaters never relay a relayed packet.
 #define GK_HDR_RELAY_BIT   0x80
@@ -31,8 +34,8 @@
 // ---- Radio parameters (identical on both ends) ----------------------------
 // US ISM band. These match Colin's installed Heltec bench transmitter
 // (firmware/heltec: 915.0 MHz, BW500, SF7, CR4/5, sync 0x12, preamble 8) so both
-// frame formats share one channel. SF7/BW500 puts the 47-byte telemetry packet at
-// 23.1 ms on air (gkAirtimeUs), which sets the slot plan below. Change SF/BW on every
+// frame formats share one channel. SF7/BW500 puts the 54-byte telemetry packet at
+// 25.7 ms on air (gkAirtimeUs; 23.1 ms for the 47-byte packets of firmware before 0.2.5), which sets the slot plan below. Change SF/BW on every
 // board together (the static_asserts below re-check the plan). Range is traded for airtime; raise SF if the track proves too
 // big and lower the report rate to match. Not yet declared the final fleet setting.
 #define GK_LORA_FREQ_MHZ       915.0
@@ -46,7 +49,7 @@
 // LoRa time on air in microseconds for a len-byte payload at the fleet settings (Semtech
 // AN1200.13 / SX126x datasheet 6.1.4: explicit header, CRC on, low-data-rate optimisation off,
 // which is what RadioLib selects at SF7/BW500). Tsym = 2^SF / BW = 256 us here.
-//   47-byte telemetry 23.1 ms, 27-byte beacon 16.7 ms, 22-byte old beacon 14.1 ms,
+//   54-byte telemetry 25.7 ms (47-byte 23.1 ms), 27-byte beacon 16.7 ms, 22-byte old beacon 14.1 ms,
 //   16-byte repeater heartbeat 12.9 ms, 14-byte command 11.6 ms.
 static constexpr uint32_t gkTsymUs() { return (uint32_t)((1UL << GK_LORA_SF) * 1000UL / (uint32_t)GK_LORA_BW_KHZ); }
 static constexpr uint32_t gkPayloadSymbols(uint32_t len) {
@@ -65,10 +68,10 @@ static constexpr uint32_t gkAirtimeUs(uint32_t len) {
 // random jitter and simply risks collisions.
 //
 // Per-second schedule at the fleet radio settings (ms after the edge; airtime from gkAirtimeUs):
-//   1 Hz: kart k  (k-1)*100-8 .. +16 late .. +23 packet, repeater copy +25 ms after it (+23)
-//         -> each kart's packet AND its repeater copy fit in its 100 ms slot; slots end at 792.
-//   2 Hz: kart k  (k-1)*50-8 and 500+(k-1)*50-8, +16 late, +23 packet -> fits a 50 ms slot,
-//         BUT a repeater copy (+25 +23) does NOT: it lands on kart k+1's slot. Use rate 1
+//   1 Hz: kart k  (k-1)*100-8 .. +16 late .. +26 packet, repeater copy +25 ms after it (+26)
+//         -> each kart's packet AND its repeater copy fit in its 100 ms slot; slots end by 795.
+//   2 Hz: kart k  (k-1)*50-8 and 500+(k-1)*50-8, +16 late, +26 packet -> fits a 50 ms slot
+//         (ends 8 ms before kart k+1's slot opens), BUT a repeater copy (+25 +26) does NOT: it lands on kart k+1's slot. Use rate 1
 //         on every kart of a fleet that relies on a repeater (see firmware/README.md).
 //   900-992: pit beacon at 905 (+8 late, 17 ms), its repeater copy 25 ms later,
 //         the repeater heartbeat right behind it every 5 s; all done by ~980.
@@ -103,10 +106,10 @@ static constexpr uint32_t gkAirtimeUs(uint32_t len) {
 
 // ---- Schedule self-check (compile time) -------------------------------------
 // If one of these fires, a radio parameter or packet size change broke the slot plan above.
-#define GK_TELE_AIR_MS_CEIL   ((gkAirtimeUs(47) + 999) / 1000)
+#define GK_TELE_AIR_MS_CEIL   ((gkAirtimeUs(GK_TELEMETRY_LEN) + 999) / 1000)
 #define GK_BEACON_AIR_MS_CEIL ((gkAirtimeUs(27) + 999) / 1000)
 #define GK_HB_AIR_MS_CEIL     ((gkAirtimeUs(16) + 999) / 1000)
-static_assert(gkAirtimeUs(47) == 23104, "airtime formula / radio settings changed: re-check the whole slot plan");
+static_assert(gkAirtimeUs(47) == 23104 && gkAirtimeUs(GK_TELEMETRY_LEN) == 25664, "airtime formula / radio settings changed: re-check the whole slot plan");
 static_assert(GK_TX_LATE_MS + GK_TELE_AIR_MS_CEIL + 2 <= GK_SLOT_MS_2HZ,
               "2 Hz: a late packet would run into the next kart's slot");
 static_assert(GK_TX_LATE_MS + 2 * GK_TELE_AIR_MS_CEIL + GK_RELAY_DELAY_MS + 2 <= GK_SLOT_MS,
@@ -129,7 +132,7 @@ static inline uint32_t gkSlotStartUs(uint8_t kart, uint8_t rate, uint8_t round) 
   return (round * periodUs + (uint32_t)(kart - 1) * slotUs + 1000000UL - GK_SLOT_GUARD_MS * 1000UL) % 1000000UL;
 }
 static inline uint32_t gkSlotBusyLenUs(bool relay) {
-  return GK_TX_LATE_MS * 1000UL + gkAirtimeUs(47) + (relay ? GK_RELAY_DELAY_MS * 1000UL + gkAirtimeUs(47) : 0);
+  return GK_TX_LATE_MS * 1000UL + gkAirtimeUs(GK_TELEMETRY_LEN) + (relay ? GK_RELAY_DELAY_MS * 1000UL + gkAirtimeUs(GK_TELEMETRY_LEN) : 0);
 }
 // True when [aUs, aUs + aLen) and [bUs, bUs + bLen) overlap on a 1 s circle.
 static inline bool gkCircOverlap(uint32_t aUs, uint32_t aLen, uint32_t bUs, uint32_t bLen) {
@@ -234,7 +237,18 @@ struct GkTelemetry {
   uint8_t  gps_age_s;     // seconds since last valid fix (255 = never)
   uint16_t scale_x1000;   // live l_current_max_scale read back from the VESC * 1000 (65535 = unknown)
   uint8_t  slow_mph;      // SLOW cap in mph while active, 0 = no SLOW (added 2026-11-06; 46-byte packets lack it)
+  // Freeplay multiplayer (kart 0.2.5, 2026-11-09; docs/freeplay-multiplayer.md): karts hear each other's
+  // telemetry directly, so sessions, invites and kart-to-kart hits ride on these bytes. 47-byte packets lack them (read as 0).
+  uint8_t  session;       // 0 = not in a freeplay game, else the HOST kart's id (a host carries its own id)
+  uint8_t  atk_to;        // 0 = no attack pending; 1..8 = target kart; GK_ADDR_ALL = everyone in my session
+  uint8_t  atk_item;      // GkGameItem (0 with atk_to 0)
+  uint8_t  atk_seq;       // 1..255, +1 per attack this kart launches (never 0)
+  uint8_t  ack_from;      // kart whose hit I last accepted, held 5 s (0 = none)
+  uint8_t  ack_seq;       // that hit's atk_seq
+  uint8_t  score;         // hits landed this session (acked attacks), saturating
 };
+enum GkGameItem : uint8_t { GK_ITEM_NONE = 0, GK_ITEM_SHELL = 1, GK_ITEM_LIGHTNING = 2 };
+static inline const char* gkItemName(uint8_t i) { return i == GK_ITEM_SHELL ? "shell" : i == GK_ITEM_LIGHTNING ? "lightning" : "none"; }
 
 struct GkCommandMsg {
   GkHeader h;             // h.dst = kart id or GK_ADDR_ALL, h.seq = command id
@@ -270,8 +284,9 @@ struct GkRepeaterInfo {   // repeater heartbeat; sent with GK_HDR_RELAY_BIT alre
 #pragma pack(pop)
 
 static_assert(sizeof(GkHeader) == 6, "header size");
-static_assert(sizeof(GkTelemetry) == 47, "telemetry size changed; update airtime budget and host decoder");
+static_assert(sizeof(GkTelemetry) == GK_TELEMETRY_LEN, "telemetry size changed; update GK_TELEMETRY_LEN, the airtime budget and the host decoders");
 #define GK_TELEMETRY_LEN_V0 46   // packets from firmware before slow_mph; still accepted, slow_mph reads as 0
+#define GK_TELEMETRY_LEN_V1 47   // packets from firmware before the freeplay game fields (0.2.4 and older); still accepted, they read as 0
 static_assert(sizeof(GkCommandMsg) == 14, "command size");
 static_assert(sizeof(GkBaseInfo) == 27, "base info size");
 static_assert(sizeof(GkRepeaterInfo) == 16, "repeater info size");
@@ -287,7 +302,7 @@ static inline uint8_t gkValidate(const uint8_t* buf, size_t len) {
   const GkHeader* h = (const GkHeader*)buf;
   if ((h->version & 0x7F) != GK_PROTO_VERSION || h->fleet != GK_FLEET_ID) return 0;
   switch (h->type) {
-    case GK_MSG_TELEMETRY: return (len == sizeof(GkTelemetry) || len == GK_TELEMETRY_LEN_V0) ? h->type : 0;
+    case GK_MSG_TELEMETRY: return (len == sizeof(GkTelemetry) || len == GK_TELEMETRY_LEN_V1 || len == GK_TELEMETRY_LEN_V0) ? h->type : 0;
     case GK_MSG_COMMAND:   return len == sizeof(GkCommandMsg) ? h->type : 0;
     case GK_MSG_BASE_INFO: return (len == sizeof(GkBaseInfo) || len == GK_BASEINFO_LEN_V0) ? h->type : 0;
     case GK_MSG_REPEATER_INFO: return len == sizeof(GkRepeaterInfo) ? h->type : 0;
@@ -310,7 +325,7 @@ static inline void gkBeaconSetPos(GkBaseInfo& b, uint8_t kart, uint8_t p) {
 static inline void gkCopyBeacon(GkBaseInfo& b, const uint8_t* buf, size_t len) {
   memset(&b, 0, sizeof b); memcpy(&b, buf, len < sizeof b ? len : sizeof b);
 }
-// Copy a validated telemetry packet (46 or 47 bytes) into t; fields a short packet lacks read as 0.
+// Copy a validated telemetry packet (46, 47 or 54 bytes) into t; fields a short packet lacks read as 0.
 static inline void gkCopyTelemetry(GkTelemetry& t, const uint8_t* buf, size_t len) {
   memset(&t, 0, sizeof t); memcpy(&t, buf, len < sizeof t ? len : sizeof t);
 }
@@ -320,6 +335,8 @@ static inline bool gkAddressedToMe(const GkHeader& h, uint8_t me) {
 }
 
 // ---- JSON encoding shared by kart USB output and base USB output -----------
+// Worst-case length of a gkTelemetryToJson line (every field at its widest): size buffers from this.
+#define GK_TELE_JSON_MAX 700
 // Produces one line matching firmware/base-tbeam-s3/SERIAL_PROTOCOL.md "tele"
 // (type may also be "self" or "fleet" on the kart side). Missing values are
 // emitted as null, never as zero.
@@ -353,14 +370,16 @@ static inline int gkTelemetryToJson(char* out, size_t n, const GkTelemetry& t, c
     "\"duty\":%.2f,\"esc_c\":%.1f,\"fault\":%u,\"mode_req\":%s,\"mode_actual\":%s,\"scale\":%s,"
     "\"stopped\":%s,\"vesc_link\":%s,\"mode_confirmed\":%s,\"pps\":%s,\"wifi\":%s,\"writes\":%s,"
     "\"last_cmd_seq\":%u,\"cmd_result\":%u,\"ah\":%.2f,\"uptime_s\":%u,\"base_rssi\":%d,"
-    "\"slow_mph\":%u,\"rssi\":%.0f,\"snr\":%.1f,\"rx_ms\":%lu,\"relayed\":%s}",
+    "\"slow_mph\":%u,\"session\":%u,\"atk_to\":%u,\"atk_item\":%u,\"atk_seq\":%u,\"ack_from\":%u,\"ack_seq\":%u,\"score\":%u,"
+    "\"rssi\":%.0f,\"snr\":%.1f,\"rx_ms\":%lu,\"relayed\":%s}",
     type, t.h.src, t.h.seq, lat, lon, gkBool(fix), t.gps_age_s, t.sats,
     t.gps_kph_x10 / 10.0, t.heading_x10 / 10.0, t.volts_x10 / 10.0, t.motor_a_x10 / 10.0, t.batt_a_x10 / 10.0, (long)t.erpm,
     t.duty_pct / 100.0, t.esc_temp_x10 / 10.0, t.fault, mreq, mact, scale,
     gkBool(t.flags & GK_FLAG_STOPPED), gkBool(t.flags & GK_FLAG_VESC_LINK), gkBool(t.flags & GK_FLAG_MODE_CONFIRMED),
     gkBool(t.flags & GK_FLAG_PPS), gkBool(t.flags & GK_FLAG_WIFI), gkBool(t.flags & GK_FLAG_WRITES_ENABLED),
     t.last_cmd_seq, t.cmd_result, t.ah_x100 / 100.0, t.uptime_s, t.base_rssi,
-    t.slow_mph, (double)rssi, (double)snr, (unsigned long)rxMs, gkBool(gkIsRelayed(t.h)));
+    t.slow_mph, t.session, t.atk_to, t.atk_item, t.atk_seq, t.ack_from, t.ack_seq, t.score,
+    (double)rssi, (double)snr, (unsigned long)rxMs, gkBool(gkIsRelayed(t.h)));
 }
 
 // Unix time from a civil UTC date/time (for GPS). Returns 0 if the date is implausible.

@@ -269,6 +269,7 @@ function updateCards() {
     else if (onGrid) b.push('<span class="badge grid">GRID</span>');
     else if ((goFlash[k.id] || 0) > Date.now()) b.push('<span class="badge go">GO</span>');
     if (st.slow_mph > 0) b.push(`<span class="badge slow">SLOW ${st.slow_mph}${KIOSK ? "" : " MPH"}</span>`);
+    if (st.session > 0) b.push(`<span class="badge game" title="freeplay multiplayer: host kart ${st.session}, ${st.score || 0} hits landed">${st.session === k.id ? "HOST" : "G" + st.session}${st.score ? " \u2605" + st.score : ""}</span>`);   // kart-to-kart game (docs/freeplay-multiplayer.md)
     if (st.vesc_link === false) b.push(`<span class="badge unknown">${KIOSK ? "NO VESC" : "VESC LINK DOWN"}</span>`);
     if (st.writes === false) b.push(`<span class="badge grey">${KIOSK ? "WR OFF" : "WRITES OFF"}</span>`);
     const sm = k.scale_mismatch;     // live scale != requested mode for 10 s (pitcore watch_scales): tap resends the mode

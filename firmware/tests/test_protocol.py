@@ -43,6 +43,7 @@ TELE_JSON_FIELDS = ["t", "kart", "seq", "lat", "lon", "fix", "gps_age_s", "sats"
                     "volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "mode_req",
                     "mode_actual", "scale", "stopped", "vesc_link", "mode_confirmed", "pps", "wifi",
                     "writes", "last_cmd_seq", "cmd_result", "ah", "uptime_s", "base_rssi", "slow_mph",
+                    "session", "atk_to", "atk_item", "atk_seq", "ack_from", "ack_seq", "score",
                     "rssi", "snr", "rx_ms", "relayed"]
 # Extra keys the kart adds to its own USB "self" line (kart-heltec-v4.ino usbReport()).
 SELF_EXTRA_FIELDS = ["hdop", "fix_age_ms", "gps_hz", "base_lat", "base_lon", "base_fix_age_s",
@@ -118,7 +119,7 @@ class StructLayout(unittest.TestCase):
     def test_sizes(self):
         sizes = {n: layout(f)[1] for n, f in self.structs.items()}
         self.assertEqual(sizes["GkHeader"], 6)
-        self.assertEqual(sizes["GkTelemetry"], 47)
+        self.assertEqual(sizes["GkTelemetry"], 54)
         self.assertEqual(sizes["GkBaseInfo"], 27)
         self.assertEqual(sizes["GkCommandMsg"], 14)
         self.assertEqual(sizes["GkRepeaterInfo"], 16)
@@ -129,13 +130,15 @@ class StructLayout(unittest.TestCase):
                   "flags": 19, "volts_x10": 20, "motor_a_x10": 22, "batt_a_x10": 24, "erpm": 26,
                   "duty_pct": 30, "esc_temp_x10": 31, "fault": 33, "mode_req": 34, "mode_actual": 35,
                   "last_cmd_seq": 36, "cmd_result": 37, "ah_x100": 38, "uptime_s": 40, "base_rssi": 42,
-                  "gps_age_s": 43, "scale_x1000": 44, "slow_mph": 46}
+                  "gps_age_s": 43, "scale_x1000": 44, "slow_mph": 46, "session": 47, "atk_to": 48, "atk_item": 49,
+                  "atk_seq": 50, "ack_from": 51, "ack_seq": 52, "score": 53}
         self.assertEqual(offs, expect)
 
     def test_decode_telemetry(self):
         buf = (header_bytes(0x81, 0x4B, 1, 3, 0xFF, 200)
-               + struct.pack("<iiHHBBHhhibhBBBBBHHbBHB", 410939900, -734163700, 523, 1805, 9, 0x8F,
-                             784, -125, 312, -4200, -37, 245, 0, 2, 2, 17, 2, 1234, 65000, -71, 0, 571, 12))
+               + struct.pack("<iiHHBBHhhibhBBBBBHHbBHBBBBBBBB", 410939900, -734163700, 523, 1805, 9, 0x8F,
+                             784, -125, 312, -4200, -37, 245, 0, 2, 2, 17, 2, 1234, 65000, -71, 0, 571, 12,
+                             2, 255, 2, 9, 4, 7, 3))
         d = decode(self.structs["GkTelemetry"], buf)
         self.assertEqual(d["h"][3], 3)
         self.assertEqual(d["h"][0] & 0x7F, 1)                  # version with the relay bit masked
@@ -145,6 +148,8 @@ class StructLayout(unittest.TestCase):
         self.assertEqual((d["duty_pct"], d["esc_temp_x10"]), (-37, 245))
         self.assertEqual((d["last_cmd_seq"], d["cmd_result"], d["ah_x100"]), (17, 2, 1234))
         self.assertEqual((d["base_rssi"], d["scale_x1000"], d["slow_mph"]), (-71, 571, 12))
+        self.assertEqual((d["session"], d["atk_to"], d["atk_item"], d["atk_seq"], d["ack_from"], d["ack_seq"], d["score"]),
+                         (2, 255, 2, 9, 4, 7, 3))
 
     def test_decode_baseinfo(self):
         pos = beacon_set_pos(beacon_set_pos([0, 0, 0, 0], 1, 2), 8, 1)
@@ -189,10 +194,12 @@ int main() {
   pr("sz_rep", sizeof(GkRepeaterInfo));
   pr("off_slow", offsetof(GkTelemetry, slow_mph)); pr("off_scale", offsetof(GkTelemetry, scale_x1000));
   pr("off_pos", offsetof(GkBaseInfo, pos)); pr("off_issued", offsetof(GkCommandMsg, issued_utc_s));
-  pr("air47", gkAirtimeUs(47)); pr("air46", gkAirtimeUs(46)); pr("air27", gkAirtimeUs(27)); pr("air22", gkAirtimeUs(22));
+  pr("air54", gkAirtimeUs(54)); pr("air47", gkAirtimeUs(47)); pr("air46", gkAirtimeUs(46)); pr("air27", gkAirtimeUs(27)); pr("air22", gkAirtimeUs(22));
+  pr("tele_len", GK_TELEMETRY_LEN); pr("off_session", offsetof(GkTelemetry, session)); pr("off_score", offsetof(GkTelemetry, score));
   pr("air16", gkAirtimeUs(16)); pr("air14", gkAirtimeUs(14));
-  uint8_t b[47] = {0}; GkTelemetry t; memset(&t, 0, sizeof t);
-  gkFillHeader(t.h, GK_MSG_TELEMETRY, 2, GK_ADDR_ALL, 5); memcpy(b, &t, 47);
+  uint8_t b[54] = {0}; GkTelemetry t; memset(&t, 0, sizeof t);
+  gkFillHeader(t.h, GK_MSG_TELEMETRY, 2, GK_ADDR_ALL, 5); memcpy(b, &t, 54);
+  pr("val54", gkValidate(b, 54)); pr("val53", gkValidate(b, 53)); pr("val48", gkValidate(b, 48));
   pr("val47", gkValidate(b, 47)); pr("val46", gkValidate(b, 46)); pr("val45", gkValidate(b, 45));
   b[0] |= GK_HDR_RELAY_BIT; pr("val47relay", gkValidate(b, 47)); b[0] = 2; pr("valver2", gkValidate(b, 47));
   b[0] = 1; b[1] = 0x4C; pr("valfleet", gkValidate(b, 47));
@@ -209,8 +216,18 @@ int main() {
   GkTelemetry j; memset(&j, 0, sizeof j); gkFillHeader(j.h, GK_MSG_TELEMETRY, 3, GK_ADDR_ALL, 7);
   j.flags = GK_FLAG_GPS_FIX | GK_FLAG_STOPPED; j.lat_e7 = 410939900; j.lon_e7 = -734163700; j.mode_req = 255; j.mode_actual = 1;
   j.scale_x1000 = 714; j.slow_mph = 5; j.h.version |= GK_HDR_RELAY_BIT;
-  char out[700]; gkTelemetryToJson(out, sizeof out, j, "tele", -80.0f, 9.5f, 1234);
+  j.session = 2; j.atk_to = 255; j.atk_item = 2; j.atk_seq = 9; j.ack_from = 4; j.ack_seq = 7; j.score = 3;
+  char out[GK_TELE_JSON_MAX]; gkTelemetryToJson(out, sizeof out, j, "tele", -80.0f, 9.5f, 1234);
   printf("\"json\":%s,", out);
+  // a 47-byte (0.2.4) packet copied in: the game fields read as 0
+  GkTelemetry old; gkCopyTelemetry(old, (const uint8_t*)&j, 47);
+  pr("old_session", old.session); pr("old_score", old.score); pr("old_slow", old.slow_mph);
+  // worst case line length: every field at its widest
+  GkTelemetry w; memset(&w, 0xFF, sizeof w); gkFillHeader(w.h, GK_MSG_TELEMETRY, 8, GK_ADDR_ALL, 255); w.h.version |= GK_HDR_RELAY_BIT;
+  w.lat_e7 = -2147483647; w.lon_e7 = -2147483647; w.erpm = -2147483647; w.duty_pct = -128; w.motor_a_x10 = -32768; w.batt_a_x10 = -32768;
+  w.esc_temp_x10 = -32768; w.base_rssi = -128; w.mode_req = 2; w.mode_actual = 2; w.scale_x1000 = 65534; w.flags = 0xFF;
+  char wide[1200]; int wn = gkTelemetryToJson(wide, sizeof wide, w, "fleet", -127.0f, -20.0f, 4294967295UL);
+  pr("json_max", wn); pr("json_cap", GK_TELE_JSON_MAX);
   char esc[16]; gkJsonStr(esc, sizeof esc, "a\"b\\c\x01\xff-long-tail");
   printf("\"esc\":\"%s\"}\n", esc);
   return 0;
@@ -242,12 +259,14 @@ class CompiledHeader(unittest.TestCase):
 
     def test_sizes_offsets(self):
         r = self.r
-        self.assertEqual((r["sz_tele"], r["sz_base"], r["sz_cmd"], r["sz_rep"]), (47, 27, 14, 16))
+        self.assertEqual((r["sz_tele"], r["sz_base"], r["sz_cmd"], r["sz_rep"]), (54, 27, 14, 16))
         self.assertEqual((r["off_slow"], r["off_scale"], r["off_pos"], r["off_issued"]), (46, 44, 23, 10))
+        self.assertEqual((r["tele_len"], r["off_session"], r["off_score"]), (54, 47, 53))
 
     def test_validate(self):
         r = self.r
-        self.assertEqual((r["val47"], r["val46"], r["val45"], r["val47relay"]), (1, 1, 0, 1))
+        self.assertEqual((r["val54"], r["val53"], r["val48"], r["val47"], r["val46"], r["val45"], r["val47relay"]), (1, 0, 0, 1, 1, 0, 1))
+        self.assertEqual((r["old_session"], r["old_score"], r["old_slow"]), (0, 0, 5))   # 0.2.4 packets: game fields 0
         self.assertEqual((r["valver2"], r["valfleet"]), (0, 0))
         self.assertEqual((r["valb27"], r["valb22"], r["valb26"]), (3, 3, 0))
 
@@ -258,8 +277,12 @@ class CompiledHeader(unittest.TestCase):
 
     def test_airtime(self):
         r = self.r
-        self.assertEqual((r["air47"], r["air46"], r["air27"], r["air22"], r["air16"], r["air14"]),
-                         (23104, 23104, 16704, 14144, 12864, 11584))
+        self.assertEqual((r["air54"], r["air47"], r["air46"], r["air27"], r["air22"], r["air16"], r["air14"]),
+                         (25664, 23104, 23104, 16704, 14144, 12864, 11584))
+
+    def test_json_fits_its_buffer(self):
+        # the widest possible line must fit the shared GK_TELE_JSON_MAX buffer with room for the kart's USB extras
+        self.assertLess(self.r["json_max"], self.r["json_cap"] - 20)
 
     def test_busy(self):
         r = self.r
@@ -270,7 +293,7 @@ class CompiledHeader(unittest.TestCase):
     def test_slot_plan_no_overlap(self):
         """Every kart at the same rate, worst-case late start, beacon in the tail: nothing overlaps.
         At 1 Hz this includes repeater copies; at 2 Hz it does not (documented limitation)."""
-        air = self.r["air47"]
+        air = self.r["air54"]
         late, guard, relay = 16000, 8000, 25000
         for rate, slot, with_relay in ((1, 100000, True), (2, 50000, False)):
             iv = []
@@ -291,6 +314,8 @@ class CompiledHeader(unittest.TestCase):
         self.assertEqual(list(j.keys()), TELE_JSON_FIELDS)
         self.assertEqual((j["kart"], j["seq"], j["mode_req"], j["mode_actual"], j["scale"], j["slow_mph"]),
                          (3, 7, None, 1, 0.714, 5))
+        self.assertEqual((j["session"], j["atk_to"], j["atk_item"], j["atk_seq"], j["ack_from"], j["ack_seq"], j["score"]),
+                         (2, 255, 2, 9, 4, 7, 3))
         self.assertIs(j["relayed"], True)
         self.assertIs(j["stopped"], True)
         self.assertAlmostEqual(j["lat"], 41.09399)
