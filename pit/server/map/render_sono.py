@@ -16,7 +16,7 @@ HEIGHT = round(WIDTH * (BOUNDS["north"] - BOUNDS["south"]) /
                ((BOUNDS["east"] - BOUNDS["west"]) * math.cos(math.radians(41.0985))))
 PALETTES = {
     "light": ("#e7e9df", "#bad3d9", "#fffdf5", "#d49c4e", "#596a66", "#172323", "#795000"),
-    "dark": ("#242f2a", "#153944", "#77887c", "#c3ae70", "#95aaa0", "#eef4ef", "#f2c35e"),
+    "dark": ("#202b33", "#173944", "#607580", "#8b9492", "#9aafbb", "#edf4f8", "#f2c35e"),
     "light-high": ("#f2f4eb", "#a5d2e4", "#506e59", "#795000", "#273c31", "#08130d", "#795000"),
     "dark-high": ("#06100a", "#064354", "#c5e0ce", "#ffe191", "#e3efe7", "#ffffff", "#ffe191"),
 }
