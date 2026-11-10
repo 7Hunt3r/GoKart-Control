@@ -1,0 +1,165 @@
+/* Hunter's GUI layer. Existing inputs, authoritative alerts and map mechanics stay in app.js. */
+:root {
+  --display-panel: #11191a; --display-text: #eef5f0; --display-muted: #a4b9b3;
+  --display-line: #425653; --display-selected: #11191a;
+  --hud: rgba(15,22,23,.93); --hud-soft: rgba(15,22,23,.86);
+  --retro-cyan: #80e1d6; --retro-amber: #f1c55f; --scan: rgba(255,255,255,.018);
+  --num: #edf7f2; --muted: #a4b9b3; --ink: #e3eee8;
+}
+:root[data-theme="light"] {
+  --bg: #e5e9df; --display-panel: #f1f4e9; --display-text: #172a27; --display-muted: #48625a;
+  --display-line: #8c9d90; --display-selected: #fff; --hud: rgba(244,247,236,.95); --hud-soft: rgba(244,247,236,.9);
+  --retro-cyan: #17645e; --retro-amber: #77520a; --scan: rgba(0,0,0,.025); --ink: #172a27; --num: #172a27; --muted: #48625a;
+}
+:root[data-contrast="high"] { --display-line: #d4e6df; --display-muted: #e6f4ed; --hud: #080e0e; --hud-soft: #080e0e; --scan: transparent; }
+:root[data-theme="light"][data-contrast="high"] { --display-line: #15291f; --display-muted: #15291f; --hud: #fff; --hud-soft: #fff; }
+.main { display: block; }
+.mapwrap { position: absolute; inset: 0; overflow: hidden; }
+/* The map continues beneath the glass; the left 70% stays clear of the instrument panel. */
+.driver-sidebar { position: absolute; z-index: 5; top: 10px; right: 10px; bottom: 10px; width: calc(30% - 10px); min-width: 0;
+  padding: 12px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; touch-action: pan-y;
+  background: repeating-linear-gradient(0deg,var(--scan) 0 1px,transparent 1px 4px),var(--hud);
+  border: 1px solid var(--display-line); border-top: 2px solid var(--retro-cyan); border-radius: 12px; color: var(--display-text);
+  box-shadow: 0 8px 28px rgba(0,0,0,.16); }
+.driver-sidebar > * { flex-shrink: 0; }
+.driver-title { display: flex; align-items: center; gap: 10px; min-height: 48px; }
+.driver-title .chip.id { background: transparent; color: var(--display-text); border: 0; padding: 0; font-size: 22px; height: 48px; margin-right: auto; }
+.driver-title button { min-height: 48px; padding: 0 11px; font-size: 12px; font-weight: 500; color: var(--display-text); border: 1px solid var(--display-line); background: transparent; border-radius: 7px; }
+.link-face { width: 26px; height: 26px; color: var(--retro-cyan); stroke: currentColor; fill: none; stroke-width: 1.8; }
+.link-face[data-mood="offline"] { color: var(--display-muted); }
+.link-face[data-mood="attention"] { color: var(--retro-amber); }
+.instrument-label { display: block; font-family: DSEG14, monospace; font-size: 10px; font-weight: 400; line-height: 1.6; color: var(--display-muted); letter-spacing: .045em; }
+.driver-sidebar .speedo, :root[data-theme] body.sun .driver-sidebar .speedo { position: relative; inset: auto; width: 100%; height: 142px; margin: 0;
+  background: transparent; border: 0; border-radius: 0; box-shadow: none; overflow: visible; }
+.speedo > .instrument-label { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; }
+.signal-bars { display: inline-flex; gap: 3px; align-items: flex-end; height: 15px; }
+.signal-bars i { width: 5px; height: 20%; background: var(--display-line); }
+.signal-bars i:nth-child(2) { height: 40%; } .signal-bars i:nth-child(3) { height: 60%; }
+.signal-bars i:nth-child(4) { height: 80%; } .signal-bars i:nth-child(5) { height: 100%; }
+.signal-bars i.lit { background: var(--retro-cyan); }
+.driver-sidebar .speedo svg { inset: 17px auto auto 0; width: 100%; height: 115px; overflow: visible; }
+:root[data-theme] body .speedo .mphnum { fill: var(--num); font: 103px DSEG7, monospace; letter-spacing: 0; stroke: none; }
+:root[data-theme] body .speedo .mphnum.na { font: 33px DSEG14, monospace; fill: var(--display-muted); }
+:root[data-theme] body .speedo .mphunit { font: 17px DSEG14, monospace; fill: var(--retro-amber); letter-spacing: 0; }
+:root[data-theme] body .speedo .mphunit tspan { font: 11px Arial,sans-serif; fill: var(--display-muted); }
+:root[data-theme] body .speedo .arcbg { stroke: var(--display-line); stroke-width: 5; stroke-dasharray: 10 7; }
+:root[data-theme] body .speedo .arcfg { stroke: var(--retro-cyan); stroke-width: 5; stroke-dasharray: 10 7; }
+:root[data-theme] body .speedo.stopped .arcfg { stroke: var(--bad); }
+:root[data-theme] body .speedo.boost .arcfg { stroke: var(--retro-amber); }
+:root[data-theme] body .speedo .tick { stroke: var(--display-line); stroke-width: 2; }
+:root[data-theme] body .speedo .ticklbl { fill: var(--display-muted); font: 13px DSEG7,monospace; }
+.driver-sidebar .batt { bottom: 0; left: 0; right: 0; }
+.driver-sidebar .battrow { font-size: 11px; line-height: 18px; gap: 8px; }
+:root[data-theme] body .driver-sidebar .lbl { font: 10px DSEG14, monospace; color: var(--display-muted); }
+.driver-sidebar #battPct { font-size: 12px; color: var(--retro-cyan); text-align: right; }
+.driver-sidebar .bar { height: 5px; border: 0; border-radius: 0; background: var(--display-line); position: relative; margin-top: 3px; }
+.driver-sidebar .bar::after { content: ''; position: absolute; inset: 0; background: repeating-linear-gradient(90deg,transparent 0 9px,var(--display-panel) 9px 11px); }
+.driver-sidebar #battBar { background: linear-gradient(90deg,var(--retro-cyan),var(--retro-amber)) !important; }
+.driver-sidebar[data-energy-level="low"] #battBar { background: var(--bad) !important; }
+.driver-sidebar[data-energy-level="warning"] #battBar { background: var(--warn) !important; }
+.driver-sidebar .batt.stale #battBar { background: var(--stale) !important; }
+.driver-sidebar #battNote { display: none; }
+.driver-sidebar #mphNote { position: absolute; top: 106px; left: 0; right: 0; text-align: right; font-size: 9px; color: var(--display-muted); }
+.telemetry-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; row-gap: 10px; padding: 10px 0; border-top: 1px solid var(--display-line); border-bottom: 1px solid var(--display-line); }
+.telemetry-grid .reading { display: block; margin-top: 5px; font: 21px DSEG7, monospace; color: var(--display-text); white-space: nowrap; }
+.telemetry-grid .reading small { font: 10px Arial,sans-serif; padding-left: 5px; color: var(--display-muted); }
+.telemetry-grid #battV { font-family: DSEG14, monospace; }
+.telemetry-grid.stale .reading { opacity: .5; }
+.driver-sidebar .modehud { position: static; width: 100%; gap: 7px; }
+.mode-heading { display: flex; justify-content: space-between; align-items: center; }
+:root[data-theme] body .mode-heading .gear { position: static; width: auto; background: transparent; border: 0; color: var(--retro-amber); padding: 0; border-radius: 0; }
+.mode-heading .gear b { display: none; } .mode-heading .gear span { font-size: 10px; }
+.driver-sidebar .modebtns { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 5px; }
+:root[data-theme] body .driver-sidebar .mbtn { height: 48px; padding: 3px 2px; display: flex; flex-direction: column; gap: 5px;
+  border: 1px solid var(--display-line); background: transparent; color: var(--display-text); border-radius: 6px; font-size: 11px; box-shadow: none; }
+.driver-sidebar .mbtn small { display: none; } .driver-sidebar .mbtn .cap { font-size: 9px; }
+:root[data-theme] body .driver-sidebar .mbtn.actual { background: #f1c55f; color: #14211b; border-color: #f1c55f; }
+:root[data-theme] body .driver-sidebar .mbtn.req:not(.actual) { color: var(--retro-cyan); border-style: dashed; border-color: var(--retro-cyan); }
+.driver-sidebar .hudnotes { order: 5; gap: 3px; }
+:root[data-theme] body .driver-sidebar .hudnotes .note { padding: 0; font: 10px/1.3 Arial,sans-serif; white-space: normal; text-align: left; background: transparent; color: var(--display-muted); box-shadow: none; align-self: stretch; }
+.driver-sidebar .fault { white-space: normal; font-size: 12px; }
+:root[data-theme] body .driver-sidebar .meter { background: transparent; padding: 0; box-shadow: none; height: 25px; }
+.driver-sidebar .btrack { height: 22px; } .driver-sidebar .blabel { font-size: 14px; min-width: 72px; }
+.driver-sidebar .itembtn { min-width: 0; font-size: 17px; min-height: 44px; gap: 6px; } .driver-sidebar .ibglyph { width: 28px; height: 28px; }
+:root[data-theme] body .driver-sidebar .chips { position: static; padding: 8px 0 0; margin-top: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 5px;
+  max-width: none; overflow: visible; background: transparent; border-radius: 0; border-top: 1px solid var(--display-line); box-shadow: none; }
+:root[data-theme] body .driver-sidebar .chip:not(.id) { height: 19px; font: 10px Arial,sans-serif; padding: 0; background: transparent; border: 0; color: var(--display-muted); }
+.driver-sidebar .chip::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 6px; background: var(--stale); border-radius: 50%; }
+.driver-sidebar .chip.ok::before { background: #8de1ab; } .driver-sidebar .chip.warn::before { background: var(--warn); } .driver-sidebar .chip.bad::before { background: var(--bad); }
+.driver-title .chip::before { display: none; }
+.driver-sidebar .chip.link, .driver-sidebar .chip.health { grid-column: 1 / -1; }
+.map-area { position: absolute; top: 12px; left: 14px; padding: 12px 14px; display: flex; align-items: center; gap: 10px;
+  background: var(--hud-soft); color: var(--display-text); border: 1px solid var(--display-line); border-radius: 6px; font-size: 13px; letter-spacing: .12em; }
+.map-area i { width: 20px; height: 12px; background: repeating-conic-gradient(var(--display-text) 0 25%,transparent 0 50%) 0 0/8px 8px; opacity: .85; }
+.map-area small { color: var(--display-muted); font-size: 9px; letter-spacing: .08em; }
+.map-area { padding-top: 4px; padding-bottom: 4px; }
+.map-area button { min-height: 44px; padding: 0 9px; margin-left: 5px; color: var(--retro-cyan); background: transparent; border: 0; border-left: 1px solid var(--display-line); border-radius: 0; font-size: 10px; font-weight: 500; }
+.mapctl { right: calc(30% + 12px); top: 12px; width: 52px; gap: 7px; }
+:root[data-theme] body .mapctl button { height: 48px; background: var(--hud-soft); color: var(--display-text); border: 1px solid var(--display-line); border-radius: 7px; font-weight: 500; box-shadow: none; text-shadow: none; }
+:root[data-theme] body .mapctl button.sel { background: var(--retro-cyan); border-color: var(--retro-cyan); color: var(--display-selected); }
+.mapctl #followBtn { font-size: 10px; } .mapctl .sunbtn svg { height: 23px; } .mapctl .sunbtn b, .mapctl .freebtn b { font-size: 8px; }
+.tl { top: 75px; left: 14px; gap: 6px; max-width: calc(70% - 95px); }
+:root[data-theme] body .lappanel { min-width: 140px; background: var(--hud-soft); color: var(--display-text); padding: 9px 10px; border: 1px solid var(--display-line); border-radius: 7px; box-shadow: none; }
+.lapflag { display: none; } .lapn { font: 10px DSEG14,monospace; color: var(--display-muted); }
+.lapn b { font: 14px DSEG7,monospace; color: var(--retro-amber); }
+.lapcur { font: 22px DSEG7,monospace; color: var(--display-text); padding: 10px 0; }
+.laprow { font: 10px Arial,sans-serif; line-height: 1.5; gap: 10px; } .laprow span { font-size: 9px; }
+:root[data-theme] body .laprow span { color: var(--display-muted); } .laprow b { color: var(--display-text); }
+.invite { top: 220px; left: 14px; max-width: calc(70% - 95px); }
+.invrow { font-size: 14px; padding-left: 8px; gap: 7px; } .joinbtn { min-width: 75px; font-size: 16px; }
+.resume { bottom: 55px; left: 14px; font-size: 11px; }
+:root[data-theme] body .mapnote { right: 30%; padding: 4px 14px; background: var(--hud-soft); color: var(--display-muted); font-size: 9px; }
+.map-credit { position: absolute; z-index: 4; bottom: 27px; right: calc(30% + 12px); padding: 3px 6px; border-radius: 3px; background: var(--hud-soft); color: var(--display-muted); font-size: 9px; }
+.sndwrap { right: calc(30% + 12px); bottom: 52px; max-width: 200px; }
+:root[data-theme] body .sndbtn { width: 48px; height: 48px; background: var(--hud-soft); color: var(--display-text); border: 1px solid var(--display-line); box-shadow: none; }
+:root[data-theme] body .sndbtn.muted { border-color: var(--bad); color: var(--warn); }
+.sndbtn svg { width: 23px; height: 23px; } .sndhint { font-size: 9px; border-width: 1px; padding: 4px; } .sndtest { font-size: 11px; }
+.mapmsg { left: 35%; max-width: 60%; }
+:root[data-contrast="high"] .driver-sidebar, :root[data-contrast="high"] .mapctl button, :root[data-contrast="high"] .lappanel { border-width: 2px; }
+:root[data-contrast="high"] .map-area { border-width: 2px; }
+/* Brightness is local page rendering, not backlight control. Keep settings undimmed. */
+body > :not(dialog):not(script) { filter: brightness(var(--display-brightness,1)); }
+.display-dialog { color: var(--display-text); background: var(--display-panel); border: 2px solid var(--display-line); border-radius: 10px; padding: 16px;
+  position: fixed; left: auto; right: 8px; top: 8px; bottom: auto; margin: 0; width: calc(30vw - 16px); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; touch-action: pan-y; }
+.display-dialog::backdrop { background: transparent; }
+.display-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+.display-dialog h2 { margin: 0; font-size: 17px; }
+.display-dialog button { min-height: 48px; font-size: 14px; color: var(--display-text); background: var(--display-panel); border-color: var(--display-line); }
+.display-dialog button.sel { background: var(--display-text); color: var(--display-selected); }
+.display-dialog header button { padding: 8px; }
+.display-dialog fieldset { border: 0; padding: 0; margin: 0 0 16px; min-width: 0; }
+.display-dialog legend { font-size: 13px; margin-bottom: 8px; color: var(--display-muted); }
+.display-themes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.display-contrast { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-block: 1px solid var(--display-line); min-height: 64px; font-size: 14px; }
+.display-contrast small { display: block; margin-top: 5px; color: var(--display-muted); font-size: 11px; }
+.display-contrast input { width: 24px; height: 24px; flex: 0 0 24px; }
+.display-brightness-label { display: flex; justify-content: space-between; gap: 10px; margin-top: 18px; font-size: 14px; }
+.display-brightness-row { display: grid; grid-template-columns: 48px minmax(0,1fr) 48px; align-items: center; gap: 8px; margin: 10px 0; }
+.display-brightness-row input { width: 100%; height: 44px; margin: 0; }
+.display-brightness-row button { font-size: 22px; padding: 4px; }
+#displayBrightnessNote, .display-status { font-size: 11px; color: var(--display-muted); margin: 12px 0 0; }
+.display-dialog { border: 1px solid var(--display-line); border-top: 2px solid var(--retro-cyan); border-radius: 12px; background: var(--display-panel); }
+.display-dialog button { font-weight: 500; border-width: 1px; }
+.display-dialog button.sel { background: var(--retro-amber); color: var(--display-selected); border-color: var(--retro-amber); }
+@media (min-height: 760px) and (min-width: 800px) {
+  .driver-sidebar { padding: 20px; gap: 20px; }
+  .driver-sidebar .speedo { height: 205px; } .driver-sidebar .speedo svg { height: 165px; }
+  .driver-sidebar #mphNote { top: 164px; font-size: 11px; }
+  .telemetry-grid { padding: 18px 0; row-gap: 20px; } .telemetry-grid .reading { font-size: 28px; }
+  .instrument-label { font-size: 11px; }
+  :root[data-theme] body .driver-sidebar .mbtn { height: 58px; font-size: 13px; }
+  :root[data-theme] body .driver-sidebar .chip:not(.id) { font-size: 12px; height: 25px; }
+}
+@media (max-width: 799px) {
+  html, body { height: auto; min-height: 100%; overflow: auto; touch-action: pan-y; }
+  .main { display: flex; flex-direction: column; }
+  .mapwrap { position: relative; height: 580px; flex: 0 0 580px; }
+  .driver-sidebar { position: relative; inset: auto; width: auto; margin: 10px; min-height: 530px; }
+  .mapctl { right: 10px; }
+  .map-area { max-width: calc(100% - 85px); font-size: 12px; } .map-area small { font-size: 7px; }
+  .tl, .invite { max-width: calc(100% - 80px); }
+  .mapnote { right: 0 !important; } .map-credit { right: 10px; }
+  .mapmsg { left: 50%; max-width: 85%; font-size: 20px; }
+  .sndwrap { right: 10px; top: 500px; bottom: auto; }
+  .display-dialog { width: 340px; }
+}

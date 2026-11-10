@@ -46,7 +46,14 @@ function sunApply() {
   const b = $("sunBtn");
   if (b) b.classList.toggle("sel", on);
   if (typeof requestDraw === "function" && S) requestDraw();     // the layer key includes sunOn: photo filter, band
+  window.dispatchEvent(new CustomEvent("gokart-sun-change", { detail: on }));
 }
+window.addEventListener("gokart-display-change", (event) => {
+  sunPref = event.detail.contrast;
+  try { localStorage.setItem("gk_sun", sunPref ? "1" : "0"); } catch (_) { /* optional */ }
+  sunApply();
+  if (S) requestDraw();
+});
 /* pit chip colour from how well the kart hears the pit (base_rssi, dBm): > -90 green, > -105 amber, else red */
 /* server.health -> null (nothing to show) or {text, cls}: same rule and words as the pit pages
    (pit/server/static/watch.js healthChip), in the driver page's capitals. Shown only when wrong. */
@@ -202,6 +209,7 @@ function render() {
   const pulsing = $("boostMeter").classList.contains("boost") || !link.connected;
   pulse = pulsing && !pulse;
   document.body.classList.toggle("pulse", pulse);     // no-op (no style recalc) while nothing pulses
+  window.dispatchEvent(new CustomEvent("gokart-state-render", { detail: S })); // read-only instrument presentation
 }
 let pulse = false;
 
@@ -974,6 +982,11 @@ const R_EARTH = 6371000;
 const view = { follow: true, pausedUntil: 0, all: false, scale: null, cx: 0, cy: 0, rot: 0 };
 let userFollow = true;               // the FOLLOW button; touching the map pauses it
 let mapImg = null, mapImgSrc = null, mapImgReady = null;
+function isSonoMap(pkg) { return !!(pkg && pkg.image && pkg.image.endsWith("/sono-light.png")); }
+function mapImageSource(pkg) {
+  if (!isSonoMap(pkg)) return pkg && pkg.image;
+  return `/static/sono-${document.documentElement.dataset.theme === "light" ? "light" : "dark"}${sunOn ? "-high" : ""}.svg`;
+}
 const DR_MAX_S = 1.2;
 const dr = new Map();
 
@@ -1071,13 +1084,16 @@ function drawMap() {
   };
 
   // imagery, course, track band, zone shapes, lap line: one cached north-up layer, turned with the map
-  if (pkg && pkg.image && pkg.bounds && mapImgSrc !== pkg.image) {
-    mapImgSrc = pkg.image; mapImgReady = null;
+  show("mapCredit", isSonoMap(pkg));
+  show("mapArea", isSonoMap(pkg));
+  const imageSource = mapImageSource(pkg);
+  if (imageSource && pkg.bounds && mapImgSrc !== imageSource) {
+    mapImgSrc = imageSource; mapImgReady = null;
     const img = new Image();
     // into the layer only once decoded (a 3000 x 3044 JPEG takes a while on a Pi 3 B)
     img.onload = () => { (img.decode ? img.decode() : Promise.resolve()).catch(() => {}).then(() => {
       if (mapImg === img) { mapImgReady = img.src; requestDraw(); } }); };
-    mapImg = img; img.src = pkg.image;
+    mapImg = img; img.src = imageSource;
   }
   const L = ensureLayer(en, pkg, W, H, cyS, dpr, headingUp);
   if (L.cv) {
@@ -1137,8 +1153,8 @@ function drawMap() {
   else if (!meFresh) { txt("mapMsg", me.link === "online" ? "NO GPS FIX" : "POSITION FROZEN"); show("mapMsg", true); }
   else show("mapMsg", false);
 
-  // scale bar (bottom-left, just above the HUD speed card: style.css .speedo is bottom 22 + 156 tall) + north arrow
-  const step = niceStep(90 / view.scale), len = step * view.scale, sb = H - 208;
+  // Scale bar clears the attribution footer; instruments are now in the sidebar.
+  const step = niceStep(90 / view.scale), len = step * view.scale, sb = H - 52;
   ctx.fillStyle = sunOn ? "#000" : "rgba(0,0,0,.55)"; ctx.fillRect(8, sb, len + 70, 26);
   if (sunOn) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(9, sb + 1, len + 68, 24); }
   ctx.strokeStyle = "#e6e6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(14, sb + 18); ctx.lineTo(14 + len, sb + 18); ctx.stroke();
@@ -1146,7 +1162,7 @@ function drawMap() {
   // north compass: top-right, under the map buttons, 1.5x the old size (r 30)
   const [ccx, ccy] = compassPos(W);
   ctx.save(); ctx.translate(ccx, ccy); ctx.rotate(-view.rot);
-  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2;
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.strokeStyle = document.documentElement.dataset.theme === "light" ? "#17645e" : "#80e1d6"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(0, 0, 30, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
   ctx.fillStyle = "#ff3030"; ctx.beginPath(); ctx.moveTo(0, -25); ctx.lineTo(10, 2); ctx.lineTo(-10, 2); ctx.closePath(); ctx.fill();
   ctx.fillStyle = "#e6e6e6"; ctx.beginPath(); ctx.moveTo(0, 13); ctx.lineTo(7, 2); ctx.lineTo(-7, 2); ctx.closePath(); ctx.fill();
@@ -1196,7 +1212,7 @@ function ensureLayer(en, pkg, W, H, cyS, dpr, headingUp) {
     const x0 = Math.max(0, p0[0]), y0 = Math.max(0, p0[1]), x1 = Math.min(2 * half, p1[0]), y1 = Math.min(2 * half, p1[1]);
     if (x1 > x0 && y1 > y0 && dw > 0 && dh > 0) {            // only the part of the photo inside the layer
       ctx.imageSmoothingQuality = "medium";
-      if (sunOn) ctx.filter = "contrast(1.35) saturate(1.3) brightness(1.08)";   // sun: once per layer build, cheap
+      if (sunOn && !isSonoMap(pkg)) ctx.filter = "contrast(1.35) saturate(1.3) brightness(1.08)";   // street map has its own contrast palette
       ctx.drawImage(mapImg, (x0 - p0[0]) / dw * iw, (y0 - p0[1]) / dh * ih, (x1 - x0) / dw * iw, (y1 - y0) / dh * ih, x0, y0, x1 - x0, y1 - y0);
       ctx.filter = "none";
     }
@@ -1288,10 +1304,22 @@ function mapNoteText() {
   const pit = sy.reachable === true ? "pit reachable" : sy.reachable === false ? "pit not reachable" : "pit not checked yet";
   if (!pkg) return `no course map cached (${pit}; it downloads on the pit Wi-Fi)`;
   return `map v${pkg.version} cached ${pkg.fetched_wall ? pkg.fetched_wall.slice(0, 16).replace("T", " ") : ""} | ${pit}`
-    + (pkg.attribution ? ` | imagery: ${pkg.attribution}` : "");
+    + (isSonoMap(pkg) ? "" : pkg.attribution ? ` | imagery: ${pkg.attribution}` : "");
 }
 
 /* map input: one finger pans, two fingers pinch-zoom, both pause auto-follow */
+// Preview the whole street-map area; this changes the camera only.
+$("areaBtn").addEventListener("click", () => {
+  const pkg = S && S.map && S.map.package, en = S && projection();
+  if (!isSonoMap(pkg) || !pkg.bounds || !en) return;
+  const b = pkg.bounds, nw = en(b.north, b.west), se = en(b.south, b.east);
+  const W = $("map").clientWidth, H = $("map").clientHeight;
+  view.scale = Math.max(W / (se[0] - nw[0]), H / (nw[1] - se[1])) * 1.04;
+  view.cx = (nw[0] + se[0]) / 2;
+  view.cy = nw[1] * .4 + se[1] * .6; // favor southern SoNo, including the simulator's shop loop
+  userFollow = false; view.follow = false; view.all = false; view.rot = 0;
+  requestDraw();
+});
 function touched() {
   view.follow = false; view.all = false;
   view.pausedUntil = Date.now() + cfg("follow_resume_s", 10) * 1000;
