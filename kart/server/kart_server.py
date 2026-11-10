@@ -19,7 +19,9 @@ HTTP (default 0.0.0.0:8081; the kiosk uses 127.0.0.1):
   POST /api/map/refresh   poll the pit for a new map now
   POST /api/demo  {"on": true|false} or {"toggle": true}: demo mode (localhost only, config "demo")
   POST /api/freeplay  {"on": true|false} | {"toggle": true} | {"reset": true}: freeplay, the kart-local
-                item-box game that needs no pit (localhost only, config "freeplay"; README "Freeplay")
+                item-box game that needs no pit (localhost only, config "freeplay"; README "Freeplay");
+                multiplayer: {"host": true} | {"join": N} | {"leave": true} | {"use": true} (Heltec kart-0.2.5+;
+                409 when refused, e.g. nothing held / no one in range; docs/freeplay-multiplayer.md)
   /map/<file>   cached course imagery;  /map/package.json  the cached package
   /map/zones.json  the cached game zones (pit/server/map/ZONES.md), 404 when none
   /healthz      "ok"
@@ -39,7 +41,9 @@ Freeplay (kartcore.FreeplayGame): with no pit game running, the kart records one
 own path and keeps random item boxes on it; its zones document goes through the same engine.
 Switching it on sends one `mode 0` (ECO) through the POST /cmd path (skipped while STOPPED /
 grid hold / paused). The pit's own game always wins (freeplay pauses). State in freeplay.json
-next to game-state.json.
+next to game-state.json. Multiplayer freeplay (Heltec kart-0.2.5+): `session host|join N|leave` and
+`attack N shell|all lightning` lines from FreeplayGame go out through _game_out like the engine's; the
+session wish is re-sent after a link up / Heltec reboot.
 """
 from __future__ import annotations
 
@@ -325,6 +329,10 @@ class App:
         self.game = kartcore.GameEngine(local_enabled=bool(self.cfg.get("game", True)),
                                         gps_correction=bool(self.cfg.get("gps_correction", False)),
                                         mud_secs=int(self.cfg.get("mud_slow_secs", kartcore.MUD_SLOW_SECS)))
+        # multiplayer freeplay: the engine rolls the multiplayer table on freeplay boxes while in a session, and
+        # freeplay reads peers / distances / scores from the display's fleet table
+        self.game.freeplay_items = self.freeplay.item_table
+        self.freeplay.bind_display(self.disp)
 
     # -- demo mode -------------------------------------------------------------------
     def _demo_zones(self):
@@ -446,20 +454,26 @@ class App:
                 self.disp.rx_bad += 1        # boot chatter, partial lines: logged, not shown
                 return
             t = self.disp.ingest(msg, now, wall)
+            pre = []
             if self.disp.heltec_reboots != self._reboots_seen:     # Heltec rebooted mid-session
                 self._reboots_seen = self.disp.heltec_reboots
                 self._status_due = now + 1.0                        # re-read fw/radio/gps details
                 self.game.set_fw(None)                              # maybe reflashed: old mud until the reply
                 self.log.write("event", what="heltec_reboot", uptime_s=msg.get("uptime_s"))
+                if not demo:                                        # the firmware forgot its freeplay session
+                    self.freeplay.set_fw(None)
+                    pre += self.freeplay.multi_resync(now)
             if not self._mismatch_logged and self.configured_id and self.disp.heltec_id \
                     and self.disp.heltec_id != self.configured_id:
                 self._mismatch_logged = True
                 self.log.write("event", what="kart_id_mismatch", config=self.configured_id, heltec=self.disp.heltec_id)
                 print(f"{wall_iso()} WARNING: config kart_id {self.configured_id} but the Heltec says kart "
                       f"{self.disp.heltec_id}; showing the Heltec's id (fix config.json or the Heltec's `id`)", flush=True)
-            game = []
+            game = pre
             if t == "status":
                 self.game.set_fw(msg.get("fw"))     # mud as a timed SLOW only on kart-0.2.4+ (kartcore.FW_TIMED_SLOW)
+                if not demo:
+                    self.freeplay.set_fw(msg.get("fw"))     # multiplayer only on kart-0.2.5+ (kartcore.FW_MULTIPLAYER)
             if t == "cmd":
                 rec = self.cmds.on_cmd_line(msg, wall)
                 if rec:
@@ -475,6 +489,8 @@ class App:
                 game = self.game.on_gps(msg, now)
             elif t == "race":
                 game = self.game.on_race(msg, now, wall)
+            elif t in ("game", "hit", "attack") and not demo:
+                game = game + self.freeplay.on_multi_line(t, msg, now)     # multiplayer freeplay (kart-0.2.5)
             if not demo and t in ("self", "gps"):
                 # freeplay: the engine's filtered position (course recording, the 10 m rule) and its
                 # item rolls (a roll on a freeplay box = collected)
@@ -495,6 +511,10 @@ class App:
                 return
             self.disp.on_link_change()
             self.game.set_fw(None)                    # another Heltec / a reflash: unknown until its status reply
+            # multiplayer: the Heltec may have rebooted and forgotten its session; the wish is re-sent once its
+            # status reply shows kart-0.2.5+ (FreeplayGame.multi_tick)
+            self.freeplay.set_fw(None)
+            mp = self.freeplay.multi_resync(time.monotonic())
             if connected:
                 self.disp.simulation = False
                 self._status_due = time.monotonic() + 1.0     # ask for fw/radio/gps details soon
@@ -502,6 +522,7 @@ class App:
                 self.cmds.on_link_down()
         self.log.write("event", what="link_up" if connected else "link_down", desc=desc)
         print(f"{wall_iso()} heltec link {'UP' if connected else 'DOWN'}: {desc}", flush=True)
+        self._game_out(mp)
 
     def _send_text(self, text, wait=True):
         """wait=False only queues the line (game commands, from the reader thread: nothing may block it)."""
@@ -584,6 +605,8 @@ class App:
                     game += self.game.import_state(self._game_pending, now)
                     self._game_pending = None
                 game += self.game.tick(now)
+                if d is None:
+                    game += self.freeplay.multi_tick(now)      # re-send a session wish that is not in force
                 due = self._connected() and self._status_due and now >= self._status_due
                 if due:
                     self._status_due = now + float(self.cfg["status_poll_s"])
@@ -619,8 +642,45 @@ class App:
         except OSError as e:
             self.log.write("event", what="freeplay_save_failed", error=str(e))
 
+    MULTI_KEYS = ("host", "join", "leave", "use")
+
+    def freeplay_multi(self, body, who):
+        """POST /api/freeplay multiplayer bodies: {"host": true} | {"join": N} | {"leave": true} | {"use": true}.
+        ValueError = bad body (400), CommandError = refused (409)."""
+        keys = [k for k in self.MULTI_KEYS if k in body]
+        if len(keys) != 1 or (keys[0] != "join" and body[keys[0]] is not True) or (keys[0] == "join" and (
+                not isinstance(body["join"], int) or isinstance(body["join"], bool) or not 1 <= body["join"] <= 8)):
+            raise ValueError('expected one of {"host": true}, {"join": 1-8}, {"leave": true}, {"use": true}')
+        what = keys[0]
+        now = time.monotonic()
+        try:
+            with self.lock:
+                if self.demo is not None:
+                    raise kartcore.CommandError("demo running")
+                fp = self.freeplay
+                if what == "host":
+                    recs = fp.host(now)
+                elif what == "join":
+                    recs = fp.join(body["join"], now)
+                elif what == "leave":
+                    recs = fp.leave(now, why="driver")
+                else:
+                    recs = fp.use(now)
+        except kartcore.CommandError as e:
+            self.log.write("op", who=who, action="freeplay", request=body, refused=str(e))
+            raise
+        self.log.write("op", who=who, action="freeplay", request=body,
+                       lines=[r["line"] for r in recs if r["ev"] == "cmd"])
+        self._game_out(recs)
+        self._save_freeplay()
+        with self.lock:
+            return self.freeplay.snapshot(now)
+
     def freeplay_cmd(self, body, who):
-        """POST /api/freeplay: {"on": bool} | {"toggle": true} | {"reset": true} (course reset)."""
+        """POST /api/freeplay: {"on": bool} | {"toggle": true} | {"reset": true} (course reset), or a multiplayer
+        body (freeplay_multi)."""
+        if any(k in body for k in self.MULTI_KEYS):
+            return self.freeplay_multi(body, who)
         now = time.monotonic()
         with self.lock:
             fp = self.freeplay

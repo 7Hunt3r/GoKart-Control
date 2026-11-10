@@ -243,7 +243,7 @@ class EndToEnd(unittest.TestCase):
             self.assertIn("boost 5 1.00", tx)
             self.assertIn("slow 5 4", tx)                             # mud = timed SLOW (sim reports kart-0.2.4)
             self.assertNotIn("boost 4 0.50", tx)
-            self.assertEqual((g["fw"], g["mud_cmd"]), ("sim-kart-0.2.4", "slow"))
+            self.assertEqual((g["fw"], g["mud_cmd"]), ("sim-kart-0.2.5", "slow"))     # sim fw 0.2.5 since multiplayer
             self.assertFalse([x for x in tx if x.split()[0] in ("stop", "start", "mode")], tx)
             self.assertFalse([x for x in tx if x.split()[0] == "slow" and x != "slow 5 4"], tx)
             game = [r for r in recs if r["kind"] == "game"]
@@ -306,6 +306,103 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(json.loads(body)["freeplay"]["phase"], "off")
             s = st.wait(lambda s: not s["game"]["on"], what="freeplay off -> no game")
             self.assertIsNone(s["game"]["source"])
+        finally:
+            st.close()
+
+    def test_freeplay_multiplayer(self):
+        """Sim --peer-host: kart 3 hosts, we join (peers 3 + 5), kart 3 shells us (--hit-at: slow 5 for 4 s),
+        a box gives a held item, we fire it at a peer (shell in range, or lightning at all) -> acked, score >= 1;
+        then leave and host our own game (kart 5 joins us)."""
+        st = Stack(["--course", "--warp", "3", "--peer-host", "--hit-at", "14"], config={"freeplay_boxes": 4})
+        try:
+            mp = lambda s: s["freeplay"]["multi"]   # noqa: E731
+            s = st.wait(lambda s: s["self"]["gps"]["fix_fresh"] and mp(s)["fw_ok"], what="fix + fw kart-0.2.5")
+            self.assertEqual((mp(s)["session"], mp(s)["held"], mp(s)["attack"]), (0, None, None))
+            self.assertEqual(st.request("POST", "/api/freeplay", {"join": 3})[0], 409)        # freeplay off
+            self.assertEqual(st.request("POST", "/api/freeplay", {"on": True})[0], 200)
+            st.wait(lambda s: mp(s)["hosts"] == [3], what="kart 3's invite")
+            for bad in ({"join": 9}, {"join": "3"}, {"host": 1}, {"use": True, "leave": True}, {"join": True}):
+                self.assertEqual(st.request("POST", "/api/freeplay", bad)[0], 400, bad)
+            code, body = st.request("POST", "/api/freeplay", {"use": True})
+            self.assertEqual((code, json.loads(body)["error"]), (409, "nothing held"))
+            code, body = st.request("POST", "/api/freeplay", {"join": 3})
+            self.assertEqual(code, 200, body)
+            self.assertEqual(json.loads(body)["freeplay"]["multi"]["wish"], 3)
+            s = st.wait(lambda s: mp(s)["session"] == 3 and [p["id"] for p in mp(s)["peers"]] == [3, 5],
+                        what="in K3's game with K3 + K5")
+            self.assertFalse(mp(s)["hosting"])
+            self.assertTrue({("peer", 3), ("peer", 5)} <= {(e["ev"], e.get("id")) for e in mp(s)["events"]})
+            # kart 3 shells us at 14 s: hit line + the firmware's timed slow 5 for 4 s
+            s = st.wait(lambda s: mp(s)["last_hit"] is not None, timeout=25, what="hit by K3")
+            h = mp(s)["last_hit"]
+            self.assertEqual((h["from"], h["item"], h["secs"], h["applied"]), (3, "shell", 4, True))
+            st.wait(lambda s: s["slow"]["active"] is True and s["slow"]["mph"] == 5, timeout=5, what="slow 5")
+            st.wait(lambda s: s["slow"]["active"] is False, timeout=8, what="the hit's slow over")
+            # a box gives a held item; fire it (a shell only while a peer is within 25 m)
+            used = None
+            deadline = time.time() + 150
+            while used is None and time.time() < deadline:
+                s = st.state()
+                held = mp(s)["held"]
+                if held and (held["item"] == "lightning" or any(p["in_range"] for p in mp(s)["peers"])):
+                    code, body = st.request("POST", "/api/freeplay", {"use": True})
+                    if code == 200:
+                        used = held["item"]
+                        self.assertIsNone(json.loads(body)["freeplay"]["multi"]["held"])
+                    else:
+                        self.assertEqual(json.loads(body)["error"], "no one in range")   # moved apart meanwhile
+                time.sleep(0.25)
+            self.assertIsNotNone(used, "no held item used within 150 s")
+            s = st.wait(lambda s: mp(s)["attack"] and mp(s)["attack"]["result"] in ("acked", "done")
+                        and mp(s)["score"] >= 1, timeout=10, what="attack acked")
+            a = mp(s)["attack"]
+            self.assertEqual((a["item"], a["to"] == 255), (used, used == "lightning"))
+            self.assertTrue(a["acked"])
+            # leave, then host our own game: kart 5 joins us 3 s later
+            self.assertEqual(st.request("POST", "/api/freeplay", {"leave": True})[0], 200)
+            self.assertEqual(st.request("POST", "/api/freeplay", {"host": True})[0], 200)
+            s = st.wait(lambda s: mp(s)["hosting"] and mp(s)["session"] == 2
+                        and [p["id"] for p in mp(s)["peers"]] == [5], timeout=10, what="hosting with K5")
+            logs = [f for f in os.listdir(st.logs) if f.startswith("session-")]
+            with open(os.path.join(st.logs, logs[0])) as fh:
+                recs = [json.loads(x) for x in fh]
+            game = [r for r in recs if r["kind"] == "game"]
+            evs = {r["ev"] for r in game}
+            self.assertTrue({"freeplay_join", "freeplay_session", "freeplay_hit", "freeplay_item_held",
+                             "freeplay_use", "freeplay_attack", "freeplay_leave", "freeplay_host"} <= evs, evs)
+            self.assertTrue(all(r.get("source") == "freeplay" for r in game if r["ev"].startswith("freeplay_")))
+            tx = [r["line"] for r in recs if r["kind"] == "tx"]
+            self.assertIn("session join 3", tx)
+            self.assertIn("session leave", tx)
+            self.assertIn("session host", tx)
+            self.assertTrue([x for x in tx if x.startswith("attack ")], tx)
+            held = [r for r in game if r["ev"] == "item" and r.get("held")]
+            self.assertTrue(held and all(r["table"] == "multi" for r in held))
+            ops = [r for r in recs if r["kind"] == "op" and r.get("action") == "freeplay"]
+            self.assertTrue(any(r.get("refused") == "nothing held" for r in ops))
+            # freeplay off leaves the session
+            self.assertEqual(st.request("POST", "/api/freeplay", {"on": False})[0], 200)
+            st.wait(lambda s: mp(s)["session"] == 0 and mp(s)["wish"] is None, timeout=5, what="left on freeplay off")
+        finally:
+            st.close()
+
+    def test_freeplay_multiplayer_old_firmware(self):
+        """kart-0.2.3: no multiplayer; host/join are refused (409) and nothing is sent."""
+        st = Stack(["--fw-old", "--peer-host"], pit=False)
+        try:
+            st.wait(lambda s: s["heltec"]["status"].get("fw") == "sim-kart-0.2.3", what="old fw status")
+            self.assertEqual(st.request("POST", "/api/freeplay", {"on": True})[0], 200)
+            code, body = st.request("POST", "/api/freeplay", {"host": True})
+            self.assertEqual(code, 409)
+            self.assertIn("kart-0.2.5", json.loads(body)["error"])
+            self.assertEqual(st.request("POST", "/api/freeplay", {"join": 3})[0], 409)
+            m = st.state()["freeplay"]["multi"]
+            self.assertEqual((m["fw_ok"], m["session"], m["hosts"], m["peers"]), (False, 0, [], []))
+            self.assertEqual(st.request("POST", "/api/freeplay", {"on": False})[0], 200)
+            logs = [f for f in os.listdir(st.logs) if f.startswith("session-")]
+            with open(os.path.join(st.logs, logs[0])) as fh:
+                tx = [json.loads(x).get("line") for x in fh if '"kind":"tx"' in x or '"kind": "tx"' in x]
+            self.assertFalse([x for x in tx if x and x.split()[0] in ("session", "attack")], tx)
         finally:
             st.close()
 
@@ -443,7 +540,7 @@ class SimTimedSlow(unittest.TestCase):
     def test_timed_slow_reverts_and_old_firmware_keeps_it(self):
         sim, out = self.sim()
         sim.status()
-        self.assertEqual(out[-1]["fw"], "sim-kart-0.2.4")
+        self.assertEqual(out[-1]["fw"], "sim-kart-0.2.5")            # 0.2.5 (multiplayer) keeps the 0.2.4 timed slow
         sim.handle_line("slow 5 4")
         self.assertEqual((out[-1]["t"], out[-1]["cmd"], out[-1]["arg"], out[-1]["src"]), ("cmd", 5, 5, 254))
         k = sim.me

@@ -185,6 +185,8 @@ function render() {
   const pit = (S.cmds_seen || []).filter((x) => x.src === 0).slice(-1)[0];
   if (!cn && pit && pit.age_s < 60) cn = `pit ${CMD_TEXT[pit.cmd_name] || pit.cmd_name}: ${RESULT_TEXT[pit.result_name] || pit.result_name}`;
   if (!cn && me.id_mismatch) cn = `Heltec says kart ${me.heltec_id}; display config says ${me.configured_id}`;
+  const mpn = mpNoteText();                    // freeplay multiplayer toast ("K5 joined", a USE error): 2-3 s
+  if (mpn) cn = mpn;
   txt("cmdNote", cn);
 
   renderGame(game, fresh, st);
@@ -248,7 +250,8 @@ function renderGame(game, fresh, st) {
   else sty(fill, "width", "0");
   const ov = m.override;
   const left = ov && ov.left_s > 0 ? ` ${Math.ceil(ov.left_s)}s` : "";
-  txt("boostLabel", kind === "boost" ? "BOOST!" + left : kind === "mud" ? "MUD" + left
+  // freeplay items (owner 2026-11-09): BOOST = NORMAL mode for 5 s (scale ~0.75), ROCKET = SPORT mode for 8 s (scale ~1.0)
+  txt("boostLabel", kind === "boost" ? (sc !== null && sc >= 0.9 ? "ROCKET \u2192 SPORT" : "BOOST \u2192 NORMAL") + left : kind === "mud" ? "MUD" + left
     : kind === "stopped" ? "STOP" : kind === "grid" ? "GRID" : kind === "normal" ? `POWER ${Math.round(sc * 100)}%` : "POWER --");
 
   // lap panel or the GAME OFF chip (freeplay running: its own chip instead; it has no lap line)
@@ -272,6 +275,7 @@ function renderGame(game, fresh, st) {
   renderPosition((game && game.race) || {});
   renderFree(S.freeplay);
   gameEvents(game);
+  mpEvents(S.freeplay);
 }
 
 /* freeplay (kart-local item boxes, no pit): chip next to GAME, FREEPLAY button state */
@@ -286,12 +290,143 @@ function freeChip(f) {                       // -> null (hidden) or {text, cls}
   return null;
 }
 function renderFree(f) {
-  const c = freeChip(f);
+  let c = freeChip(f);
+  const m = mpOf(f);
+  if (c && m) c = mpChip(f, m, c);
   if (c) setChip("freeChip", c.text, "freechip " + c.cls);
   show("freeChip", !!c);
   const b = $("freeBtn");
   show("freeBtn", !!f && f.allowed !== false);
   b.classList.toggle("sel", !!f && !!f.on);
+  renderMulti(f, m);
+}
+
+/* freeplay multiplayer (docs/freeplay-multiplayer.md section 5): S.freeplay.multi from the kart server.
+   Shown only with freeplay running and multi.fw_ok (Heltec kart-0.2.5+); an old server without `multi`
+   shows nothing new. Session = the FREEPLAY chip (tap: HOST, in a game: tap twice = LEAVE), INVITE card
+   (one JOIN row per host heard), the held item = one big button above the mode strip, events = flashes,
+   toasts in #cmdNote and page-local sounds. */
+const MP_ITEMS = { shell: "SHELL", lightning: "LIGHTNING" };
+const MP_LEAVE_MS = 3000;
+const mpUi = { leaveUntil: 0, note: "", noteUntil: 0, fb: null, fbUntil: 0, rouletteAt: -1e9, rouletteUntil: 0,
+  inviteKey: null, lastSeq: null, busy: false, glyph: null };
+function mpOf(f) {                           // -> the multi block when its controls apply, else null
+  const m = f && f.multi;
+  return m && typeof m === "object" && m.fw_ok === true && freeRunning(f) ? m : null;
+}
+function mpNote(text, secs) { mpUi.note = text; mpUi.noteUntil = performance.now() + secs * 1000; renderDirty = true; requestDraw(); }
+function mpNoteText() { return performance.now() < mpUi.noteUntil ? mpUi.note : ""; }
+function kName(id) { return "K" + (nul(id) ? "?" : Number(id)); }
+function mpPeers(m) { return Array.isArray(m.peers) ? m.peers.filter((p) => p && !nul(p.id)) : []; }
+function mpChip(f, m, base) {                // the FREEPLAY chip with the session in it
+  if (!m.session) return f.phase === "ready" ? { text: base.text + " · TAP TO HOST", cls: base.cls + " tap" } : base;
+  if (performance.now() < mpUi.leaveUntil) return { text: "TAP AGAIN TO LEAVE", cls: "tap leave" };
+  const ids = mpPeers(m).map((p) => Number(p.id)), others = ids.filter((i) => i !== Number(m.session));
+  const tail = !ids.length ? "waiting for karts" : others.length ? "with " + others.map(kName).join(" ") : "";
+  return { text: `FREEPLAY · ${m.hosting ? "my game" : kName(m.session) + "'s game"}${tail ? " · " + tail : ""}`, cls: "tap mp" };
+}
+function mpNearest(m) {                      // nearest in-range peer (the shell's target) or undefined
+  const d = (p) => (nul(p.dist_m) ? 1e9 : p.dist_m);
+  return mpPeers(m).filter((p) => p.in_range === true).sort((a, b) => d(a) - d(b))[0];
+}
+function renderMulti(f, m) {
+  const inS = !!m && !!m.session;
+  if (inS) txt("mpScore", "★ " + (Number(m.score) || 0));
+  show("mpScore", inS);
+  // INVITE: hosts heard while not in a session (at most 3 rows: they fit above the scale bar)
+  const hosts = m && !m.session && Array.isArray(m.hosts) ? m.hosts.map(Number).filter((h) => Number.isFinite(h)).slice(0, 3) : [];
+  const key = hosts.join(",");
+  if (key !== mpUi.inviteKey) {
+    mpUi.inviteKey = key;
+    $("inviteCard").innerHTML = hosts.map((h) => `<div class="invrow"><span>${kName(h)} IS HOSTING FREEPLAY</span>`
+      + `<button class="joinbtn" data-join="${h}">JOIN</button></div>`).join("");
+  }
+  show("inviteCard", hosts.length > 0);
+  // held item button (after the roulette); feedback (SENT / HIT! / NO ANSWER ...) keeps it up a moment
+  const now = performance.now(), btn = $("itemBtn");
+  const held = m && m.held && MP_ITEMS[m.held.item] ? m.held.item : null;
+  const fb = mpUi.fb && now < mpUi.fbUntil ? mpUi.fb : null;
+  let text = "", en = false;
+  const item = fb ? fb.item : held;
+  if (fb) text = fb.text;
+  else if (held && now >= mpUi.rouletteUntil) {
+    if (held === "shell") {
+      const near = mpNearest(m);
+      text = near ? `SHELL ▶ ${kName(near.id)}${nul(near.dist_m) ? "" : " · " + Math.round(near.dist_m) + " m"}` : "SHELL · no one in range";
+      en = !!near;
+    } else {
+      const n = mpPeers(m).length;
+      text = n ? `LIGHTNING ▶ ALL (${n})` : "LIGHTNING · no karts in the game";
+      en = n > 0;
+    }
+  }
+  show("itemBtn", !!text);
+  if (!text) return;
+  txt("itemBtnText", text);
+  cls(btn, "itembtn i-" + (item || "shell") + (fb ? " fb " + fb.cls : en ? "" : " off"));
+  btn.disabled = !!fb || !en || mpUi.busy;
+  if (mpUi.glyph !== item) { mpUi.glyph = item; $("itemBtnGlyph").innerHTML = ITEM_SVG[item] || ""; $("itemBtnGlyph").style.color = ITEM_COLOR[item] || ""; }
+}
+function mpFeedback(item, text, c, secs) { mpUi.fb = { item, text, cls: c }; mpUi.fbUntil = performance.now() + secs * 1000; renderDirty = true; requestDraw(); }
+/* multi.events: each seq acted on once; the first frame (or a server restart) only sets the mark */
+function mpEvents(f) {
+  const m = f && f.multi;
+  if (!m || typeof m !== "object" || !Array.isArray(m.events)) return;
+  const evs = m.events.filter((e) => e && !nul(e.seq));
+  const top = evs.reduce((a, e) => Math.max(a, e.seq), 0);
+  if (mpUi.lastSeq === null || top < mpUi.lastSeq) { mpUi.lastSeq = top; return; }
+  evs.filter((e) => e.seq > mpUi.lastSeq && (nul(e.age_s) || e.age_s < 3)).sort((a, b) => a.seq - b.seq).forEach((e) => {
+    try { mpEvent(e, m); } catch (err) { /* one odd event never breaks the page */ }
+  });
+  mpUi.lastSeq = top;
+}
+function mpEvent(e, m) {
+  const item = MP_ITEMS[e.item] ? e.item : "shell";
+  if (e.ev === "hit") {
+    if (e.applied === false) flash(`HIT BY ${kName(e.from)} (no effect)`, "hit", "fsmall");
+    else { flash(`HIT BY ${kName(e.from)}!`, "hit"); mpSound("hit"); }
+  } else if (e.ev === "attack") {
+    const r = e.result, acked = Array.isArray(e.acked) ? e.acked.length : 0;
+    if (r === "sent") { mpFeedback(item, "SENT", "sent", 4); mpSound(item); }
+    else if (r === "acked") { mpFeedback(item, "HIT!", "hit", 1.6); Snd.play("best"); }
+    else if (r === "timeout") mpFeedback(item, "NO ANSWER", "miss", 2);
+    else if (r === "done") { mpFeedback(item, acked ? `HIT x ${acked}` : "NO ANSWER", acked ? "hit" : "miss", 2); if (acked) Snd.play("best"); }
+    else if (r === "rejected") mpFeedback(item, String(e.why || "REJECTED").toUpperCase().slice(0, 40), "miss", 2.5);
+  } else if (e.ev === "peer") {
+    if (m.session) { mpNote(`${kName(e.id)} ${e.joined === false ? "left" : "joined"}`, 2); if (e.joined !== false) mpSound("join"); }
+  } else if (e.ev === "session") {
+    if (e.session) { mpNote(e.hosting ? "hosting freeplay: waiting for karts" : `joined ${kName(e.session)}'s game`, 2.5); mpSound("join"); }
+    else mpNote(e.ended ? "the game ended" : "left the game", 2.5);
+  } else if (e.ev === "held" && MP_ITEMS[e.item]) {
+    if (performance.now() - mpUi.rouletteAt > 3000) itemRoulette(e.item);     // the item-box event usually spun it already
+  }
+}
+/* page-local cues (sound.js is shared byte-for-byte with the pit page), built like posSound():
+   [start s, length s, from Hz, to Hz, gain] per tone, same mute / sound-config rules */
+const MP_TONES = {
+  shell: { type: "square", tones: [[0, 0.07, 196, 185, 0.2], [0.1, 0.09, 165, 150, 0.2]] },              // two quick low blips
+  lightning: { type: "sawtooth", tones: [[0, 0.32, 260, 2600, 0.14], [0.02, 0.3, 520, 3400, 0.06]] },    // rising zap
+  hit: { type: "sawtooth", tones: [[0, 0.55, 760, 70, 0.2], [0, 0.55, 380, 45, 0.14]] },                // descending buzz
+  join: { type: "triangle", tones: [[0, 0.09, 784, 784, 0.22], [0.09, 0.16, 1175, 1175, 0.22]] },       // short up-chime
+};
+function mpSound(kind) {
+  const k = MP_TONES[kind];
+  if (!k || !Snd.enabled || Snd.muted) return;
+  const ctx = Snd.ensure();
+  if (!ctx || ctx.state !== "running") return;
+  try {
+    const t = ctx.currentTime + 0.01;
+    k.tones.forEach(([dt, dur, f0, f1, gain]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = k.type;
+      o.frequency.setValueAtTime(f0, t + dt);
+      if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + dt + dur);
+      g.gain.setValueAtTime(0.0001, t + dt);
+      g.gain.exponentialRampToValueAtTime(gain, t + dt + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dt + dur);
+      o.connect(g); g.connect(ctx.destination); o.start(t + dt); o.stop(t + dt + dur + 0.05);
+    });
+  } catch (e) { /* sound is a nicety */ }
 }
 
 /* running position (pit beacon): big "P3" badge next to the lap panel, hidden at 0 */
@@ -350,7 +485,7 @@ function gameEvents(game) {
   const fresh = evs.filter((e) => e.seq > lastEvSeq && e.age_s < 3);
   const itemZones = new Set(fresh.filter((e) => e.ev === "item").map((e) => e.zone));
   fresh.forEach((e) => {
-    if (e.ev === "item") itemRoulette(e.item);
+    if (e.ev === "item") { if (!(MP_ITEMS[e.item] && performance.now() - mpUi.rouletteAt < 3000)) itemRoulette(e.item); }   // a multi "held" may have spun it
     else if (e.ev === "boost" && itemZones.has(e.zone)) { /* shown by the roulette */ }
     else if (e.ev === "boost") { flash("BOOST!", "boost"); Snd.play("boost"); }
     else if (e.ev === "mud") { flash("MUD", "mud"); Snd.play("mud"); }
@@ -364,15 +499,29 @@ function gameEvents(game) {
 const ITEM_SVG = {
   boost: '<svg viewBox="0 0 100 100"><g fill="none" stroke="#000" stroke-width="20" stroke-linejoin="miter"><path d="M18 50 L50 22 L82 50"/><path d="M18 76 L50 48 L82 76"/></g>'
     + '<g fill="none" stroke="currentColor" stroke-width="11" stroke-linejoin="miter"><path d="M18 50 L50 22 L82 50"/><path d="M18 76 L50 48 L82 76"/></g></svg>',
-  super: '<svg viewBox="0 0 100 100"><path d="M50 4 L62 37 L97 38 L69 59 L79 93 L50 73 L21 93 L31 59 L3 38 L38 37 Z" fill="currentColor" stroke="#000" stroke-width="6" stroke-linejoin="round"/></svg>',
+  // ROCKET (was "super", 2026-11-09): white body, orange flame, black outline
+  rocket: '<svg viewBox="0 0 100 100"><g stroke="#000" stroke-width="5" stroke-linejoin="round">'
+    + '<path d="M40 76 L50 97 L60 76 Z" fill="#ff7a00"/><path d="M44 76 L50 88 L56 76 Z" fill="#ffd400" stroke-width="3"/>'
+    + '<path d="M36 52 L20 78 L38 74 Z M64 52 L80 78 L62 74 Z" fill="#fff"/>'
+    + '<path d="M50 3 C67 18 69 46 63 76 L37 76 C31 46 33 18 50 3 Z" fill="#fff"/>'
+    + '<circle cx="50" cy="38" r="8" fill="#2f7bff"/></g></svg>',
   mud: '<svg viewBox="0 0 100 100"><g fill="currentColor" stroke="#000" stroke-width="5" stroke-linejoin="round">'
     + '<path d="M50 28 C64 24 68 40 80 42 C93 45 92 62 80 65 C72 67 76 82 61 79 C51 77 47 88 35 81 C23 74 31 64 19 60 C7 55 12 41 25 42 C35 43 37 31 50 28 Z"/>'
     + '<circle cx="84" cy="22" r="7"/><circle cx="16" cy="84" r="6"/><circle cx="20" cy="24" r="4.5"/></g></svg>',
   empty: '<svg viewBox="0 0 100 100"><g stroke-linecap="square"><path d="M22 22 L78 78 M78 22 L22 78" stroke="#000" stroke-width="24"/>'
     + '<path d="M22 22 L78 78 M78 22 L22 78" stroke="currentColor" stroke-width="13"/></g></svg>',
+  // multiplayer items: a turtle-shell disc (hex plates) and a lightning bolt
+  shell: '<svg viewBox="0 0 100 100"><ellipse cx="50" cy="54" rx="44" ry="38" fill="#fff" stroke="#000" stroke-width="6"/>'
+    + '<ellipse cx="50" cy="48" rx="38" ry="32" fill="currentColor" stroke="#000" stroke-width="5"/>'
+    + '<g fill="none" stroke="#000" stroke-width="4.5" stroke-linejoin="round"><path d="M38 34 L62 34 L70 48 L62 62 L38 62 L30 48 Z"/>'
+    + '<path d="M38 34 L30 20 M62 34 L70 20 M70 48 L88 48 M62 62 L70 76 M38 62 L30 76 M30 48 L12 48"/></g></svg>',
+  lightning: '<svg viewBox="0 0 100 100"><path d="M60 3 L18 56 L45 56 L34 97 L82 40 L54 40 Z" fill="currentColor" stroke="#000" stroke-width="6" stroke-linejoin="round"/></svg>',
 };
-const ITEM_COLOR = { boost: "#ffb000", super: "#ffd400", mud: "#c58a4e", empty: "#d0d0d0" };
-const ITEM_NAME = { boost: "BOOST", super: "SUPER!", mud: "MUD", empty: "EMPTY" };
+const ITEM_COLOR = { boost: "#ffb000", rocket: "#ffd400", mud: "#c58a4e", empty: "#d0d0d0", shell: "#3ddc84", lightning: "#ffe600" };
+const ITEM_NAME = { boost: "BOOST", rocket: "ROCKET", mud: "MUD", empty: "EMPTY", shell: "SHELL", lightning: "LIGHTNING" };
+const ITEM_SUB = { boost: "NORMAL", rocket: "SPORT" };          // the mode the item gives for a few seconds
+const ITEM_ALIAS = { super: "rocket" };                        // old records ("super") still render
+ITEM_SVG.super = ITEM_SVG.rocket; ITEM_COLOR.super = ITEM_COLOR.rocket; ITEM_NAME.super = ITEM_NAME.rocket; ITEM_SUB.super = ITEM_SUB.rocket;
 let itemTimer = null;
 function itemGlyph(k, color) {
   const g = $("itemGlyph");
@@ -381,11 +530,13 @@ function itemGlyph(k, color) {
   g.classList.remove("pop"); void g.offsetWidth; g.classList.add("pop");
 }
 function itemRoulette(result) {
-  const box = $("itemBox"), order = ["boost", "mud", "super", "empty"];
+  result = ITEM_ALIAS[result] || result;
+  const box = $("itemBox"), order = ["boost", "mud", "rocket", "shell", "lightning", "empty"];
   clearInterval(itemTimer); clearTimeout(itemTimer);
   let i = 0;
   const t0 = performance.now();
-  box.className = "itembox"; txt("itemName", "");
+  mpUi.rouletteAt = t0; mpUi.rouletteUntil = t0 + 1300;        // the held-item button waits for the spin
+  box.className = "itembox"; txt("itemName", ""); txt("itemSub", "");
   Snd.play("roulette");                        // accelerating ticks for the whole spin
   itemTimer = setInterval(() => {
     if (performance.now() - t0 < 1200) {
@@ -395,13 +546,15 @@ function itemRoulette(result) {
     }
     clearInterval(itemTimer);
     box.className = "itembox done r-" + result;
-    itemGlyph(result, { mud: "#e2b07a", empty: "#bbb", super: "#ff2a1a", boost: "#fff" }[result] || "#fff");
+    itemGlyph(result, { mud: "#e2b07a", empty: "#bbb", rocket: "#fff", boost: "#fff", shell: "#3ddc84", lightning: "#ffe600" }[result] || "#fff");
     txt("itemName", ITEM_NAME[result] || result);
+    txt("itemSub", ITEM_SUB[result] || "");
     if (result === "empty") Snd.play("empty");
+    else if (MP_ITEMS[result]) { Snd.play("item"); setTimeout(() => mpSound(result), 260); renderDirty = true; requestDraw(); }
     else {
       Snd.play("item");                        // bright two-note chime, then the item's own sound
-      setTimeout(() => Snd.play(result), 260);
-      if (result === "super") flash("\u2605", "star");
+      setTimeout(() => Snd.play(result === "rocket" ? "super" : result), 260);     // sound.js still calls it "super"
+      if (result === "rocket") flash("ROCKET!", "star", "fword");
       else if (result === "boost") flash("BOOST!", "boost");
       else if (result === "mud") flash("MUD", "mud");
     }
@@ -493,7 +646,7 @@ function flash(text, cls, extra) {
   txt("flashText", text);
   f.className = "flash f" + cls + (extra ? " " + extra : "");
   clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => { f.className = "flash hidden"; }, cls === "lap" || cls === "star" ? 1300 : 850);
+  flashTimer = setTimeout(() => { f.className = "flash hidden"; }, cls === "lap" || cls === "star" ? 1300 : cls === "hit" ? 1100 : 850);
 }
 
 /* ---------------------------------------------------------------- sound
@@ -783,6 +936,34 @@ document.querySelectorAll(".mbtn").forEach((btn) => {
   });
   ["pointercancel", "lostpointercapture"].forEach((ev) => b.addEventListener(ev, () => { if (raf) reset(); }));
 })();
+
+/* freeplay multiplayer taps: chip = HOST, or (in a game) tap twice within 3 s = LEAVE; JOIN rows; USE */
+function mpPost(body, what) {
+  return post("/api/freeplay", body).then((j) => {
+    if (!j || !j.ok) mpNote(`${what}: ${(j && j.error) || "failed"}`, 3);
+    return j || {};
+  });
+}
+$("freeChip").addEventListener("click", () => {
+  const f = S && S.freeplay, m = mpOf(f);
+  if (!m) return;
+  if (!m.session) { if (f.phase === "ready") mpPost({ host: true }, "host"); return; }
+  if (performance.now() < mpUi.leaveUntil) { mpUi.leaveUntil = 0; mpPost({ leave: true }, "leave"); }
+  else { mpUi.leaveUntil = performance.now() + MP_LEAVE_MS; setTimeout(() => { renderDirty = true; requestDraw(); }, MP_LEAVE_MS + 50); }
+  renderDirty = true; requestDraw();
+});
+$("inviteCard").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-join]");
+  if (!b || !S) return;
+  const h = Number(b.dataset.join);
+  b.disabled = true;
+  mpPost({ join: h }, `join ${kName(h)}`).then(() => { b.disabled = false; });
+});
+$("itemBtn").addEventListener("click", () => {
+  if (!S || mpUi.busy || $("itemBtn").disabled) return;
+  mpUi.busy = true; renderDirty = true; requestDraw();
+  mpPost({ use: true }, "item").then(() => { mpUi.busy = false; renderDirty = true; requestDraw(); });
+});
 
 /* ------------------------------------------------------------------ map */
 const R_EARTH = 6371000;

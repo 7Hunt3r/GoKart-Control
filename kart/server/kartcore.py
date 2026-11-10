@@ -122,6 +122,13 @@ VESC_FIELDS = ("volts", "motor_a", "batt_a", "erpm", "duty", "esc_c", "fault", "
 STATUS_FIELDS = ("seq", "mode_req", "mode_actual", "mode_confirmed", "stopped", "vesc_link",
                  "pps", "wifi", "writes", "last_cmd_seq", "cmd_result", "uptime_s",
                  "base_rssi", "rssi", "snr", "rx_ms", "race_pos", "race_state")
+# Multiplayer freeplay fields on self/fleet lines (firmware kart-0.2.5, docs/freeplay-multiplayer.md section 3/4):
+# plain integers, 0 when absent (older firmware / 46-47 byte frames).
+MULTI_TELE_FIELDS = ("session", "atk_to", "atk_item", "atk_seq", "ack_from", "ack_seq", "score")
+
+
+def _int0(v):
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else 0
 
 
 class KartState:
@@ -142,11 +149,13 @@ class KartState:
         self.packets = 0
         self.last_pit_mono = None       # self only: latest sample with base_rssi != 0
         self.pit_rssi = None
+        self.multi = {f: 0 for f in MULTI_TELE_FIELDS}   # multiplayer freeplay fields (kart-0.2.5+), 0 = absent
 
     def ingest(self, msg, now, wall):
         self.packets += 1
         self.last_mono = now
         self.last_wall = wall
+        self.multi = {f: _int0(msg.get(f)) for f in MULTI_TELE_FIELDS}
         self.status = {f: msg.get(f) for f in STATUS_FIELDS}
         if msg.get("vesc_link") is True:
             self.vesc = {f: msg.get(f) for f in VESC_FIELDS}
@@ -216,6 +225,7 @@ class KartState:
                 "fix_fresh": fix_fresh,
             },
             "trail": [[lat, lon] for (t, lat, lon) in self.trail if now - t <= self.trail_s],
+            "multi": dict(self.multi),
         }
 
 
@@ -238,6 +248,7 @@ class KartDisplay:
         self.rx_lines = 0
         self.rx_bad = 0
         self.gps_lines = 0
+        self.multi_lines = 0                 # game / hit / attack lines (multiplayer freeplay)
         self.last_uptime = None
         self.heltec_reboots = 0
         # SLOW has no telemetry flag (all 8 flag bits are used), so it is inferred
@@ -300,6 +311,10 @@ class KartDisplay:
         elif t == "ble":
             self.ble = dict(msg)
             self.ble_mono = now
+        elif t in ("game", "hit", "attack"):
+            # multiplayer freeplay (firmware kart-0.2.5): consumed by FreeplayGame.on_multi_line; old firmware
+            # never prints them
+            self.multi_lines += 1
         return t
 
     def _slow_set(self, active, mph, wall, basis):
@@ -467,8 +482,15 @@ BOOST_DEFAULTS = {"secs": 5, "scale": 1.0, "cooldown_s": 20.0}
 ITEM_COOLDOWN_S = 15.0
 # Item box roll (ZONES.md "Item boxes"): (name, probability, secs, scale); empty = nothing sent
 # (mud: secs is the engine's mud_secs, MUD_SLOW_SECS by default; the scale is only used on firmware < 0.2.4)
-ITEM_TABLE = (("boost", 0.45, 5, 1.0), ("super", 0.15, 8, 1.0), ("mud", 0.25, MUD_SLOW_SECS, 0.5),
+# 2026-11-09 (owner): a BOOST item is NORMAL's scale (0.75: from ECO the firmware lifts the cap to NORMAL's 25 mph)
+# and the ROCKET (was "super") is SPORT's 1.0 (cap lifted to SPORT = uncapped), both for their secs.
+ITEM_TABLE = (("boost", 0.45, 5, 0.75), ("rocket", 0.15, 8, 1.0), ("mud", 0.25, MUD_SLOW_SECS, 0.5),
               ("empty", 0.15, None, None))
+# Multiplayer freeplay (docs/freeplay-multiplayer.md section 2): the roll on a FREEPLAY box while this kart is in
+# a session. shell/lightning are HELD (secs None: nothing is sent; FreeplayGame keeps them for `use`).
+MULTI_ITEM_TABLE = (("boost", 0.35, 5, 0.75), ("shell", 0.30, None, None), ("lightning", 0.15, None, None),
+                    ("rocket", 0.10, 8, 1.0), ("empty", 0.10, None, None))
+MULTI_HELD_ITEMS = ("shell", "lightning")
 RACE_GO_GRACE_S = 0.0        # the overlay/laps follow the computed GO instant; the go line only confirms it
 RACE_STATES = {0: "idle", 1: "countdown", 2: "running", 3: "finished"}
 HEADING_SLEW_DPS = 120.0     # heading-up map: max rotation rate
@@ -856,15 +878,17 @@ def track_chevrons(track, spacing_m=15.0):
     return out
 
 
-def roll_item(rng):
-    """One item-box roll: (name, secs, scale); secs None = empty box."""
+def roll_item(rng, table=None):
+    """One item-box roll: (name, secs, scale); secs None = nothing sent (empty box, or a held item from
+    MULTI_ITEM_TABLE). table defaults to the single-player ITEM_TABLE."""
+    table = table or ITEM_TABLE
     x = rng.random()
     acc = 0.0
-    for name, p, secs, scale in ITEM_TABLE:
+    for name, p, secs, scale in table:
         acc += p
         if x < acc:
             return name, secs, scale
-    return ITEM_TABLE[-1][0], None, None
+    return table[-1][0], None, None
 
 
 def angle_diff_deg(a, b):
@@ -1058,6 +1082,9 @@ class GameEngine:
         self.cmds_sent = 0
         self.last_result = None     # {"result", "result_name", "mono"} of the last boost/slow echo
         self.source = None          # the zones document's "source" (e.g. "freeplay"), tagged on its records
+        # multiplayer freeplay: a callable -> item table or None (FreeplayGame.item_table). Used only for boxes
+        # of a freeplay document; the pit's own item boxes always roll the single-player ITEM_TABLE.
+        self.freeplay_items = None
         self._reset_lap()
 
     # -- state ------------------------------------------------------------------
@@ -1284,8 +1311,10 @@ class GameEngine:
                 self._rec(recs, "suppressed", now, zone=z.id, why=f"cooldown {st['cool_until'] - now:.0f} s")
             elif z.type == "item":
                 st["fired"] = True
-                name, secs, scale = roll_item(self.rng)
-                self._rec(recs, "item", now, zone=z.id, name=z.name, item=name)
+                table = self.freeplay_items() if self.source == "freeplay" and self.freeplay_items else None
+                name, secs, scale = roll_item(self.rng, table)
+                self._rec(recs, "item", now, zone=z.id, name=z.name, item=name,
+                          **({"table": "multi", "held": name in MULTI_HELD_ITEMS} if table else {}))
                 if secs is not None:
                     fire.append((z, "mud" if name == "mud" else "boost", secs, scale))
             else:
@@ -1603,8 +1632,9 @@ class GameEngine:
 # to the same GameEngine.set_zones, so collection, rolls, effects, cooldowns, the HUD roulette and
 # every safety rule (nothing while STOPPED or in grid hold, mud wins, scale <= 1.0) are the existing
 # code. Freeplay itself produces one command only: switching it on asks for ECO (`mode 0`, take_eco(),
-# sent by the server through its POST /cmd path), so the 15 mph ECO cap is the base and a BOOST, which
-# lifts the cap one mode up (firmware BOOST_LIFTS_CAP), is felt. The course is one lap of this kart's own
+# sent by the server through its POST /cmd path), so the 15 mph ECO cap is the base and a BOOST (0.75 = NORMAL,
+# cap 25 mph) or ROCKET (1.0 = SPORT, uncapped), which lift the cap to the highest mode whose scale the boost
+# reaches (firmware 0.2.5; an in-between scale still lifts one mode), is felt. The course is one lap of this kart's own
 # filtered GPS positions (the loop-closing logic is a port of pit/server/pitcore.TrackRecorder).
 FREEPLAY_BOXES = 3           # config freeplay_boxes, 1-6
 FREEPLAY_BOXES_MAX = 6
@@ -1627,6 +1657,18 @@ FP_FIX_FRESH_S = 3.0         # recording needs a usable fix at least this recent
 FP_KART_FRESH_S = 10.0       # the kart position used for the 10 m placement rule
 FP_ADOPT_NEAR_M = 30.0       # the pit's closed track is adopted as the course only if the kart is this close
 FP_PHASES = ("recording", "ready", "paused_pit", "off", "no_gps")
+# Multiplayer freeplay (docs/freeplay-multiplayer.md; Heltec firmware kart-0.2.5+). The firmware owns the session,
+# the attack repeats/acks and the hit effect; the kart Pi keeps the WISH (host / joined host id, re-sent after a
+# link up or Heltec reboot), the held item, the item roll and the target choice.
+FW_MULTIPLAYER = (0, 2, 5)   # first firmware with `session` / `attack` and the game / hit / attack lines
+MP_RANGE_M = 25.0            # a shell reaches a peer this close (its dead-reckoned position) ...
+MP_FIX_FRESH_S = 10.0        # ... whose fix is younger than this
+MP_DR_MAX_S = 3.0            # a peer's last fix is moved along its heading at its gps_kph for at most this long
+MP_HEARD_S = 10.0            # no game line yet: peers = fleet karts heard this recently with my session
+MP_RESEND_S = 5.0            # the wished session is not in force: re-send at most this often ...
+MP_MAX_TRIES = 3             # ... and drop the wish after this many sends that did not take
+MP_EVENTS_KEEP = 12
+MP_ALL = 255                 # GK_ADDR_ALL: `attack all ...`
 
 
 def douglas_peucker(pts, tol_m):
@@ -1663,6 +1705,22 @@ def simplify_track(pts, tol_m=FP_SIMPLIFY_TOL_M, max_points=TRACK_MAX_POINTS):
         tol *= 1.5
         out = douglas_peucker(pts, tol)
     return out
+
+
+def peer_position(ks, now, max_dr_s=MP_DR_MAX_S):
+    """A fleet KartState's last fix moved along its heading at its gps_kph for min(fix age, max_dr_s) s.
+    -> ((lat, lon), fix_age_s) or (None, None) without a fix."""
+    fx = ks.fix
+    if not fx or ks.last_fix_mono is None or not _num(fx.get("lat")) or not _num(fx.get("lon")):
+        return None, None
+    age = max(0.0, now - ks.last_fix_mono + (ks.gps_age_at_rx or 0.0))
+    lat, lon = float(fx["lat"]), float(fx["lon"])
+    kph, hd = fx.get("gps_kph"), fx.get("heading")
+    if _num(kph) and _num(hd) and kph > 0:
+        d = float(kph) / 3.6 * min(age, max_dr_s)
+        h = math.radians(float(hd))
+        lat, lon = en_to_ll(d * math.sin(h), d * math.cos(h), (lat, lon))
+    return (lat, lon), age
 
 
 def pit_game_on(doc):
@@ -1792,6 +1850,23 @@ class FreeplayGame:
         self.changed = True          # persistence: the server saves export() when this is set
         self.eco_due = False         # switched on: one `mode 0` request is owed (take_eco())
         self.eco = None              # outcome of the last one {"outcome", "why"/"id"/"error", "mono"}
+        # multiplayer: the wish and the held item are ours (persisted); the session itself is the firmware's
+        # (mirrored from its game lines)
+        self.fw_ok = False           # the Heltec's status fw is kart-0.2.5+ (set_fw)
+        self.disp = None             # KartDisplay (bind_display): fleet table + our own self line
+        self.my_id = None            # from game lines (else the display's heltec_id)
+        self.wish = None             # None | "host" | the joined host's id
+        self.wish_tries = 0          # session commands sent since the wish was last in force
+        self.wish_sent = None        # mono of the last one
+        self.wish_note = None        # why the wish was dropped (rejected 3 times, the host's game ended)
+        self._resend_due = False     # link up / Heltec reboot: the firmware forgot, send the wish again
+        self.held = None             # {"item": "shell"|"lightning", "mono"}
+        self.use_pending = None      # {"item", "to", "mono"}: `attack` sent, no sent/rejected line yet
+        self.attack = None           # latest attack line {"to", "item", "seq", "result", "acked", "why", "mono"}
+        self.last_hit = None         # latest hit line {"from", "item", "secs", "applied", "why", "seq", "mono"}
+        self.mevents = deque(maxlen=MP_EVENTS_KEEP)
+        self.mseq = 0                # never reset within a process (the page acts on each event once)
+        self._mp_clear_fw_state()
 
     @staticmethod
     def _rec(recs, ev, **kw):
@@ -1819,6 +1894,8 @@ class FreeplayGame:
         self._fill_at = 0.0
         self._touch(persist=True)
         self._rec(recs, "freeplay_on" if on else "freeplay_off", course_m=self.course["length_m"] if self.course else None)
+        if not on and (self.wish is not None or self._session() or self.held is not None):
+            recs += self.leave(now, why="freeplay off")       # leaving freeplay leaves the session
         return recs
 
     FREEPLAY_MODE = 0            # ECO
@@ -1910,6 +1987,12 @@ class FreeplayGame:
             self._touch(persist=True)
             self._rec(recs, "freeplay_collected", zone=b["id"], name=b["name"], item=r.get("item"),
                       collected=self.collected)
+            item = r.get("item")
+            if item in MULTI_HELD_ITEMS and r.get("table") == "multi":
+                old = self.held["item"] if self.held else None       # one slot: a new held item replaces it
+                self.held = {"item": item, "mono": now}
+                self._rec(recs, "freeplay_item_held", item=item, replaced=old, zone=b["id"])
+                self._mevent(now, "held", item=item)
         return recs
 
     # -- placement --------------------------------------------------------------------------
@@ -2015,7 +2098,8 @@ class FreeplayGame:
         self.changed = False
         return {"v": 1, "on": self.on, "collected": self.collected,
                 "course": {"points": c["points"], "length_m": c["length_m"], "width_m": c["width_m"],
-                           "source": c.get("source")} if c else None}
+                           "source": c.get("source")} if c else None,
+                "multi": {"wish": self.wish, "held": self.held["item"] if self.held else None}}
 
     def load(self, doc, now):
         """Restore export(). A bad file is ignored (freeplay starts off, no course)."""
@@ -2033,10 +2117,17 @@ class FreeplayGame:
         if doc.get("on") is True and self.allowed:
             self.on = True
             self.rec = LoopRecorder() if self.course is None else None
+        m = doc.get("multi")
+        if isinstance(m, dict) and self.on:
+            w = m.get("wish")
+            if w == "host" or (isinstance(w, int) and not isinstance(w, bool) and w in KART_IDS):
+                self.wish = w                    # re-sent after the link comes up (multi_resync / multi_tick)
+                if m.get("held") in MULTI_HELD_ITEMS:
+                    self.held = {"item": m["held"], "mono": now}
         self._touch()
         self.changed = False
         self._rec(recs, "freeplay_restored", on=self.on, course_m=self.course["length_m"] if self.course else None,
-                  collected=self.collected)
+                  collected=self.collected, wish=self.wish, held=self.held["item"] if self.held else None)
         return recs
 
     def snapshot(self, now):
@@ -2051,4 +2142,342 @@ class FreeplayGame:
                        if self.eco else None,
                 "collected": self.collected,
                 "record": {"distance_m": round(r.travel, 1), "points": len(r.points)}
-                          if r is not None and self.course is None and self.on else None}
+                          if r is not None and self.course is None and self.on else None,
+                "multi": self.multi_snapshot(now)}
+
+    # -- multiplayer (docs/freeplay-multiplayer.md) ------------------------------------------------
+    def _mp_clear_fw_state(self):
+        """What the firmware told us about its session (game lines). Cleared when it may have forgotten."""
+        self.session = 0
+        self.hosting = False
+        self.peer_ids = []
+        self.hosts = []
+        self.score = 0
+        self.ended = None
+        self.fw_attack = None
+        self.game_mono = None
+
+    def bind_display(self, disp):
+        """The server's KartDisplay: its fleet table (peers, distances, scores) and our own self line."""
+        self.disp = disp
+
+    def set_fw(self, fw):
+        """The Heltec's status fw (None = unknown: link change, reboot). Multiplayer needs kart-0.2.5+."""
+        self.fw_ok = fw_at_least(fw, FW_MULTIPLAYER)
+
+    def _mevent(self, now, ev, **kw):
+        self.mseq += 1
+        self.mevents.append({"seq": self.mseq, "ev": ev, "mono": now, **kw})
+
+    def _my_id(self):
+        if self.my_id:
+            return self.my_id
+        return self.disp.heltec_id if self.disp is not None else None
+
+    def _session(self):
+        """My session: the latest game line's, else (no game line yet) the self line's `session` field."""
+        if self.game_mono is not None:
+            return self.session
+        me = self.disp.me if self.disp is not None else None
+        return me.multi.get("session", 0) if me is not None and me.last_mono is not None else 0
+
+    def _hosting(self):
+        if self.game_mono is not None:
+            return self.hosting
+        s = self._session()
+        return bool(s) and s == self._my_id()
+
+    def in_session(self):
+        return self._session() != 0
+
+    def item_table(self):
+        """GameEngine.freeplay_items hook: the multiplayer table while this kart is in a session, else None
+        (the single-player ITEM_TABLE)."""
+        return MULTI_ITEM_TABLE if self.on and self._session() != 0 else None
+
+    def _mp_gate(self, what):
+        if not self.allowed:
+            raise CommandError(f"freeplay is {self.why_not}")
+        if not self.on:
+            raise CommandError(f"turn freeplay on to {what}")
+        if not self.fw_ok:
+            raise CommandError("the Heltec firmware has no multiplayer (needs kart-0.2.5+)")
+        if self.pause_reason:
+            raise CommandError(f"freeplay is paused ({self.pause_reason})")
+
+    def _drop_held(self):
+        if self.held is not None:
+            self.held = None
+            self._touch(persist=True)
+
+    def _set_wish(self, wish):
+        self.wish = wish
+        self.wish_tries = 0
+        self.wish_note = None
+        self._resend_due = False
+        self._touch(persist=True)
+
+    def _send_wish(self, recs, now, resend=None):
+        line = "session host" if self.wish == "host" else f"session join {self.wish}"
+        self.wish_tries += 1
+        self.wish_sent = now
+        if resend:
+            self._rec(recs, "freeplay_host" if self.wish == "host" else "freeplay_join",
+                      **({} if self.wish == "host" else {"host": self.wish}), resend=resend, tries=self.wish_tries)
+        self._rec(recs, "cmd", line=line)
+
+    def _wish_met(self):
+        s = self._session()
+        if self.wish == "host":
+            return s != 0 and self._hosting()
+        return s == self.wish and not self._hosting()
+
+    def host(self, now):
+        """Host a freeplay game (`session host`). Needs freeplay on and firmware kart-0.2.5+."""
+        self._mp_gate("host")
+        recs = []
+        was = self._session()
+        if was and not self._hosting():
+            self._drop_held()                        # leaving someone's game for my own
+        self._set_wish("host")
+        self._rec(recs, "freeplay_host", was=was)
+        self._send_wish(recs, now)
+        return recs
+
+    def join(self, host, now):
+        """Join kart `host`'s game (`session join N`); the firmware accepts it only while N is heard hosting."""
+        if not isinstance(host, int) or isinstance(host, bool) or host not in KART_IDS:
+            raise ValueError("join takes a kart id 1-8")
+        self._mp_gate("join")
+        if host == self._my_id():
+            raise CommandError("that is this kart (host instead)")
+        recs = []
+        was = self._session()
+        if was and was != host:
+            self._drop_held()
+        self._set_wish(host)
+        self._rec(recs, "freeplay_join", host=host, was=was, heard_hosting=host in self.hosts)
+        self._send_wish(recs, now)
+        return recs
+
+    def leave(self, now, why=None):
+        """Leave the session (`session leave`, only when the firmware has multiplayer) and drop the wish and
+        the held item. Never refused."""
+        recs = []
+        was_wish, was = self.wish, self._session()
+        self.wish, self.wish_tries, self._resend_due, self.wish_note = None, 0, False, None
+        self._drop_held()
+        self.use_pending = None
+        self._touch(persist=True)
+        if self.fw_ok:
+            self._rec(recs, "cmd", line="session leave")
+        self._rec(recs, "freeplay_leave", session=was, wish=was_wish, why=why)
+        return recs
+
+    def use(self, now):
+        """Fire the held item: a shell at the nearest in-range peer (`attack N shell`), lightning at everyone
+        (`attack all lightning`). The slot empties now and comes back if the firmware rejects the attack."""
+        self._mp_gate("use an item")
+        if self.held is None:
+            raise CommandError("nothing held")
+        if self._session() == 0:
+            raise CommandError("not in a session")
+        item = self.held["item"]
+        dist = None
+        if item == "shell":
+            near = [p for p in self.peers(now) if p["in_range"]]
+            if not near:
+                raise CommandError("no one in range")
+            tgt = min(near, key=lambda p: p["dist_m"])
+            to, dist, line = tgt["id"], tgt["dist_m"], f"attack {tgt['id']} shell"
+        else:
+            to, line = MP_ALL, "attack all lightning"
+        recs = []
+        self.held = None
+        self.use_pending = {"item": item, "to": to, "mono": now}
+        self._touch(persist=True)
+        self._rec(recs, "freeplay_use", item=item, to=to, dist_m=dist, line=line)
+        self._rec(recs, "cmd", line=line)
+        return recs
+
+    def on_multi_line(self, t, msg, now):
+        """A game / hit / attack line from the Heltec (firmware kart-0.2.5)."""
+        if t == "game":
+            return self.on_game_line(msg, now)
+        if t == "hit":
+            return self.on_hit_line(msg, now)
+        if t == "attack":
+            return self.on_attack_line(msg, now)
+        return []
+
+    @staticmethod
+    def _ids(v):
+        return sorted({x for x in v if isinstance(x, int) and not isinstance(x, bool) and x in KART_IDS}) \
+            if isinstance(v, list) else []
+
+    def on_game_line(self, msg, now):
+        recs = []
+        k = msg.get("kart")
+        if isinstance(k, int) and not isinstance(k, bool) and k in KART_IDS:
+            self.my_id = k
+        sess = _int0(msg.get("session"))
+        sess = sess if sess in KART_IDS else 0
+        hosting = msg.get("hosting") is True and sess != 0
+        peers, hosts = self._ids(msg.get("peers")), self._ids(msg.get("hosts"))
+        ended = msg.get("ended") if isinstance(msg.get("ended"), str) and msg.get("ended") else None
+        prev_sess, prev_host, prev_peers = self.session, self.hosting, self.peer_ids
+        new_end = ended is not None and ended != self.ended
+        if new_end:
+            if isinstance(self.wish, int):           # never re-join a host that left or vanished
+                self.wish_note = f"K{self.wish}'s game ended ({ended})"
+                self.wish, self.wish_tries, self._resend_due = None, 0, False
+                self._touch(persist=True)
+            self._drop_held()
+        elif sess and prev_sess and sess != prev_sess:
+            self._drop_held()                        # a different game: the held item does not carry over
+        self.session, self.hosting, self.peer_ids, self.hosts = sess, hosting, peers, hosts
+        self.score, self.ended = _int0(msg.get("score")), ended
+        self.fw_attack = msg.get("attack") if isinstance(msg.get("attack"), dict) else None
+        self.game_mono = now
+        for p in peers:
+            if p not in prev_peers:
+                self._mevent(now, "peer", id=p, joined=True)
+        for p in prev_peers:
+            if p not in peers:
+                self._mevent(now, "peer", id=p, joined=False)
+        changed = (sess, hosting) != (prev_sess, prev_host) or new_end
+        if changed:
+            self._mevent(now, "session", session=sess, hosting=hosting, ended=ended)
+        if changed or peers != prev_peers:
+            self._rec(recs, "freeplay_session", session=sess, hosting=hosting, peers=peers, hosts=hosts,
+                      score=self.score, ended=ended, prev=prev_sess)
+        self._wish_check(now, recs)
+        return recs
+
+    def on_hit_line(self, msg, now):
+        recs = []
+        why = msg.get("why") if isinstance(msg.get("why"), str) else None
+        h = {"from": _int0(msg.get("from")), "item": msg.get("item") if isinstance(msg.get("item"), str) else None,
+             "secs": _int0(msg.get("secs")), "applied": msg.get("applied") is True, "why": why,
+             "seq": _int0(msg.get("seq"))}
+        self.last_hit = dict(h, mono=now)
+        self._mevent(now, "hit", **{k: h[k] for k in ("from", "item", "secs", "applied", "why")})
+        self._rec(recs, "freeplay_hit", **h)
+        return recs
+
+    def on_attack_line(self, msg, now):
+        recs = []
+        res = msg.get("result") if isinstance(msg.get("result"), str) else None
+        why = msg.get("why") if isinstance(msg.get("why"), str) else None
+        a = {"to": _int0(msg.get("to")), "item": msg.get("item") if isinstance(msg.get("item"), str) else None,
+             "seq": _int0(msg.get("seq")), "result": res, "acked": self._ids(msg.get("acked")), "why": why}
+        self.attack = dict(a, mono=now)
+        self._mevent(now, "attack", to=a["to"], item=a["item"], result=res, acked=a["acked"],
+                     **({"why": why} if why else {}))
+        pend = None
+        if res in ("sent", "rejected"):
+            pend, self.use_pending = self.use_pending, None
+        if res == "sent":
+            return recs
+        returned = False
+        if res == "rejected" and pend is not None and self.held is None and self._session():
+            self.held = {"item": pend["item"], "mono": now}          # not launched: the item comes back
+            self._touch(persist=True)
+            returned = True
+        self._rec(recs, "freeplay_attack", **a, returned=returned)
+        return recs
+
+    def multi_resync(self, now):
+        """Link up/down or a Heltec reboot: the firmware may have forgotten its session. Clears the mirrored
+        session state (the next game lines restore it) and re-sends the wish now if the firmware is known to be
+        kart-0.2.5+, else from multi_tick once its status reply says so. -> cmd records."""
+        self._mp_clear_fw_state()
+        self.use_pending = None
+        recs = []
+        if self.wish is not None:
+            self._resend_due = True
+            self._wish_check(now, recs)
+        return recs
+
+    def multi_tick(self, now):
+        """Periodic: re-send a wish that is not in force (once per MP_RESEND_S, MP_MAX_TRIES at most)."""
+        recs = []
+        self._wish_check(now, recs)
+        return recs
+
+    def _wish_check(self, now, recs):
+        if self.wish is None or not self.on or not self.fw_ok:
+            return
+        if self._resend_due:
+            self._resend_due = False
+            self.wish_tries = 0
+            self._send_wish(recs, now, resend="heltec reset")
+            return
+        if self._wish_met():
+            self.wish_tries = 0
+            return
+        if self.wish_sent is not None and now - self.wish_sent < MP_RESEND_S:
+            return
+        if self.wish_tries >= MP_MAX_TRIES:
+            what = "host" if self.wish == "host" else f"join K{self.wish}"
+            note = f"{what} not taken by the Heltec after {self.wish_tries} tries"
+            self._rec(recs, "freeplay_leave", session=self._session(), wish=self.wish, why=note, auto=True)
+            self._mevent(now, "session", session=self._session(), hosting=self._hosting(), ended="rejected")
+            self.wish, self.wish_tries, self.wish_note = None, 0, note
+            self._drop_held()
+            self._touch(persist=True)
+            return
+        self._send_wish(recs, now, resend="not in force")
+
+    def peers(self, now):
+        """Karts in my session: [{"id", "dist_m", "in_range", "score", "age_s"}] (dist from my latest filtered
+        position to the peer's dead-reckoned fix; None without either)."""
+        sess = self._session()
+        if not sess:
+            return []
+        fleet = self.disp.fleet if self.disp is not None else {}
+        if self.game_mono is not None:
+            ids = list(self.peer_ids)
+        else:
+            ids = [k for k, ks in fleet.items() if ks.multi.get("session") == sess
+                   and ks.last_mono is not None and now - ks.last_mono <= MP_HEARD_S]
+        me = self._kart_now(now)
+        out = []
+        for pid in sorted(ids):
+            if pid == self._my_id():
+                continue
+            ks = fleet.get(pid)
+            dist, fresh, score, age = None, False, 0, None
+            if ks is not None:
+                score, age = ks.multi.get("score", 0), _age(ks.last_mono, now)
+                pos, fix_age = peer_position(ks, now)
+                if pos is not None and me is not None:
+                    dist = round(_dist_m(me, pos), 1)
+                fresh = fix_age is not None and fix_age < MP_FIX_FRESH_S
+            out.append({"id": pid, "dist_m": dist, "in_range": dist is not None and fresh and dist <= MP_RANGE_M,
+                        "score": score, "age_s": age})
+        return out
+
+    def multi_snapshot(self, now):
+        """/api/state freeplay.multi (docs/freeplay-multiplayer.md section 5); always complete."""
+        sess = self._session()
+        me = self.disp.me if self.disp is not None else None
+        score = self.score if self.game_mono is not None else (me.multi.get("score", 0) if me is not None else 0)
+        h, a, lh = self.held, self.attack, self.last_hit
+        return {
+            "session": sess,
+            "hosting": bool(sess) and self._hosting(),
+            "peers": self.peers(now),
+            "hosts": [x for x in self.hosts if x != self._my_id()],
+            "held": {"item": h["item"], "since_s": _age(h["mono"], now)} if h else None,
+            "score": score,
+            "attack": {"to": a["to"], "item": a["item"], "seq": a["seq"], "result": a["result"],
+                       "age_s": _age(a["mono"], now), "acked": list(a["acked"]), "why": a["why"]} if a else None,
+            "last_hit": {"from": lh["from"], "item": lh["item"], "secs": lh["secs"], "applied": lh["applied"],
+                         "why": lh["why"], "age_s": _age(lh["mono"], now)} if lh else None,
+            "fw_ok": self.fw_ok,
+            "events": [{k: v for k, v in e.items() if k != "mono"} | {"age_s": _age(e["mono"], now)}
+                       for e in self.mevents],
+            "wish": self.wish,
+            "note": self.wish_note,
+        }

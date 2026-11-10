@@ -41,10 +41,13 @@
       </div>
       <span id="gameChip" class="chip gamechip hidden">GAME OFF</span>
       <span id="freeChip" class="chip freechip hidden">FREEPLAY</span>
+      <span id="mpScore" class="chip mpscore hidden">&#9733; 0</span>
       <div id="posBadge" class="posbadge hidden"><small>P</small><b id="posNum">-</b></div>
       <span id="finChip" class="chip finchip hidden">FINISHED</span>
     </div>
-    <div id="itemBox" class="itembox hidden"><div id="itemGlyph" class="iglyph">?</div><small id="itemName"></small></div>
+    <!-- freeplay multiplayer: hosts heard while not in a session, one JOIN row each (app.js renderMulti) -->
+    <div id="inviteCard" class="invite hidden"></div>
+    <div id="itemBox" class="itembox hidden"><div id="itemGlyph" class="iglyph">?</div><small id="itemName"></small><small id="itemSub" class="isub"></small></div>
     <div class="mapctl">
       <button id="followBtn" class="sel">FOLLOW</button>
       <button data-zoom="in">+</button>
@@ -78,6 +81,7 @@
         <span id="boostLabel" class="blabel">--</span>
       </div>
       <div class="hudnotes"><div id="modeNote" class="note"></div><div id="cmdNote" class="note cmd"></div></div>
+      <button id="itemBtn" class="itembtn hidden"><span id="itemBtnGlyph" class="ibglyph"></span><b id="itemBtnText"></b></button>
       <div class="modebtns">
         <button class="mbtn" data-mode="0"><small>E</small>ECO<span class="cap"></span></button>
         <button class="mbtn" data-mode="1"><small>N</small>NORMAL<span class="cap"></span></button>
