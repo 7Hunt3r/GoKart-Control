@@ -257,6 +257,13 @@ written to the real Heltec. Hold again to end. Pit side: run the simulators on a
    display and pit log have both); the cap is only as right as `si_gear_ratio` / `si_wheel_diameter`
    in the controller. The kart logs `baseline_suspect` when the limits it reads at link-up look like
    its own caps left by a previous Heltec session (fix: key the kart off and on).
+9. **Remembered controller baseline** (0.2.6, 2026-11-10; flagged against "no saved-profile restore"). After a
+   Heltec reboot with the controller still on, the link-up read returns the previous session's temporary caps and
+   the kart clamps every later cap to them (2026-11-09: stuck at ECO's 15 mph, boosts and ROCKET did nothing).
+   0.2.6 keeps an NVS copy of a clean link-up read per controller UUID and uses it as the ceiling for its own
+   temporary writes when the live read looks like its leftovers; it also adopts the mode the live limits match
+   as the request (read-only). It never writes the remembered values to the controller. If you would rather the
+   kart stay clamped until a key cycle, that is a one-line revert; say so.
 8. **Kart-to-kart game bytes in telemetry** (2026-11-09 evening, owner request; protocol change for your
    sign-off). Multiplayer freeplay (invite other karts, item boxes give a SHELL / LIGHTNING, fire it at a
    kart within 25 m, the target gets a 4 s / 3 s timed SLOW 5) rides on seven bytes appended to

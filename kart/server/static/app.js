@@ -155,6 +155,10 @@ function render() {
   else if (!nul(ma) && !st.mode_confirmed) mn = st.stopped ? "held by STOP" : "not confirmed by VESC read-back";
   else if (!nul(ma)) mn = (MODE_TOP_MPH[ma] ? `${MODE_TOP_MPH[ma]} mph cap · ` : "no speed cap · ") + "confirmed by VESC read-back";
   else mn = "VESC has not reported a mode";
+  // firmware baseline_suspect: the Heltec rebooted while the controller still held an earlier session's caps and
+  // nothing is remembered for this controller, so every cap is clamped to that leftover (2026-11-09: stuck at 15 mph)
+  const hs = (S.heltec && S.heltec.status) || {};
+  if (fresh && hs.baseline_suspect === true) mn = "SPEED CAPS STUCK (limits left from before): key the kart off and on";
   txt("modeNote", fresh ? mn : nul(me.age_s) ? "no data from the kart computer yet" : `last known (${ageText(me.age_s)} ago)`);
   document.querySelectorAll(".mbtn").forEach((b) => {
     const m = Number(b.dataset.mode);

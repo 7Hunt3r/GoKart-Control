@@ -109,7 +109,7 @@ digital-modulation rule that allows this power.
 
 | Command | Effect |
 | --- | --- |
-| `status` | one `{"t":"status"}` line (radio, GPS, VESC limits, identity, `limits_ok`, `revert_missed`, `cap_mph` / `cap_erpm` (the speed cap the kart wants right now), `baseline_suspect` (the limits read at link-up look like this firmware's own caps: key the kart off/on), sync, heap) |
+| `status` | one `{"t":"status"}` line (radio, GPS, VESC limits, identity, `limits_ok`, `revert_missed`, `cap_mph` / `cap_erpm` (the speed cap the kart wants right now), `baseline_suspect` + `baseline_source` (`read` = the link-up read is the controller's own; `remembered` = the read looked like this firmware's leftover caps, so the NVS copy of an earlier clean read of the same controller is the ceiling; `suspect` = looked like leftovers and nothing remembered: key the kart off/on; `session` = re-link after our own writes this boot), sync, heap) |
 | `id N` | kart id 1-8 (stored; reboot renames the OTA host) |
 | `txpower 0..22` | SX1262 drive into the front end in dBm (stored). Radiated is drive + gain from the table above: 10 = ~23 dBm, 14 = ~26, 16 = ~27 (default), 18+ = ~28. `status` shows `tx_dbm` and `tx_radiated_dbm` |
 | `mode 0..2`, `stop`, `start`, `ping`, `slow [mph]`, `race [secs]` | same as the pit command (USB source, own seq numbers) |
@@ -235,6 +235,16 @@ decodes Colin's 47-byte bench `GK` frame. See `libraries/GoKartProtocol/GoKartPr
   pit start/stop and mode buttons are the point; this is the one place this branch
   goes further than `docs/requirements.md` ("profile writes remain disabled until
   validated") and it is flagged for the owner's review.
+
+**Controller baseline across a Heltec reboot (0.2.6, 2026-11-10).** Every cap the kart writes is clamped to
+the controller's own ERPM bound and scale as read at link-up. If the Heltec reboots (OTA, brown-out) while
+the controller stays on, that read returns the temporary limits the previous session left behind, e.g. ECO's
+0.50 / 15 mph, and every later cap is clamped to 15 mph (2026-11-09: "stuck in ECO, boosts did nothing"). The
+kart now (a) remembers a clean link-up read per controller UUID in NVS (`bl_uuid/bl_scale/bl_emin/bl_emax`),
+(b) when the read looks like its own leftovers and the memory is for the same controller, uses the memory as
+the ceiling instead (`baseline_source: remembered`, logged) and (c) adopts the mode the live limits match as
+the mode request, read-only, so the end of a boost or SLOW returns to that mode and not to full power. Nothing
+is written to the controller by any of this; keying the kart off and on still restores its saved configuration.
 
 ## GET_MCCONF field offsets
 

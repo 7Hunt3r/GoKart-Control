@@ -206,6 +206,9 @@ bool     revertMissed = false;        // a timed override ended while the VESC l
 bool     wroteThisBoot = false;       // any SET_MCCONF_TEMP sent since boot (the controller may still hold it)
 float    wErpm = 0;                   // ERPM bound the in-flight write carries (verified like the scale)
 bool     baselineSuspect = false;     // limits read at link-up look like this firmware's own caps (see the link-up code)
+const char* baselineSource = "none";  // "read" (clean link-up read) | "remembered" (NVS copy of an earlier clean read, used because
+                                      // the live read looked like our own leftovers) | "suspect" (looked like leftovers, nothing remembered)
+static uint8_t wVerifyTries = 0;      // a verify reply from a superseded write can land late: one re-read before judging MISMATCH
 VescActiveLimits firstLimits; bool haveFirst = false; char firstUuid[25] = "";   // first read of the pinned controller this boot
 uint8_t  usbSeq = 0;
 
@@ -459,7 +462,7 @@ static bool startWrite(float scale, const CmdRef& owner) {
   l.sendInCurrent = false;                     // battery limits: always the controller's own
   wAckSeen = vesc.lastAckMs();
   vesc.sendTempLimits(l);
-  wState = W_SENT; wTarget = scale; wErpm = capE; wSentMs = millis(); wOwner = owner; wroteThisBoot = true;
+  wState = W_SENT; wTarget = scale; wErpm = capE; wSentMs = millis(); wOwner = owner; wroteThisBoot = true; wVerifyTries = 0;
   uint8_t capM = capMphNow();
   if (capM) logf("vesc write scale %.3f, cap %u mph = %.0f ERPM", scale, capM, capE);
   else      logf("vesc write scale %.3f, no speed cap (%.0f ERPM)", scale, capE);
@@ -505,9 +508,14 @@ static void serviceWrites() {
       break;
     case W_VERIFY:
       if (vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - wSentMs) >= 0) {
-        wState = W_IDLE;
         bool ok = fabsf(vesc.limits().currentMaxScale - wTarget) < MODE_MATCH_TOL
                && fabsf(vesc.limits().maxErpm - wErpm) <= MODE_ERPM_TOL;
+        if (!ok && wVerifyTries == 0) {                     // a reply to a superseded write's verify can land here: read once more
+          wVerifyTries = 1; wSentMs = now; vesc.requestMotorConfig();
+          logf("vesc write verify: re-reading (got scale %.3f, ERPM %.0f; want %.3f, %.0f)", vesc.limits().currentMaxScale, vesc.limits().maxErpm, wTarget, wErpm);
+          break;
+        }
+        wState = W_IDLE;
         if (rampIdx < 0) setResult(wOwner, ok ? GK_RES_APPLIED : GK_RES_UNKNOWN);
         if (ok) revertMissed = false;
         modeConfirmed = ok && !stopActive && ((modeReq != GK_MODE_UNKNOWN && fabsf(wTarget - MODES[modeReq].currentMaxScale) < MODE_MATCH_TOL)
@@ -767,33 +775,64 @@ static void serviceVesc() {
   // keep the earlier baseline for those fields so START still restores the real limits.
   if (up && !origValid && vesc.limits().receivedMs && (int32_t)(vesc.limits().receivedMs - vescLinkUpMs) >= 0 && wState == W_IDLE) {
     origLimits = vesc.limits(); origValid = true;
-    if (haveFirst && wroteThisBoot && !strcmp(firstUuid, vesc.uuidHex)) {   // same controller (uuid, or both unknown)
+    const VescActiveLimits raw = origLimits;                 // what the controller reports right now
+    const bool sameSession = haveFirst && wroteThisBoot && !strcmp(firstUuid, vesc.uuidHex);   // same controller (uuid, or both unknown)
+    if (sameSession) {
       origLimits.currentMaxScale = firstLimits.currentMaxScale;
       origLimits.minErpm = firstLimits.minErpm; origLimits.maxErpm = firstLimits.maxErpm;
       logf("vesc relinked with this session's overrides: keeping baseline scale %.2f ERPM %.0f..%.0f (live %.2f)",
-           origLimits.currentMaxScale, origLimits.minErpm, origLimits.maxErpm, vesc.limits().currentMaxScale);
-    } else { firstLimits = origLimits; haveFirst = true; strlcpy(firstUuid, vesc.uuidHex, sizeof firstUuid); }
-    logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m",
-         origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
-         origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter);
+           origLimits.currentMaxScale, origLimits.minErpm, origLimits.maxErpm, raw.currentMaxScale);
+    }
     // Honesty check, NO restore (owner rule: reconnect is read-only). If what we just read as "the
     // controller's own" is one of this firmware's caps (a mode scale below 1, a stop, or an ERPM bound
     // that is a whole number of mph on this drivetrain), a previous Heltec session probably left it
-    // behind. Keying the kart off and on restores the controller's saved configuration; until then
-    // SPORT writes scale 1.0 but the ERPM baseline is the leftover cap. Reported as baseline_suspect.
-    baselineSuspect = false;
+    // behind (a Heltec reboot or OTA while the controller stayed on: 2026-11-09 the kart was then
+    // stuck at ECO's 15 mph because every cap is clamped to this ceiling). Keying the kart off and on
+    // restores the controller's saved configuration. 0.2.6: a clean read is REMEMBERED in NVS per
+    // controller UUID, and a suspect read on the same controller uses that memory as the ceiling for
+    // our temporary writes instead (still nothing written to the controller by this code).
+    baselineSuspect = false; baselineSource = sameSession ? "session" : "read";
     if (!wroteThisBoot) {
       float onePerMph = mphToErpm(1.0f);
-      float mphF = onePerMph > 0 ? origLimits.maxErpm / onePerMph : 0;
+      float mphF = onePerMph > 0 ? raw.maxErpm / onePerMph : 0;
       bool capLike = onePerMph > 0 && mphF <= 60.0f && fabsf(mphF - roundf(mphF)) < 0.02f;
-      bool scaleLike = origLimits.currentMaxScale < 0.05f;
+      bool scaleLike = raw.currentMaxScale < 0.05f;
       for (uint8_t i = 0; i < GK_MODE_COUNT; i++)
-        if (MODES[i].currentMaxScale < 0.999f && fabsf(origLimits.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) scaleLike = true;
+        if (MODES[i].currentMaxScale < 0.999f && fabsf(raw.currentMaxScale - MODES[i].currentMaxScale) < MODE_MATCH_TOL) scaleLike = true;
+      const bool haveUuid = vesc.uuidHex[0] != 0;
       if (capLike || scaleLike) {
-        baselineSuspect = true;
-        logf("WARNING: limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph): a previous Heltec session probably left them; key the kart off and on to restore the controller's own",
-             origLimits.currentMaxScale, origLimits.maxErpm, mphF);
+        baselineSuspect = true; baselineSource = "suspect";
+        if (haveUuid && prefs.getString("bl_uuid", "") == vesc.uuidHex) {
+          float bs = prefs.getFloat("bl_scale", -1.0f), blo = prefs.getFloat("bl_emin", 0.0f), bhi = prefs.getFloat("bl_emax", 0.0f);
+          if (bs > 0.05f && bhi > 100.0f) {
+            origLimits.currentMaxScale = bs; origLimits.minErpm = blo; origLimits.maxErpm = bhi;
+            baselineSuspect = false; baselineSource = "remembered";
+            logf("limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph, left by a previous Heltec session): using this controller's remembered baseline instead: scale %.2f, ERPM %.0f..%.0f",
+                 raw.currentMaxScale, raw.maxErpm, mphF, bs, blo, bhi);
+          }
+        }
+        if (baselineSuspect)
+          logf("WARNING: limits read at link-up look like this firmware's own (scale %.2f, %.0f ERPM = %.1f mph): a previous Heltec session probably left them; key the kart off and on to restore the controller's own",
+               raw.currentMaxScale, raw.maxErpm, mphF);
+      } else if (haveUuid) {                                   // a clean read: remember it for the next Heltec reboot
+        if (prefs.getString("bl_uuid", "") != vesc.uuidHex || fabsf(prefs.getFloat("bl_scale", -1.0f) - raw.currentMaxScale) > 0.001f
+            || fabsf(prefs.getFloat("bl_emax", 0.0f) - raw.maxErpm) > 0.5f || fabsf(prefs.getFloat("bl_emin", 0.0f) - raw.minErpm) > 0.5f) {
+          prefs.putString("bl_uuid", vesc.uuidHex); prefs.putFloat("bl_scale", raw.currentMaxScale);
+          prefs.putFloat("bl_emin", raw.minErpm); prefs.putFloat("bl_emax", raw.maxErpm);
+          logf("controller baseline remembered (uuid %s): scale %.2f, ERPM %.0f..%.0f", vesc.uuidHex, raw.currentMaxScale, raw.minErpm, raw.maxErpm);
+        }
       }
+    }
+    if (!sameSession) { firstLimits = origLimits; haveFirst = true; strlcpy(firstUuid, vesc.uuidHex, sizeof firstUuid); }
+    logf("vesc limits read: Imax %.0f A, ERPM %.0f..%.0f, duty %.3f..%.3f, scale %.2f/%.2f, poles %u gear %.3f wheel %.3f m (baseline %s)",
+         origLimits.currentMax, origLimits.minErpm, origLimits.maxErpm, origLimits.minDuty, origLimits.maxDuty,
+         origLimits.currentMinScale, origLimits.currentMaxScale, origLimits.motorPoles, origLimits.gearRatio, origLimits.wheelDiameter, baselineSource);
+    // Reconcile, read-only (owner rule): a Heltec that rebooted mid-session has no mode request, so the end of
+    // a boost/mud/SLOW would fall back to the controller's own full limits. If the live limits ARE one of our
+    // modes (scale and cap), that mode becomes the request; nothing is written here.
+    if (modeReq == GK_MODE_UNKNOWN) {
+      uint8_t ma = modeActual(nullptr);
+      if (ma != GK_MODE_UNKNOWN) { modeReq = ma; modeConfirmed = true; logf("mode %s adopted from the controller's live limits (no write)", MODES[ma].name); }
     }
   }
   // A lost FW_VERSION / GET_MCCONF reply must not leave the kart unable to answer a STOP: ask again (read-only).
@@ -1168,7 +1207,7 @@ static void usbStatus() {
                 "\"lora_tx\":%lu,\"lora_rx\":%lu,\"lora_rx_bad\":%lu,\"gps_locked\":%s,\"gps_cfg\":\"%lu%s\",\"pps_count\":%lu,"
                 "\"vesc_fw\":\"%u.%02u\",\"vesc_hw\":\"%s\",\"vesc_packets\":%lu,\"vesc_crc_err\":%lu,\"vesc_limits\":%s,"
                 "\"l_current_max\":%.1f,\"l_in_current_max\":%.1f,\"scale_max\":%.3f,\"scale_min\":%.3f,\"max_erpm\":%.0f,\"max_duty\":%.3f,"
-                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"session\":%u,\"hosting\":%s,\"score\":%u,\"baseline_suspect\":%s,\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
+                "\"poles\":%u,\"gear\":%.4f,\"wheel_m\":%.4f,\"cap_mph\":%u,\"cap_erpm\":%.0f,\"speed_cal\":%.3f,\"session\":%u,\"hosting\":%s,\"score\":%u,\"baseline_suspect\":%s,\"baseline_source\":\"%s\",\"wifi\":\"%s\",\"ssid\":\"%s\",\"vescmac\":\"%s\","
                 "\"vesc_uuid\":\"%s\",\"uuid_pin\":\"%s\",\"id_ok\":%s,\"limits_ok\":%s,\"revert_missed\":%s,\"rate\":%u,\"sync\":\"%s\",\"pit_karts_online\":%u,"
                 "\"gps_fix\":%s,\"gps_sats\":%u,\"gps_hdop\":%s,\"gps_age_ms\":%lu,\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"tx_dbm\":%d,\"tx_radiated_dbm\":%d,\"heap\":%lu,\"heap_min\":%lu}\n",
                 kartId, FW_VERSION, gkBool(writesEnabled()), VESC_TRANSPORT_UART ? "uart" : "ble", gkBool(radioOk), radioStatus,
@@ -1176,7 +1215,7 @@ static void usbStatus() {
                 (unsigned long)GPS_CFGS[gpsCfgIdx].baud, GPS_CFGS[gpsCfgIdx].swap ? "s" : "", (unsigned long)ppsCount,
                 vesc.fwMajor, vesc.fwMinor, hw, (unsigned long)vesc.packets, (unsigned long)vesc.crcErrors, gkBool(L.receivedMs != 0),
                 L.currentMax, L.inCurrentMax, L.currentMaxScale, L.currentMinScale, L.maxErpm, L.maxDuty,
-                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gameSession, gkBool(gameSession && gameSession == kartId), gameScore, gkBool(baselineSuspect),
+                L.motorPoles, L.gearRatio, L.wheelDiameter, capMphNow(), erpmTarget(), speedCal, gameSession, gkBool(gameSession && gameSession == kartId), gameScore, gkBool(baselineSuspect), baselineSource,
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "", ssid, mac,
                 vesc.uuidHex, upin, gkBool(vescIdentityOk()), gkBool(origValid), gkBool(revertMissed), reportRate, ppsFresh() ? "pps" : (syncFresh() ? "beacon" : "free"), pitKartsOnline,
                 gkBool(gps.location.isValid() && gps.location.age() < 3000), gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
