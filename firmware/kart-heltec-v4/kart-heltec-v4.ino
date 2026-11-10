@@ -168,6 +168,10 @@ uint8_t  modeReq = GK_MODE_UNKNOWN;
 bool     stopActive = false;
 float    preStopScale = -1.0f;
 bool     slowActive = false; float slowErpm = 0; uint8_t slowMph = 0;
+// Timed SLOW (USB `slow MPH SECS`, e.g. the game's mud): reverts by itself to what was in force before it
+// (a pit SLOW that was active comes back). A pit SLOW (no SECS) stays until START or a pit mode command.
+bool     slowTimed = false; uint32_t slowUntilMs = 0;
+bool     slowPrevActive = false; float slowPrevErpm = 0; uint8_t slowPrevMph = 0;
 float    speedCal = SPEED_CAL_DEFAULT;      // real ERPM per configured-math ERPM (config.h; pref "speedcal")
 // Timed scale override for the game zones (boost pad / mud): auto-reverts, cleared by STOP/START, never above 1.0.
 bool     ovActive = false; float ovScale = 1.0f; uint32_t ovUntilMs = 0;
@@ -450,6 +454,13 @@ static void serviceWrites() {
     ovActive = false; logf("boost over, back to %.2f", scaleTarget());
     autoWrite("boost end");
   }
+  if (slowActive && slowTimed && (int32_t)(now - slowUntilMs) >= 0) {   // timed slow over: back to the pit cap or none
+    slowTimed = false; slowUntilMs = 0;
+    if (slowPrevActive) { slowErpm = slowPrevErpm; slowMph = slowPrevMph; logf("timed slow over, pit cap %u mph back", slowMph); }
+    else { slowActive = false; slowErpm = 0; slowMph = 0; logf("timed slow over"); }
+    slowPrevActive = false;
+    autoWrite("slow end");
+  }
   if (rampIdx >= 0 && wState == W_IDLE && (int32_t)(now - rampNextMs) >= 0) {
     const int n = sizeof(STOP_RAMP) / sizeof(STOP_RAMP[0]);
     if (!startWrite(STOP_RAMP[rampIdx], rampOwner)) { setResult(rampOwner, GK_RES_NO_VESC); rampIdx = -1; }
@@ -482,6 +493,7 @@ static void emitCmd(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint8_t 
 }
 
 static uint8_t boostSecs = 0;   // set by the USB `boost` command just before handleCommand
+static uint8_t slowSecs = 0;    // set by the USB `slow MPH SECS` command just before handleCommand (0 = untimed)
 static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, uint16_t ttl, uint32_t issued) {
   const int8_t si = (src == GK_ADDR_BASE) ? 0 : 1;
   const uint32_t nowMs = millis();
@@ -519,7 +531,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
           break;
         }
         if (src != 0xFE && slowActive) {                 // owner 2026-11-09: a mode from the PIT releases SLOW;
-          slowActive = false; slowErpm = 0; slowMph = 0;  // the driver's own mode buttons do not (SLOW is the operator's)
+          slowActive = false; slowErpm = 0; slowMph = 0; slowTimed = false; slowPrevActive = false;   // the driver's own mode buttons do not (SLOW is the operator's)
           logf("mode %s from the pit releases SLOW", MODES[arg].name);
         }
         modeReq = arg; modeConfirmed = false;
@@ -542,7 +554,7 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
         break;
       case GK_CMD_START: {
         if (!writesEnabled()) { cmdResult = GK_RES_REJECTED; break; }
-        stopActive = false; slowActive = false; ovActive = false; raceHold = false; rampIdx = -1;
+        stopActive = false; slowActive = false; slowTimed = false; slowPrevActive = false; ovActive = false; raceHold = false; rampIdx = -1;
         if (!origValid || !vescUp()) { cmdResult = GK_RES_NO_VESC; break; }
         float s = scaleTarget();
         if (s < 0.05f) {                                  // no mode known and the controller read back ~0
@@ -600,8 +612,16 @@ static void handleCommand(uint8_t src, uint8_t seq, uint8_t cmd, uint8_t arg, ui
         float mph = arg ? (float)arg : (float)SLOW_DEFAULT_MPH;
         float e = mphToErpm(mph);
         if (e < 100) { cmdResult = GK_RES_REJECTED; logf("slow: drivetrain numbers unavailable"); break; }
-        slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
-        logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
+        {
+          uint8_t secs = slowSecs; slowSecs = 0;
+          if (secs) {                                       // timed: never above an untimed (pit) cap already in force
+            if (slowActive && !slowTimed && slowErpm <= e) { logf("slow %u s: pit cap %u mph already lower, kept", secs, slowMph); cmdResult = GK_RES_APPLIED; break; }
+            if (!slowTimed) { slowPrevActive = slowActive; slowPrevErpm = slowErpm; slowPrevMph = slowMph; }
+            slowTimed = true; slowUntilMs = nowMs + secs * 1000UL;
+          } else { slowTimed = false; slowUntilMs = 0; slowPrevActive = false; }
+          slowActive = true; slowErpm = e; slowMph = (uint8_t)(mph > 255 ? 255 : mph);
+          if (secs) logf("slow: cap %.0f mph = %.0f ERPM for %u s", mph, e, secs); else logf("slow: cap %.0f mph = %.0f ERPM", mph, e);
+        }
         if (!startWrite(scaleTarget(), cmdCur)) cmdResult = GK_RES_NO_VESC;
         break;
       }
@@ -1038,7 +1058,12 @@ static void usbCommand(char* line) {
   else if (!strcmp(line, "stop"))  handleCommand(0xFE, ++usbSeq, GK_CMD_STOP, 0, 0, 0);
   else if (!strcmp(line, "start")) handleCommand(0xFE, ++usbSeq, GK_CMD_START, 0, 0, 0);
   else if (!strcmp(line, "ping"))  handleCommand(0xFE, ++usbSeq, GK_CMD_PING, 0, 0, 0);
-  else if (!strcmp(line, "slow"))  handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, arg ? atoi(arg) : 0, 0, 0);
+  else if (!strcmp(line, "slow")) {                       // slow [MPH] [SECS]   SECS = timed (kart-local, e.g. mud), none = until START
+    int mph = arg ? atoi(arg) : 0, secs = 0;
+    if (arg) { char* a2 = strchr(arg, ' '); if (a2) secs = atoi(a2 + 1); }
+    if (secs < 0 || secs > 60) logf("usage: slow [MPH] [SECS 1-60]");
+    else { slowSecs = (uint8_t)secs; handleCommand(0xFE, ++usbSeq, GK_CMD_SLOW, (uint8_t)(mph > 255 ? 255 : mph), 0, 0); }
+  }
   else if (!strcmp(line, "race"))  handleCommand(0xFE, ++usbSeq, GK_CMD_RACE, arg ? atoi(arg) : 5, 0, 0);
   else if (!strcmp(line, "boost")) {                      // boost SECS SCALE   e.g. "boost 5 1.0" or "boost 4 0.5" (mud)
     int secs = 5; float sc = 1.0f;
@@ -1120,7 +1145,7 @@ static void usbCommand(char* line) {
            else logf("speedcal must be 0.3..5 (real ERPM per configured-math ERPM)"); }
   }
   else if (!strcmp(line, "reboot")) { logf("rebooting"); delay(100); ESP.restart(); }
-  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | reboot");
+  else if (!strcmp(line, "help")) logf("commands: status | id N | mode 0..2 | stop | start | slow [mph] | boost SECS SCALE | race [secs] | ping | rate 1|2 | wifi SSID PASS | otapw PASS | vescmac XX:XX:XX:XX:XX:XX|clear | blescan | vescuuid <24 hex>|now|clear | gpsline on|off | txpower 0..22 | gpsreset | gpsrecover | gpscold | gpspin | gpsdump | gpstest BAUD | speedcal X|clear | slow [MPH] [SECS] | reboot");
   else logf("unknown command '%s'", line);
 }
 
