@@ -1,0 +1,51 @@
+/* Shared presentation tokens and display controls. Source: kart/server/static/display-theme.css. */
+:root {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --display-panel: #293744; --display-text: #edf4f8; --display-muted: #bbcbd5;
+  --display-line: #748c9c; --display-selected: #192b34;
+  --hud: rgba(39,53,67,.94); --hud-soft: rgba(39,53,67,.92);
+  --retro-cyan: #a4e5ee; --retro-amber: #f7ce79; --scan: rgba(255,255,255,.006);
+  --num: #bceff5; --muted: #bbcbd5; --ink: #edf4f8;
+  --stats-bg: rgba(55,74,87,.62); --panel-edge: #a7c3d2;
+  --mode-eco: #8cebc4; --mode-eco-rgb: 140,235,196;
+  --mode-normal: #8bd3ff; --mode-normal-rgb: 139,211,255;
+  --mode-sport: #ff9ab9; --mode-sport-rgb: 255,154,185;
+  --mode-outline: rgba(227,237,255,.75);
+}
+:root[data-theme="light"] {
+  --bg: #e5e9df; --display-panel: #dce8ef; --display-text: #233944; --display-muted: #4d6575;
+  --display-line: #8ba1b1; --display-selected: #fff; --hud: rgba(213,228,239,.95); --hud-soft: rgba(213,228,239,.93);
+  --retro-cyan: #246568; --retro-amber: #79501b; --scan: rgba(33,54,72,.008);
+  --ink: #233944; --num: #233944; --muted: #4d6575;
+  --stats-bg: rgba(233,243,249,.65); --panel-edge: #f5fbff;
+  --mode-eco: #215d49; --mode-normal: #254e74; --mode-sport: #8d3657;
+  --mode-outline: rgba(255,255,255,.95);
+}
+:root[data-contrast="high"] { --display-line: #d4def8; --display-muted: #ecf0ff; --hud: #111e28; --hud-soft: #111e28; --stats-bg: #111e28; --scan: transparent; --mode-outline: #fff; }
+:root[data-theme="light"][data-contrast="high"] { --display-line: #202943; --display-muted: #202943; --hud: #edf6fb; --hud-soft: #edf6fb; --stats-bg: #edf6fb; --mode-outline: #202943; }
+/* Brightness is local page rendering, not backlight control. Keep settings undimmed. */
+body > :not(dialog):not(script) { filter: brightness(var(--display-brightness,1)); }
+.display-dialog { color: var(--display-text); background: var(--display-panel); border: 2px solid var(--display-line); border-radius: 10px; padding: 16px;
+  position: fixed; left: auto; right: 8px; top: 8px; bottom: auto; margin: 0; width: calc(30vw - 16px); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; touch-action: pan-y; }
+.display-dialog::backdrop { background: transparent; }
+.display-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+.display-dialog h2 { margin: 0; font-size: 17px; }
+.display-dialog button { min-height: 48px; font-size: 14px; color: var(--display-text); background: var(--display-panel); border-color: var(--display-line); }
+.display-dialog button.sel { background: var(--display-text); color: var(--display-selected); }
+.display-dialog header button { padding: 8px; }
+.display-dialog fieldset { border: 0; padding: 0; margin: 0 0 16px; min-width: 0; }
+.display-dialog legend { font-size: 13px; margin-bottom: 8px; color: var(--display-muted); }
+.display-themes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.display-contrast { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-block: 1px solid var(--display-line); min-height: 64px; font-size: 14px; }
+.display-contrast small { display: block; margin-top: 5px; color: var(--display-muted); font-size: 11px; }
+.display-contrast input { width: 24px; height: 24px; flex: 0 0 24px; }
+.display-brightness-label { display: flex; justify-content: space-between; gap: 10px; margin-top: 18px; font-size: 14px; }
+.display-brightness-row { display: grid; grid-template-columns: 48px minmax(0,1fr) 48px; align-items: center; gap: 8px; margin: 10px 0; }
+.display-brightness-row input { width: 100%; height: 44px; margin: 0; }
+.display-brightness-row button { font-size: 22px; padding: 4px; }
+#displayBrightnessNote, .display-status { font-size: 11px; color: var(--display-muted); margin: 12px 0 0; }
+.display-dialog { border: 1px solid var(--display-line); border-top: 2px solid var(--retro-cyan); border-radius: 12px; background: var(--display-panel); }
+.display-dialog button { font-weight: 500; border-width: 1px; }
+.display-dialog button.sel { background: var(--retro-amber); color: var(--display-selected); border-color: var(--retro-amber); }
+
+@media (max-width: 799px) { .display-dialog { width: 340px; } }

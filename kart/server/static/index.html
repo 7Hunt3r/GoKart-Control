@@ -7,6 +7,7 @@
 <title>GoKart Kart Display</title>
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/font-segments.css">
+<link rel="stylesheet" href="/static/display-theme.css">
 <link rel="stylesheet" href="/static/retro.css">
 </head>
 <body>
@@ -26,13 +27,6 @@
     <div id="mapMsg" class="mapmsg hidden"></div>
     <!-- Existing game/map overlays remain on the map; instruments live in the sidebar. -->
     <div class="tl">
-      <div id="lapPanel" class="lappanel hidden">
-        <div class="lapflag"></div>
-        <div class="lapn">LAP <b id="lapNum">-</b></div>
-        <div id="lapCur" class="lapcur">--:--.-</div>
-        <div class="laprow"><span>LAST</span><b id="lapLast">--</b></div>
-        <div class="laprow"><span>BEST</span><b id="lapBest">--</b></div>
-      </div>
       <span id="gameChip" class="chip gamechip hidden">GAME OFF</span>
       <span id="freeChip" class="chip freechip hidden">FREEPLAY</span>
       <span id="mpScore" class="chip mpscore hidden">&#9733; 0</span>
@@ -96,6 +90,13 @@
         <button class="mbtn" data-mode="2"><small>S</small><span class="mode-name">SPORT</span><span class="cap"></span></button>
       </div>
     </div>
+      <div id="lapPanel" class="lappanel hidden">
+        <div class="lapflag"></div>
+        <div class="lapn">LAP <b id="lapNum">-</b></div>
+        <div id="lapCur" class="lapcur">--:--.-</div>
+        <div class="laprow"><span>LAST</span><b id="lapLast">--</b></div>
+        <div class="laprow"><span>BEST</span><b id="lapBest">--</b></div>
+      </div>
     <div id="chips" class="chips">
       <span id="linkChip" class="chip bad hidden">USB</span>
       <span id="pitChip" class="chip">PIT ?</span>

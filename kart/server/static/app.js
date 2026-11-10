@@ -786,7 +786,7 @@ function itemMark(ctx, c, r, on) {
   const h = Math.max(MIN_MARK / 2, Math.min(26, r * 0.8));
   ctx.save(); ctx.setLineDash([]);
   ctx.translate(c[0], c[1]);
-  ctx.fillStyle = on ? "#1e5bd8" : "#888"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+  ctx.fillStyle = on ? "#1e5bd8" : "#888"; ctx.strokeStyle = "#f1fbff"; ctx.lineWidth = 2.5;
   ctx.beginPath(); ctx.rect(-h, -h, 2 * h, 2 * h); ctx.fill(); ctx.stroke();
   ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5; ctx.strokeRect(-h - 2, -h - 2, 2 * h + 4, 2 * h + 4);
   ctx.fillStyle = "#fff"; ctx.font = `900 ${Math.round(h * 1.5)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -819,14 +819,14 @@ function drawTrack(ctx, en, px, dim) {          // cached layer: band, edge, dir
   ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
   if (sunOn) { trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "#000"; ctx.lineWidth = w + 6; ctx.stroke(); }
   else { trackPath(ctx, P, t.closed, px); ctx.strokeStyle = "rgba(0,70,90,.55)"; ctx.lineWidth = w + 5; ctx.stroke(); }
-  trackPath(ctx, P, t.closed, px); ctx.strokeStyle = dim ? "rgba(0,229,255,.28)" : "rgba(0,229,255,.5)"; ctx.lineWidth = w; ctx.stroke();
+  trackPath(ctx, P, t.closed, px); ctx.strokeStyle = document.documentElement.dataset.theme === "light" ? (dim ? "rgba(51,169,194,.35)" : "rgba(51,169,194,.7)") : (dim ? "rgba(159,222,239,.35)" : "rgba(159,222,239,.8)"); ctx.lineWidth = w; ctx.stroke();
   const cs = Math.max(5, Math.min(15, w * 0.42));     // direction chevrons, a little larger than the band edge
-  trackChevrons(t.points, t.closed, en, Math.max(15, 46 / view.scale)).forEach(([e, n, hd]) => {
+  trackChevrons(t.points, t.closed, en, Math.max(15, 72 / view.scale)).forEach(([e, n, hd]) => {
     const q = px([e, n]);
     ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd);      // world-aligned: the layer turns with the map
     ctx.beginPath(); ctx.moveTo(-cs, cs * 0.6); ctx.lineTo(0, -cs * 0.5); ctx.lineTo(cs, cs * 0.6);
-    ctx.strokeStyle = "rgba(0,40,60,.9)"; ctx.lineWidth = 6; ctx.stroke();
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = "rgba(30,67,82,.55)"; ctx.lineWidth = 4; ctx.stroke();
+    ctx.strokeStyle = "#f1fbff"; ctx.lineWidth = 2.5; ctx.stroke();
     ctx.restore();
   });
   ctx.restore();
@@ -1128,9 +1128,9 @@ function drawMap() {
 
   // Every trail is behind every marker, including the driver's own trail.
   S.fleet.forEach((k) => {
-    if (k.gps && k.gps.last_fix && k.trail.length > 1) trail(ctx, k.trail, en, px, k.link === "online" && k.gps.fix_fresh ? k.color : "#888", 4, 0.6);
+    if (k.gps && k.gps.last_fix && k.trail.length > 1) trail(ctx, k.trail, en, px, k.link === "online" && k.gps.fix_fresh ? k.color : "#888", 2, 0.28);
   });
-  if (mePos && me.trail.length > 1) trail(ctx, me.trail, en, px, "#0b4fb3", 5, 0.75);
+  if (mePos && me.trail.length > 1) trail(ctx, me.trail, en, px, "#8cbbd1", 2, 0.3);
 
   // other karts: dots with numbers; stale = grey dashed + age; offline = faded
   S.fleet.forEach((k) => {
@@ -1161,7 +1161,7 @@ function drawMap() {
     ctx.shadowColor = "rgba(0,0,0,.65)"; ctx.shadowBlur = 10; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 4;
     ctx.lineJoin = "round"; ctx.lineWidth = 9; ctx.strokeStyle = "#f2f2f2"; ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = meGood ? me.color : "#999"; ctx.fill();
+    ctx.fillStyle = meGood ? "#ffe348" : "#999"; ctx.fill();
     ctx.lineJoin = "round"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; if (!meGood) ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
     ctx.restore();
     if (!meFresh) label(ctx, `last fix ${ageText(me.gps.fix_age_s)}`, p[0] + 24, p[1] - 14);
@@ -1180,7 +1180,7 @@ function drawMap() {
   // north compass: top-right, under the map buttons, 1.5x the old size (r 30)
   const [ccx, ccy] = compassPos(W);
   ctx.save(); ctx.translate(ccx, ccy); ctx.rotate(-view.rot);
-  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.strokeStyle = document.documentElement.dataset.theme === "light" ? "#17645e" : "#80e1d6"; ctx.lineWidth = 2;
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.strokeStyle = document.documentElement.dataset.theme === "light" ? "#496779" : "#a7c3d2"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(0, 0, 30, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
   ctx.fillStyle = "#ff3030"; ctx.beginPath(); ctx.moveTo(0, -25); ctx.lineTo(10, 2); ctx.lineTo(-10, 2); ctx.closePath(); ctx.fill();
   ctx.fillStyle = "#e6e6e6"; ctx.beginPath(); ctx.moveTo(0, 13); ctx.lineTo(7, 2); ctx.lineTo(-7, 2); ctx.closePath(); ctx.fill();
@@ -1256,8 +1256,8 @@ function drawChevronsNear(ctx, L, px, mePos) {
     const q = px([e, n]);
     ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(hd - view.rot);
     ctx.beginPath(); ctx.moveTo(-cs, cs * 0.6); ctx.lineTo(0, -cs * 0.5); ctx.lineTo(cs, cs * 0.6);
-    ctx.strokeStyle = "rgba(0,40,60,.9)"; ctx.lineWidth = 6; ctx.stroke();
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = "rgba(30,67,82,.55)"; ctx.lineWidth = 4; ctx.stroke();
+    ctx.strokeStyle = "#f1fbff"; ctx.lineWidth = 2.5; ctx.stroke();
     ctx.restore();
   });
 }

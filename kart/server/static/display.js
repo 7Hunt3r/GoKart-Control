@@ -39,6 +39,26 @@
   document.body.appendChild(dialog);
   const find = (selector) => dialog.querySelector(selector);
   let opener = null;
+  let hideTimer = null;
+  const activePointers = new Set();
+  function restartAutoHide() {
+    clearTimeout(hideTimer);
+    hideTimer = null;
+    if (dialog.open && activePointers.size === 0) {
+      hideTimer = setTimeout(() => dialog.close(), 3000);
+    }
+  }
+  // Leave an active slider drag alone; start the idle period after release.
+  dialog.addEventListener("pointerdown", (event) => {
+    activePointers.add(event.pointerId);
+    restartAutoHide();
+  });
+  ["pointerup", "pointercancel"].forEach((type) => window.addEventListener(type, (event) => {
+    if (activePointers.delete(event.pointerId)) restartAutoHide();
+  }));
+  ["input", "change", "keydown", "focusin", "click"].forEach((type) =>
+    dialog.addEventListener(type, restartAutoHide));
+  window.addEventListener("blur", () => { activePointers.clear(); restartAutoHide(); });
   function apply(save) {
     root.dataset.theme = settings.theme;
     root.dataset.contrast = settings.contrast ? "high" : "standard";
@@ -67,10 +87,14 @@
       opener = button;
       dialog.showModal();
       find("[data-display-done]").focus();
+      restartAutoHide();
     });
   });
   find("[data-display-done]").addEventListener("click", () => dialog.close());
-  dialog.addEventListener("close", () => { if (opener) opener.focus(); });
+  dialog.addEventListener("close", () => {
+    clearTimeout(hideTimer); hideTimer = null; activePointers.clear();
+    if (opener) opener.focus();
+  });
   dialog.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button) return;
