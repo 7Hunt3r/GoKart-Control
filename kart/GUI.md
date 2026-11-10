@@ -12,25 +12,34 @@ part of this work.
 From the repository root, with Python 3.9+:
 
 ```sh
-python3 -I kart/sim/run-sim.py --map pit/server/map/map.sono.json
+python3 -I kart/sim/run-gui.py
 ```
 
-The existing runner starts a fake pit, simulated kart and the real driver server
+This graphics-only runner starts a fake pit, simulated kart and the real driver server
 on local ports, then opens the display. Add `--no-open` to print the address
 without opening a browser. Ctrl-C stops it. Refresh after editing files in
 `kart/server/static/`; no build step is needed for layout changes.
 
-The street artwork is South Norwalk (SoNo), Connecticut. The simulator supplies
-the moving kart, lap route and game overlays. These are test data, not a surveyed
-or approved route. The operational pit's `map.json` and its presets are untouched.
+The street artwork is South Norwalk (SoNo), Connecticut. `kart/sim/zones.gui.json`
+supplies one sample route for both the track overlay and all three fake karts,
+using the existing simulator's `PolyPath` input. The sample traces North Main,
+Marshall, North Water and Washington streets in the bundled OSM extract. It is
+an illustrative graphics fixture, not a designated, surveyed or approved course.
+This replaces the old preview's mismatched kart loop and default pit track.
+The production server, simulator engine, operational `map.json` and existing
+map/zone presets are unchanged.
 
 ## Graphics
 
 - At the target 1024×600 resolution, the map fills the main area with roughly 70%
-  clear of the instrument panel. A charcoal overlay with 7% transparency carries
+  clear of the instrument panel. A charcoal overlay with 3% transparency carries
   the readings; a faint CRT texture and seven-segment numerals retain the retro
-  character. Helvetica-style labels use a consistent grid and spacing. The speed
-  gauge is a true 180-degree semicircle with concentric ticks. ECO is green,
+  character. Braun/Sony-inspired labels use a consistent grid and spacing, with
+  larger supporting readings (28 px at 1024×600, scaling up on larger screens).
+  The speed gauge is a true 180-degree semicircle with a heavier arc and the
+  original bold DSEG7 font. Visible digit shapes are centered over MPH; the blank
+  bearing beside a segmented 1 does not shift the reading. Wider three-digit
+  readings shrink to preserve clearance inside the arc. ECO is green,
   NORMAL blue and SPORT orange; a solid fill identifies the active mode.
   Full-width alerts remain above it. At narrow phone widths the panels stack.
 - The default is a stationary, zoomed-out view of the whole course. The camera
@@ -40,7 +49,8 @@ or approved route. The operational pit's `map.json` and its presets are untouche
   **AREA** opens a north-up South Norwalk overview; **ALL** frames the fleet once.
   Manual pan and pinch zoom preserve the selected orientation. These controls
   affect presentation only.
-- Buildings use thin, subdued outlines from the same OSM extract. All kart trails
+- Buildings use thin, subdued outlines and faint fills from the same OSM extract.
+  Place labels stay at a fixed screen size; rail corridors use two thin, lightly dashed lines. All kart trails
   draw before all numbered circles, so a later trail cannot cross over a label.
 - Supporting readings show existing pack voltage, electrical RPM, ESC temperature
   and input power calculated from reported battery current × voltage. Missing or
@@ -61,7 +71,8 @@ or approved route. The operational pit's `map.json` and its presets are untouche
 `retro.css` contains this presentation layer. `instruments.js` reads the same
 state as the existing display and makes no network requests. DSEG fonts by
 [keshikan](https://github.com/keshikan/DSEG) (v0.46, SIL Open Font License 1.1)
-are embedded unchanged in `font-segments.css`; the license is bundled beside it.
+are embedded unchanged in `font-segments.css`, including the original Classic
+Bold face; the license is bundled beside it.
 There is no online font service or new server dependency.
 
 Map sources, rebuilding and attribution are in
@@ -88,5 +99,9 @@ The later camera/typography refinement also checks stable course framing during
 moving telemetry, North up off by default, orientation-preserving pan, complete
 track visibility, a mathematically semicircular gauge and trail-before-marker
 paint order. Vehicle command handlers remain unchanged.
+The bold instrument revision checks every speed from 0 through 199 for optical
+centering and arc clearance, verifies that the normal instrument panel fits
+without scrolling at 1024×600, and checks that all 35 route segments coincide
+with source-map streets and all fake karts use that same path.
 These are simulator checks; physical screen performance, touch and outdoor
 readability require later hardware review.
